@@ -181,14 +181,31 @@ export class SlackCodexWorkersService extends EventEmitter {
       const errorText = error instanceof Error ? error.message : String(error);
       this.store.markInboundMessageFailed(messageKey, errorText);
       logWarn("failed to process inbound Slack message", { messageKey, error: errorText });
-      if (!context.isDm && !parseSlashCommand(context.text)) {
-        await this.setThreadStatusReaction(
-          context.channelId,
-          context.threadTs ?? context.ts,
-          STATUS_REACTIONS.failed,
-        );
+      try {
+        if (!context.isDm && !parseSlashCommand(context.text)) {
+          await this.setThreadStatusReaction(
+            context.channelId,
+            context.threadTs ?? context.ts,
+            STATUS_REACTIONS.failed,
+          );
+        }
+        await this.postInboundFailureNotice(context, record, errorText);
+      } catch (sideEffectError) {
+        const sideEffectText = sideEffectError instanceof Error ? sideEffectError.message : String(sideEffectError);
+        if (isSlackMessageNotFoundError(sideEffectError)) {
+          const quarantineReason = `Slack message no longer exists for retry: ${sideEffectText}`;
+          this.store.markInboundMessageRejected(messageKey, quarantineReason);
+          logWarn("quarantined stale inbound replay after Slack message disappeared", {
+            messageKey,
+            error: sideEffectText,
+          });
+          return;
+        }
+        logWarn("failed to report inbound Slack message failure", {
+          messageKey,
+          error: sideEffectText,
+        });
       }
-      await this.postInboundFailureNotice(context, record, errorText);
     }
   }
 
@@ -1634,6 +1651,13 @@ function formatUploadResult(files: SlackUploadedFile[]): string {
     .map((file) => file.title ?? file.name)
     .join(", ");
   return `Uploaded ${files.length} file${files.length === 1 ? "" : "s"} to Slack: ${summary}`;
+}
+
+function isSlackMessageNotFoundError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const maybeError = error as { message?: unknown; data?: { error?: unknown } };
+  return maybeError.data?.error === "message_not_found"
+    || (typeof maybeError.message === "string" && maybeError.message.includes("message_not_found"));
 }
 
 function isManuallyBlockedStatus(status: SessionStatus): boolean {

@@ -262,6 +262,46 @@ describe("service lifecycle decisions", () => {
     store.close();
   });
 
+  it("quarantines stale replay rows when Slack says the message no longer exists", async () => {
+    const { service, slack, codex, store } = await createService();
+    codex.createWorkerThread.mockRejectedValue(new Error("boom"));
+    slack.setStatusReaction.mockRejectedValueOnce({
+      message: "An API error occurred: message_not_found",
+      data: { error: "message_not_found" },
+    });
+
+    const context: SlackMessageContext = {
+      teamId: "T1",
+      channelId: "C1",
+      channelType: "channel",
+      userId: "U1",
+      username: "alice",
+      text: "hello",
+      ts: "5.000",
+      threadTs: null,
+      isDm: false,
+      files: [],
+    };
+    store.createOrGetInboundMessage({
+      key: "msg-stale",
+      teamId: "T1",
+      channelId: "C1",
+      messageTs: "5.000",
+      rootTs: "5.000",
+      kind: "channel-root",
+      payloadJson: JSON.stringify(context),
+    });
+
+    await expect(service.processInboundMessage("msg-stale")).resolves.toBeUndefined();
+
+    const record = store.getInboundMessage("msg-stale");
+    expect(record?.status).toBe("failed");
+    expect(record?.retryable).toBe(false);
+    expect(record?.lastError).toContain("Slack message no longer exists for retry");
+    expect(slack.postThreadReply).not.toHaveBeenCalled();
+    store.close();
+  });
+
   it("requests worker interruption and posts requested plus confirmed system messages", async () => {
     const { service, slack, codex, store } = await createService();
     const worker = createWorker(service, {
