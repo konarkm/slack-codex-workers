@@ -24,6 +24,12 @@ interface UserInfoResponse {
   };
 }
 
+interface SlackApiErrorLike {
+  data?: {
+    error?: string;
+  };
+}
+
 export class SlackGateway {
   readonly app: App;
   private readonly userNameCache = new Map<string, string>();
@@ -123,6 +129,14 @@ export class SlackGateway {
     return this.postTopLevelMessage(channelId, text);
   }
 
+  async setStatusReaction(channelId: string, messageTs: string, emoji: string): Promise<void> {
+    for (const candidate of ["eyes", "hourglass_flowing_sand", "white_check_mark", "x", "no_entry_sign"]) {
+      if (candidate === emoji) continue;
+      await this.removeReaction(channelId, messageTs, candidate);
+    }
+    await this.addReaction(channelId, messageTs, emoji);
+  }
+
   async listChannels(teamId: string, query?: string): Promise<ChannelRecord[]> {
     const channels: ChannelRecord[] = [];
     let cursor: string | undefined;
@@ -183,5 +197,35 @@ export class SlackGateway {
       if (!id || !name || !mimetype || !urlPrivateDownload) return [];
       return [{ id, name, mimetype, urlPrivateDownload }];
     });
+  }
+
+  private async addReaction(channelId: string, messageTs: string, emoji: string): Promise<void> {
+    try {
+      await this.app.client.reactions.add({
+        token: this.config.slackBotToken,
+        channel: channelId,
+        timestamp: messageTs,
+        name: emoji,
+      });
+    } catch (error) {
+      const slackError = (error as SlackApiErrorLike | undefined)?.data?.error;
+      if (slackError === "already_reacted") return;
+      throw error;
+    }
+  }
+
+  private async removeReaction(channelId: string, messageTs: string, emoji: string): Promise<void> {
+    try {
+      await this.app.client.reactions.remove({
+        token: this.config.slackBotToken,
+        channel: channelId,
+        timestamp: messageTs,
+        name: emoji,
+      });
+    } catch (error) {
+      const slackError = (error as SlackApiErrorLike | undefined)?.data?.error;
+      if (slackError === "no_reaction") return;
+      throw error;
+    }
   }
 }

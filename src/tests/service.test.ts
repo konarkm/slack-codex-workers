@@ -47,6 +47,7 @@ async function createService() {
     postThreadReply: vi.fn().mockResolvedValue("reply-ts"),
     postTopLevelMessage: vi.fn().mockResolvedValue("root-ts"),
     updateMessage: vi.fn().mockResolvedValue(undefined),
+    setStatusReaction: vi.fn().mockResolvedValue(undefined),
     start: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn().mockResolvedValue(undefined),
     app: { event: vi.fn() },
@@ -275,6 +276,23 @@ describe("service lifecycle decisions", () => {
     expect(updated?.status).toBe("interrupted");
     expect(updated?.lastError).toBeNull();
     store.close();
+  });
+
+  it("updates only the root reaction as a thread reply progresses", async () => {
+    const { service, slack } = await createService();
+    const worker = createWorker(service, {
+      status: "running",
+      activeTurnId: "turn-1",
+      lastInboundMessageTs: "2.000",
+    });
+
+    await service.onWorkerTurnStarted(worker.key);
+    await service.onWorkerCompleted(worker.key, "Done.", "completed");
+
+    expect(slack.setStatusReaction.mock.calls).toEqual([
+      ["C1", "1.000", "hourglass_flowing_sand"],
+      ["C1", "1.000", "white_check_mark"],
+    ]);
   });
 
   it("requests DM interruption and posts requested plus confirmed system messages", async () => {

@@ -37,6 +37,13 @@ type InboundHandlingResult =
 
 const BLOCKED_RUNNING_TURN_POLL_INTERVAL_MS = 2_000;
 const BLOCKED_RUNNING_TURN_POLL_WINDOW_MS = 30_000;
+const STATUS_REACTIONS = {
+  seen: "eyes",
+  running: "hourglass_flowing_sand",
+  completed: "white_check_mark",
+  failed: "x",
+  interrupted: "no_entry_sign",
+} as const;
 
 export class SlackCodexWorkersService extends EventEmitter {
   private readonly store: Store;
@@ -104,6 +111,9 @@ export class SlackCodexWorkersService extends EventEmitter {
       kind,
       payloadJson: JSON.stringify(context),
     });
+    if (!context.isDm && !parseSlashCommand(context.text)) {
+      await this.setThreadStatusReaction(context.channelId, context.threadTs ?? context.ts, STATUS_REACTIONS.seen);
+    }
     await this.processInboundMessage(messageKey);
   }
 
@@ -171,6 +181,13 @@ export class SlackCodexWorkersService extends EventEmitter {
       const errorText = error instanceof Error ? error.message : String(error);
       this.store.markInboundMessageFailed(messageKey, errorText);
       logWarn("failed to process inbound Slack message", { messageKey, error: errorText });
+      if (!context.isDm && !parseSlashCommand(context.text)) {
+        await this.setThreadStatusReaction(
+          context.channelId,
+          context.threadTs ?? context.ts,
+          STATUS_REACTIONS.failed,
+        );
+      }
       await this.postInboundFailureNotice(context, record, errorText);
     }
   }
@@ -570,6 +587,9 @@ export class SlackCodexWorkersService extends EventEmitter {
           input,
           worker.settings,
           {
+            onTurnStarted: async () => {
+              await this.onWorkerTurnStarted(worker.key);
+            },
             onAgentDelta: async ({ itemId, delta }) => {
               await this.onWorkerAgentDelta(worker.key, itemId, delta);
             },
@@ -628,6 +648,9 @@ export class SlackCodexWorkersService extends EventEmitter {
           input,
           latestSession.settings,
           {
+            onTurnStarted: async () => {
+              await this.onDmTurnStarted(latestSession.teamId, latestSession.userId);
+            },
             onAgentDelta: async ({ itemId, delta }) => {
               await this.onDmAgentDelta(latestSession.teamId, latestSession.userId, itemId, delta);
             },
@@ -670,6 +693,15 @@ export class SlackCodexWorkersService extends EventEmitter {
     void workerKey;
     void itemId;
     void delta;
+  }
+
+  private async onWorkerTurnStarted(workerKey: string): Promise<void> {
+    const worker = this.requireWorker(workerKey);
+    await this.setThreadStatusReaction(
+      worker.channelId,
+      worker.rootTs,
+      STATUS_REACTIONS.running,
+    );
   }
 
   private async onWorkerAgentMessage(workerKey: string, itemId: string, text: string): Promise<void> {
@@ -721,6 +753,15 @@ export class SlackCodexWorkersService extends EventEmitter {
       pendingRequest: null,
       lastError: status === "interrupted" ? null : error ?? (status === "completed" ? null : `Turn ${status}`),
     });
+    await this.setThreadStatusReaction(
+      worker.channelId,
+      worker.rootTs,
+      status === "completed"
+        ? STATUS_REACTIONS.completed
+        : status === "interrupted"
+          ? STATUS_REACTIONS.interrupted
+          : STATUS_REACTIONS.failed,
+    );
   }
 
   private async onDmAgentDelta(teamId: string, userId: string, itemId: string, delta: string): Promise<void> {
@@ -728,6 +769,14 @@ export class SlackCodexWorkersService extends EventEmitter {
     void userId;
     void itemId;
     void delta;
+  }
+
+  private async onDmTurnStarted(teamId: string, userId: string): Promise<void> {
+    const session = this.requireDmSession(teamId, userId);
+    if (!session.lastInboundMessageTs) return;
+    await this.enqueueSlackWrite(this.getDmQueueKey(teamId, userId), async () => {
+      await this.slack.setStatusReaction(session.channelId, session.lastInboundMessageTs!, STATUS_REACTIONS.running);
+    });
   }
 
   private async onDmAgentMessage(teamId: string, userId: string, itemId: string, text: string): Promise<void> {
@@ -779,6 +828,19 @@ export class SlackCodexWorkersService extends EventEmitter {
       pendingRequest: null,
       lastError: status === "interrupted" ? null : error ?? (status === "completed" ? null : `Turn ${status}`),
     });
+    if (session.lastInboundMessageTs) {
+      await this.enqueueSlackWrite(this.getDmQueueKey(teamId, userId), async () => {
+        await this.slack.setStatusReaction(
+          session.channelId,
+          session.lastInboundMessageTs!,
+          status === "completed"
+            ? STATUS_REACTIONS.completed
+            : status === "interrupted"
+              ? STATUS_REACTIONS.interrupted
+              : STATUS_REACTIONS.failed,
+        );
+      });
+    }
   }
 
   private getRenderState(key: string): RenderSessionState {
@@ -813,6 +875,12 @@ export class SlackCodexWorkersService extends EventEmitter {
     const text = final ? (pending.text || "Done.") : pending.text;
     await this.enqueueSlackWrite(this.getDmQueueKey(teamId, userId), async () => {
       await this.slack.postTopLevelMessage(session.channelId, text);
+    });
+  }
+
+  private async setThreadStatusReaction(channelId: string, rootTs: string, emoji: string): Promise<void> {
+    await this.enqueueSlackWrite(`reactions:${channelId}:${rootTs}`, async () => {
+      await this.slack.setStatusReaction(channelId, rootTs, emoji);
     });
   }
 

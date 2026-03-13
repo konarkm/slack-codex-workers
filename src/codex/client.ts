@@ -26,6 +26,7 @@ interface ActiveTurnState {
 }
 
 export interface TurnHandlers {
+  onTurnStarted(event: { threadId: string; turnId: string }): void | Promise<void>;
   onAgentDelta(event: { itemId: string; delta: string }): void | Promise<void>;
   onAgentMessage(event: { itemId: string; text: string }): void | Promise<void>;
   onWorklogItem(event: WorklogItem): void | Promise<void>;
@@ -222,6 +223,16 @@ export class CodexClient {
   }
 
   private async handleNotification(event: RpcNotification): Promise<void> {
+    if (event.method === "turn/started") {
+      const params = event.params as Record<string, unknown>;
+      const turn = (params.turn ?? {}) as Record<string, unknown>;
+      const turnId = typeof turn.id === "string" ? turn.id : "";
+      const active = this.activeTurns.get(turnId);
+      if (!active) return;
+      await active.handlers.onTurnStarted({ threadId: active.threadId, turnId });
+      return;
+    }
+
     if (event.method === "item/agentMessage/delta") {
       const params = event.params as Record<string, unknown>;
       const turnId = typeof params.turnId === "string" ? params.turnId : "";
