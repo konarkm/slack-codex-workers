@@ -14,7 +14,7 @@ const configSchema = z.object({
   slackAppToken: z.string().min(1),
   slackSigningSecret: z.string().min(1).default("unused-for-socket-mode"),
   codexBin: z.string().min(1).default("codex"),
-  codexCwd: z.string().min(1).default(fallbackWorkspaceRoot),
+  workspaceRoot: z.string().min(1).default(fallbackWorkspaceRoot),
   databasePath: z.string().min(1).default(path.join(defaultStateDir, "bridge.sqlite")),
   adminUserIds: z.array(z.string().min(1)).default([]),
   allowedTeamId: z.string().min(1).nullable().default(null),
@@ -34,14 +34,14 @@ const configSchema = z.object({
 export type AppConfig = z.infer<typeof configSchema>;
 
 export function loadConfig(): AppConfig {
-  const workspaceRoot = process.env.CODEX_CWD ?? process.cwd();
+  const workspaceRoot = process.env.WORKSPACE_ROOT ?? process.env.CODEX_CWD ?? process.cwd();
   const stateDir = path.join(workspaceRoot, ".slack-codex-workers");
   const raw = {
     slackBotToken: process.env.SLACK_BOT_TOKEN,
     slackAppToken: process.env.SLACK_APP_TOKEN,
     slackSigningSecret: process.env.SLACK_SIGNING_SECRET ?? "unused-for-socket-mode",
     codexBin: process.env.CODEX_BIN ?? "codex",
-    codexCwd: workspaceRoot,
+    workspaceRoot,
     databasePath: process.env.DATABASE_PATH ?? path.join(stateDir, "bridge.sqlite"),
     adminUserIds: splitCsv(process.env.SLACK_ADMIN_USER_IDS),
     allowedTeamId: process.env.SLACK_ALLOWED_TEAM_ID ?? null,

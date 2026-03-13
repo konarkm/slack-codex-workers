@@ -24,7 +24,7 @@ function makeConfig(dir: string): AppConfig {
     slackAppToken: "xapp-test",
     slackSigningSecret: "unused",
     codexBin: "codex",
-    codexCwd: dir,
+    workspaceRoot: dir,
     databasePath: path.join(dir, "test.db"),
     adminUserIds: ["U-admin"],
     allowedTeamId: null,

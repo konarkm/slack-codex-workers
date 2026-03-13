@@ -87,10 +87,11 @@ Key variables:
 - `SLACK_APP_TOKEN`: Socket Mode app token
 - `SLACK_ADMIN_USER_IDS`: comma-separated Slack user IDs allowed to use DM admin controls
 - `SLACK_ALLOWED_TEAM_ID`: optional hard guard for one workspace
-- `CODEX_CWD`: canonical workspace root. Codex runs here, and bridge state defaults under `CODEX_CWD/.slack-codex-workers/`
-- `DATABASE_PATH`: optional SQLite override. Default: `CODEX_CWD/.slack-codex-workers/bridge.sqlite`
+- `WORKSPACE_ROOT`: canonical workspace root. Codex runs here, and bridge state defaults under `WORKSPACE_ROOT/.slack-codex-workers/`
+- `CODEX_CWD`: legacy alias for `WORKSPACE_ROOT`; still accepted for compatibility, but `WORKSPACE_ROOT` is the preferred env var
+- `DATABASE_PATH`: optional SQLite override. Default: `WORKSPACE_ROOT/.slack-codex-workers/bridge.sqlite`
 - `SUPERVISOR_RESTART_ENABLED`: set automatically by `./scripts/launch.sh`; only override it if you know what you are doing
-- `ATTACHMENT_STORAGE_DIR`: optional attachment storage override. Default: `CODEX_CWD/.slack-codex-workers/attachments`
+- `ATTACHMENT_STORAGE_DIR`: optional attachment storage override. Default: `WORKSPACE_ROOT/.slack-codex-workers/attachments`
 - `ATTACHMENT_MAX_BYTES`: per-file cap in bytes
 - `ATTACHMENT_TOTAL_MAX_BYTES`: total cap per Slack message in bytes; set to `off` for no total cap
 - `ATTACHMENT_DOWNLOAD_TIMEOUT_MS`: timeout per file download
@@ -127,8 +128,8 @@ For a supervised production build:
 ## Behavior Notes
 
 - The server repo is just the bridge code. Runtime state lives under the configured workspace root:
-  - SQLite: `CODEX_CWD/.slack-codex-workers/bridge.sqlite`
-  - downloaded Slack files: `CODEX_CWD/.slack-codex-workers/attachments/`
+  - SQLite: `WORKSPACE_ROOT/.slack-codex-workers/bridge.sqlite`
+  - downloaded Slack files: `WORKSPACE_ROOT/.slack-codex-workers/attachments/`
 - You can override those paths explicitly, but the default mental model is “all session state belongs to the workspace.”
 
 - Channel roots create workers keyed by `(teamId, channelId, rootTs)`.

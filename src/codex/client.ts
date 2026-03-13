@@ -211,9 +211,9 @@ export class CodexClient {
 
   async reconcileThreadForSend(threadId: string): Promise<ThreadRunState> {
     try {
-      const raw = await this.rpc.request<unknown>("thread/resume", {
+      const raw = await this.rpc.request<unknown>("thread/read", {
         threadId,
-        persistExtendedHistory: true,
+        includeTurns: false,
       });
       const parsed = threadReadSchema.parse(raw);
       const status = normalizeThreadStatus(parsed.thread.status);

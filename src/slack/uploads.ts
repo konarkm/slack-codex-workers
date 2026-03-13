@@ -27,7 +27,7 @@ export async function validateSlackUploadFiles(
   }
 
   const allowedRoots = await Promise.all([
-    normalizeRoot(config.codexCwd),
+    normalizeRoot(config.workspaceRoot),
     normalizeRoot(config.attachmentStorageDir),
     normalizeRoot(os.tmpdir()),
   ]);
@@ -36,7 +36,7 @@ export async function validateSlackUploadFiles(
   for (const file of files) {
     const resolvedPath = path.isAbsolute(file.path)
       ? file.path
-      : path.resolve(config.codexCwd, file.path);
+      : path.resolve(config.workspaceRoot, file.path);
     const realPath = await fs.realpath(resolvedPath).catch(() => null);
     if (!realPath) {
       throw new Error(`File does not exist: ${file.path}`);
@@ -73,4 +73,3 @@ function isUnderAnyRoot(candidatePath: string, roots: string[]): boolean {
     return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
   });
 }
-

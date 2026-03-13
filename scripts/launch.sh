@@ -14,14 +14,14 @@ if [[ -f "${ROOT_DIR}/.env" ]]; then
   set +a
 fi
 
-CODEX_CWD="${CODEX_CWD:-${ROOT_DIR}}"
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-${CODEX_CWD:-${ROOT_DIR}}}"
 CODEX_BIN="${CODEX_BIN:-codex}"
-STATE_DIR="${CODEX_CWD}/.slack-codex-workers"
+STATE_DIR="${WORKSPACE_ROOT}/.slack-codex-workers"
 LOCK_DIR="${STATE_DIR}"
 LOCK_FILE="${LOCK_DIR}/launcher.lock"
 RESTART_EXIT_CODE=42
 
-required_vars=(SLACK_BOT_TOKEN SLACK_APP_TOKEN SLACK_ADMIN_USER_IDS CODEX_CWD)
+required_vars=(SLACK_BOT_TOKEN SLACK_APP_TOKEN SLACK_ADMIN_USER_IDS WORKSPACE_ROOT)
 for name in "${required_vars[@]}"; do
   if [[ -z "${!name:-}" ]]; then
     echo "missing required env var: ${name}" >&2
@@ -48,7 +48,8 @@ fi
 cd "${ROOT_DIR}"
 export SUPERVISOR_RESTART_ENABLED=1
 export LAUNCH_MODE="${MODE}"
-export CODEX_CWD
+export WORKSPACE_ROOT
+export CODEX_CWD="${WORKSPACE_ROOT}"
 export CODEX_BIN
 
 if [[ "${MODE}" == "prod" ]]; then

@@ -13,7 +13,7 @@ function makeConfig(dir: string): AppConfig {
     slackAppToken: "xapp-test",
     slackSigningSecret: "unused",
     codexBin: "codex",
-    codexCwd: dir,
+    workspaceRoot: dir,
     databasePath: path.join(dir, "test.db"),
     adminUserIds: ["U-admin"],
     allowedTeamId: null,
@@ -53,7 +53,7 @@ afterEach(async () => {
 });
 
 describe("validateSlackUploadFiles", () => {
-  it("accepts relative paths under CODEX_CWD", async () => {
+  it("accepts relative paths under the workspace root", async () => {
     const dir = await createDir();
     const config = makeConfig(dir);
     const artifactPath = path.join(dir, "artifact.txt");

@@ -70,7 +70,7 @@ export class SlackCodexWorkersService extends EventEmitter {
   constructor(private readonly config: AppConfig) {
     super();
     this.store = new Store(config.databasePath);
-    this.codex = new CodexClient(config.codexBin, config.codexCwd);
+    this.codex = new CodexClient(config.codexBin, config.workspaceRoot);
     this.slack = new SlackGateway(config);
     this.codex.registerDynamicToolHandlers({
       listChannels: async (args, ctx) => this.handleListChannelsTool(args.query ?? "", ctx),
@@ -1142,7 +1142,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       `queued_restart: ${pendingRestart ? `${pendingRestart.target} @ ${pendingRestart.requestedAt}` : "(none)"}`,
     ];
     if (includeHealth) {
-      lines.push(`workspace_root: ${this.config.codexCwd}`);
+      lines.push(`workspace_root: ${this.config.workspaceRoot}`);
       lines.push(`database_path: ${this.config.databasePath}`);
       lines.push(`attachment_storage: ${this.config.attachmentStorageDir}`);
       lines.push(`codex_process: ${this.codex.isRunning() ? "running" : "down"}`);
@@ -1172,7 +1172,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       `queued_restart: ${pendingRestart ? `${pendingRestart.target} @ ${pendingRestart.requestedAt}` : "(none)"}`,
     ];
     if (includeHealth) {
-      lines.push(`workspace_root: ${this.config.codexCwd}`);
+      lines.push(`workspace_root: ${this.config.workspaceRoot}`);
       lines.push(`database_path: ${this.config.databasePath}`);
       lines.push(`attachment_storage: ${this.config.attachmentStorageDir}`);
       lines.push(`supervisor_restart: ${this.config.supervisorRestartEnabled ? "enabled" : "disabled"}`);
