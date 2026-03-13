@@ -47,6 +47,7 @@ async function createService() {
     postThreadReply: vi.fn().mockResolvedValue("reply-ts"),
     postTopLevelMessage: vi.fn().mockResolvedValue("root-ts"),
     updateMessage: vi.fn().mockResolvedValue(undefined),
+    addRootReaction: vi.fn().mockResolvedValue(undefined),
     setStatusReaction: vi.fn().mockResolvedValue(undefined),
     start: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn().mockResolvedValue(undefined),
@@ -90,6 +91,7 @@ function createWorker(service: any, overrides: Partial<WorkerRecord> = {}): Work
     currentAgentItemId: null,
     currentWorklogSlackTs: null,
     settings: { model: "gpt-5.4", effort: "high" },
+    identity: { username: "Gear", iconEmoji: "gear" },
     parentWorkerKey: null,
     lastError: null,
     lastInboundMessageTs: null,
@@ -295,6 +297,41 @@ describe("service lifecycle decisions", () => {
     ]);
   });
 
+  it("adds the worker identity reaction before the seen status on a new root message", async () => {
+    const { service, slack, codex, store } = await createService();
+    codex.createWorkerThread.mockResolvedValue({ threadId: "thread-2" });
+
+    const context: SlackMessageContext = {
+      teamId: "T1",
+      channelId: "C1",
+      channelType: "channel",
+      userId: "U1",
+      username: "alice",
+      text: "hello",
+      ts: "5.000",
+      threadTs: null,
+      isDm: false,
+      files: [],
+    };
+    store.createOrGetInboundMessage({
+      key: "msg-root",
+      teamId: "T1",
+      channelId: "C1",
+      messageTs: "5.000",
+      rootTs: "5.000",
+      kind: "channel-root",
+      payloadJson: JSON.stringify(context),
+    });
+    codex.startTurnWithResumeFallback.mockResolvedValue("turn-2");
+
+    await service.processInboundMessage("msg-root");
+
+    expect(slack.addRootReaction).toHaveBeenCalledWith("C1", "5.000", expect.any(String));
+    expect(slack.setStatusReaction).toHaveBeenCalledWith("C1", "5.000", "eyes");
+    expect(slack.addRootReaction.mock.invocationCallOrder[0]).toBeLessThan(slack.setStatusReaction.mock.invocationCallOrder[0]);
+    store.close();
+  });
+
   it("requests DM interruption and posts requested plus confirmed system messages", async () => {
     const { service, slack, codex, store } = await createService();
     createDmSession(service, {
@@ -327,7 +364,7 @@ describe("service lifecycle decisions", () => {
     await service.onWorkerCompleted("T1:C1:1.000", "", "interrupted");
 
     expect(slack.postThreadReply.mock.calls).toEqual([
-      ["C1", "1.000", "Checking the repo now."],
+      ["C1", "1.000", "Checking the repo now.", { username: "Gear", iconEmoji: "gear" }],
       ["C1", "1.000", "_System_: Turn interrupted."],
     ]);
     const updated = store.getWorkerByKey("T1:C1:1.000");
@@ -354,13 +391,35 @@ describe("service lifecycle decisions", () => {
     await service.onWorkerCompleted("T1:C1:1.000", "San Francisco is 58 F and clear.", "completed");
 
     expect(slack.postThreadReply.mock.calls).toEqual([
-      ["C1", "1.000", "Checking weather now."],
-      ["C1", "1.000", ":white_check_mark: Web Search"],
-      ["C1", "1.000", "<@U1> San Francisco is 58 F and clear."],
+      ["C1", "1.000", "Checking weather now.", { username: "Gear", iconEmoji: "gear" }],
+      ["C1", "1.000", ":white_check_mark: Web Search", { username: "Gear", iconEmoji: "gear" }],
+      ["C1", "1.000", "<@U1> San Francisco is 58 F and clear.", { username: "Gear", iconEmoji: "gear" }],
     ]);
     expect(slack.updateMessage).not.toHaveBeenCalled();
     const updated = store.getWorkerByKey("T1:C1:1.000");
     expect(updated?.currentAgentSlackTs).toBeNull();
+    store.close();
+  });
+
+  it("backfills a worker identity before posting worker-authored messages", async () => {
+    const { service, slack, store } = await createService();
+    createWorker(service, {
+      identity: null,
+      status: "running",
+      activeTurnId: "turn-1",
+    });
+
+    await service.onWorkerAgentMessage("T1:C1:1.000", "agent-1", "Checking weather now.");
+    await service.onWorkerCompleted("T1:C1:1.000", "Checking weather now.", "completed");
+
+    const updated = store.getWorkerByKey("T1:C1:1.000");
+    expect(updated?.identity).not.toBeNull();
+    expect(slack.postThreadReply).toHaveBeenLastCalledWith(
+      "C1",
+      "1.000",
+      "<@U1> Checking weather now.",
+      expect.objectContaining({ username: expect.any(String), iconEmoji: expect.any(String) }),
+    );
     store.close();
   });
 

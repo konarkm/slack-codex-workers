@@ -2,7 +2,7 @@ import { App } from "@slack/bolt";
 import type { AppConfig } from "../config.js";
 import { logInfo } from "../logger.js";
 import { normalizeSlackMrkdwn } from "./renderer.js";
-import type { ChannelRecord, SlackFileRef } from "../types.js";
+import type { ChannelRecord, SlackFileRef, WorkerIdentity } from "../types.js";
 
 interface ConversationsListResponse {
   channels?: Array<{ id?: string; name?: string; is_private?: boolean; is_member?: boolean }>;
@@ -83,7 +83,7 @@ export class SlackGateway {
     return name;
   }
 
-  async postThreadReply(channelId: string, threadTs: string, text: string): Promise<string> {
+  async postThreadReply(channelId: string, threadTs: string, text: string, identity?: WorkerIdentity | null): Promise<string> {
     const normalized = normalizeSlackMrkdwn(text);
     const response = await this.app.client.chat.postMessage({
       token: this.config.slackBotToken,
@@ -91,6 +91,8 @@ export class SlackGateway {
       thread_ts: threadTs,
       text: normalized,
       mrkdwn: true,
+      username: identity?.username,
+      icon_emoji: identity ? `:${identity.iconEmoji}:` : undefined,
     }) as PostMessageResponse;
     if (!response.ts) {
       throw new Error("Slack did not return a ts for thread reply");
@@ -108,13 +110,15 @@ export class SlackGateway {
     });
   }
 
-  async postTopLevelMessage(channelId: string, text: string): Promise<string> {
+  async postTopLevelMessage(channelId: string, text: string, identity?: WorkerIdentity | null): Promise<string> {
     const normalized = normalizeSlackMrkdwn(text);
     const response = await this.app.client.chat.postMessage({
       token: this.config.slackBotToken,
       channel: channelId,
       text: normalized,
       mrkdwn: true,
+      username: identity?.username,
+      icon_emoji: identity ? `:${identity.iconEmoji}:` : undefined,
     }) as PostMessageResponse;
     if (!response.ts) {
       throw new Error("Slack did not return a ts for top-level post");
@@ -122,11 +126,11 @@ export class SlackGateway {
     return response.ts;
   }
 
-  async postMessage(channelId: string, text: string, threadTs?: string | null): Promise<string> {
+  async postMessage(channelId: string, text: string, threadTs?: string | null, identity?: WorkerIdentity | null): Promise<string> {
     if (threadTs) {
-      return this.postThreadReply(channelId, threadTs, text);
+      return this.postThreadReply(channelId, threadTs, text, identity);
     }
-    return this.postTopLevelMessage(channelId, text);
+    return this.postTopLevelMessage(channelId, text, identity);
   }
 
   async setStatusReaction(channelId: string, messageTs: string, emoji: string): Promise<void> {
@@ -134,6 +138,10 @@ export class SlackGateway {
       if (candidate === emoji) continue;
       await this.removeReaction(channelId, messageTs, candidate);
     }
+    await this.addReaction(channelId, messageTs, emoji);
+  }
+
+  async addRootReaction(channelId: string, messageTs: string, emoji: string): Promise<void> {
     await this.addReaction(channelId, messageTs, emoji);
   }
 

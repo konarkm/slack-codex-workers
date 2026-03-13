@@ -10,6 +10,7 @@ import type {
   RuntimeSettings,
   SessionStatus,
   TeamDefaults,
+  WorkerIdentity,
   WorkerRecord,
 } from "../types.js";
 
@@ -36,6 +37,21 @@ function parsePendingRequest(value: string | null | undefined): PendingRequestSt
   if (!value) return null;
   try {
     return JSON.parse(value) as PendingRequestState;
+  } catch {
+    return null;
+  }
+}
+
+function parseIdentity(value: string | null | undefined): WorkerIdentity | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as Partial<WorkerIdentity>;
+    if (typeof parsed.username !== "string" || !parsed.username.trim()) return null;
+    if (typeof parsed.iconEmoji !== "string" || !parsed.iconEmoji.trim()) return null;
+    return {
+      username: parsed.username,
+      iconEmoji: parsed.iconEmoji,
+    };
   } catch {
     return null;
   }
@@ -75,6 +91,7 @@ export class Store {
         current_agent_item_id TEXT,
         current_worklog_slack_ts TEXT,
         settings_json TEXT NOT NULL,
+        identity_json TEXT,
         parent_worker_key TEXT,
         last_error TEXT,
         last_inbound_message_ts TEXT,
@@ -153,6 +170,7 @@ export class Store {
     this.ensureColumn("workers", "last_error", "TEXT");
     this.ensureColumn("workers", "last_inbound_message_ts", "TEXT");
     this.ensureColumn("workers", "pending_request_json", "TEXT");
+    this.ensureColumn("workers", "identity_json", "TEXT");
     this.ensureColumn("dm_sessions", "channel_id", "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn("dm_sessions", "status", "TEXT NOT NULL DEFAULT 'idle'");
     this.ensureColumn("dm_sessions", "last_error", "TEXT");
@@ -204,9 +222,9 @@ export class Store {
     this.db.prepare(`
       INSERT INTO workers (
         key, team_id, channel_id, root_ts, app_thread_id, active_turn_id, owner_user_id, root_owner_user_id,
-        status, current_agent_slack_ts, current_agent_item_id, current_worklog_slack_ts, settings_json,
+        status, current_agent_slack_ts, current_agent_item_id, current_worklog_slack_ts, settings_json, identity_json,
         parent_worker_key, last_error, last_inbound_message_ts, pending_request_json, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(team_id, channel_id, root_ts) DO UPDATE SET
         app_thread_id=excluded.app_thread_id,
         active_turn_id=excluded.active_turn_id,
@@ -217,6 +235,7 @@ export class Store {
         current_agent_item_id=excluded.current_agent_item_id,
         current_worklog_slack_ts=excluded.current_worklog_slack_ts,
         settings_json=excluded.settings_json,
+        identity_json=excluded.identity_json,
         parent_worker_key=excluded.parent_worker_key,
         last_error=excluded.last_error,
         last_inbound_message_ts=excluded.last_inbound_message_ts,
@@ -236,6 +255,7 @@ export class Store {
       input.currentAgentItemId,
       input.currentWorklogSlackTs,
       JSON.stringify(input.settings),
+      input.identity ? JSON.stringify(input.identity) : null,
       input.parentWorkerKey,
       input.lastError,
       input.lastInboundMessageTs,
@@ -569,6 +589,7 @@ export class Store {
       currentAgentItemId: row.current_agent_item_id ? String(row.current_agent_item_id) : null,
       currentWorklogSlackTs: row.current_worklog_slack_ts ? String(row.current_worklog_slack_ts) : null,
       settings: parseSettings(typeof row.settings_json === "string" ? row.settings_json : null),
+      identity: parseIdentity(typeof row.identity_json === "string" ? row.identity_json : null),
       parentWorkerKey: row.parent_worker_key ? String(row.parent_worker_key) : null,
       lastError: row.last_error ? String(row.last_error) : null,
       lastInboundMessageTs: row.last_inbound_message_ts ? String(row.last_inbound_message_ts) : null,

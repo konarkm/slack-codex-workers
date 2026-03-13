@@ -41,6 +41,7 @@ describe("store", () => {
       currentAgentItemId: "item-1",
       currentWorklogSlackTs: "3.000",
       settings: { model: "gpt-5.4", effort: "high" },
+      identity: { username: "Gear", iconEmoji: "gear" },
       parentWorkerKey: null,
       lastError: "oops",
       lastInboundMessageTs: "4.000",

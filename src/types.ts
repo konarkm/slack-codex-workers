@@ -27,6 +27,11 @@ export interface RuntimeSettings {
   effort: ReasoningEffort | null;
 }
 
+export interface WorkerIdentity {
+  username: string;
+  iconEmoji: string;
+}
+
 export type SessionStatus =
   | "idle"
   | "running"
@@ -67,6 +72,7 @@ export interface WorkerRecord {
   currentAgentItemId: string | null;
   currentWorklogSlackTs: string | null;
   settings: RuntimeSettings;
+  identity: WorkerIdentity | null;
   parentWorkerKey: string | null;
   lastError: string | null;
   lastInboundMessageTs: string | null;

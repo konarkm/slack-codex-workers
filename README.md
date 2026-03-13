@@ -55,6 +55,7 @@ Recommended Slack bot scopes:
 - `channels:history`
 - `channels:read`
 - `chat:write`
+- `chat:write.customize`
 - `files:read`
 - `groups:history`
 - `groups:read`
@@ -114,6 +115,7 @@ npm run start:supervised
 - If no turn is active, replies start a fresh turn on the same worker.
 - DM conversations are linear and use one Codex admin thread per admin user.
 - Child workers inherit the root human owner for final mentions.
+- Worker-authored messages use a stable per-thread Slack identity chosen from a curated name and emoji pool.
 - If persisted active-turn state is stale after restart, the bridge clears it and posts a visible system note before continuing.
 - If the backing Codex thread is missing, the Slack thread or admin DM enters recovery-required mode until `/recover` is used.
 - If Codex is still running but the bridge lost the turn id during a crash/restart window, the thread enters a temporary blocked state and polls until the turn settles or recovery is required.

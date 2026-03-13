@@ -13,6 +13,7 @@ import { logInfo, logWarn } from "../logger.js";
 import { prepareSlackAttachments } from "../slack/attachments.js";
 import { appendFileNotes, renderEventMessage, renderFinalMessage, renderSystemMessage } from "../slack/renderer.js";
 import { SlackGateway } from "../slack/slackGateway.js";
+import { assignWorkerIdentity } from "../slack/workerIdentity.js";
 import type {
   DmSessionRecord,
   InboundMessageKind,
@@ -111,9 +112,6 @@ export class SlackCodexWorkersService extends EventEmitter {
       kind,
       payloadJson: JSON.stringify(context),
     });
-    if (!context.isDm && !parseSlashCommand(context.text)) {
-      await this.setThreadStatusReaction(context.channelId, context.threadTs ?? context.ts, STATUS_REACTIONS.seen);
-    }
     await this.processInboundMessage(messageKey);
   }
 
@@ -302,12 +300,16 @@ export class SlackCodexWorkersService extends EventEmitter {
         currentAgentItemId: null,
         currentWorklogSlackTs: null,
         settings: defaults,
+        identity: assignWorkerIdentity(this.store.listWorkers()),
         parentWorkerKey: null,
         lastError: null,
         lastInboundMessageTs: context.ts,
         pendingRequest: null,
       });
+      await this.setWorkerIdentityReaction(worker);
     } else {
+      worker = this.ensureWorkerIdentity(worker);
+      await this.setWorkerIdentityReaction(worker);
       this.store.updateWorkerState(worker.key, {
         lastInboundMessageTs: context.ts,
       });
@@ -321,6 +323,8 @@ export class SlackCodexWorkersService extends EventEmitter {
         return { status: "processed" };
       }
     }
+
+    await this.setThreadStatusReaction(context.channelId, context.ts, STATUS_REACTIONS.seen);
 
     this.store.updateInboundMessageProgress(record.key, {
       workerKey: worker.key,
@@ -350,6 +354,10 @@ export class SlackCodexWorkersService extends EventEmitter {
       await this.resolveWorkerPendingRequest(worker, context);
       return { status: "processed" };
     }
+
+    worker = this.ensureWorkerIdentity(worker);
+    await this.setWorkerIdentityReaction(worker);
+    await this.setThreadStatusReaction(worker.channelId, worker.rootTs, STATUS_REACTIONS.seen);
 
     worker = await this.prepareWorkerForSend(worker);
     if (isManuallyBlockedStatus(worker.status)) {
@@ -712,15 +720,15 @@ export class SlackCodexWorkersService extends EventEmitter {
 
   private async onWorkerWorklogItem(workerKey: string, event: WorklogItem): Promise<void> {
     if (event.status === "started") return;
-    const worker = this.requireWorker(workerKey);
+    const worker = this.ensureWorkerIdentity(this.requireWorker(workerKey));
     await this.flushPendingWorkerAssistant(workerKey, false);
     await this.enqueueSlackWrite(this.getWorkerQueueKey(worker), async () => {
-      await this.slack.postThreadReply(worker.channelId, worker.rootTs, renderEventMessage(event));
+      await this.slack.postThreadReply(worker.channelId, worker.rootTs, renderEventMessage(event), worker.identity);
     });
   }
 
   private async onWorkerCompleted(workerKey: string, assistantText: string, status: string, error?: string | null): Promise<void> {
-    const worker = this.requireWorker(workerKey);
+    const worker = this.ensureWorkerIdentity(this.requireWorker(workerKey));
     const state = this.getRenderState(`worker:${workerKey}`);
     const finalAssistantText = state.pendingAssistant?.text ?? assistantText;
     if (status === "interrupted" && state.pendingAssistant) {
@@ -731,7 +739,7 @@ export class SlackCodexWorkersService extends EventEmitter {
     if (status === "completed") {
       const finalText = renderFinalMessage(worker.rootOwnerUserId, finalAssistantText);
       await this.enqueueSlackWrite(this.getWorkerQueueKey(worker), async () => {
-        await this.slack.postThreadReply(worker.channelId, worker.rootTs, finalText);
+        await this.slack.postThreadReply(worker.channelId, worker.rootTs, finalText, worker.identity);
       });
     } else if (status === "interrupted") {
       await this.enqueueSlackWrite(this.getWorkerQueueKey(worker), async () => {
@@ -740,7 +748,7 @@ export class SlackCodexWorkersService extends EventEmitter {
     } else {
       const finalText = renderFinalMessage(worker.rootOwnerUserId, `Turn ${status}.${error ? ` ${error}` : ""}`);
       await this.enqueueSlackWrite(this.getWorkerQueueKey(worker), async () => {
-        await this.slack.postThreadReply(worker.channelId, worker.rootTs, finalText);
+        await this.slack.postThreadReply(worker.channelId, worker.rootTs, finalText, worker.identity);
       });
     }
 
@@ -855,14 +863,14 @@ export class SlackCodexWorkersService extends EventEmitter {
   }
 
   private async flushPendingWorkerAssistant(workerKey: string, final: boolean): Promise<void> {
-    const worker = this.requireWorker(workerKey);
+    const worker = this.ensureWorkerIdentity(this.requireWorker(workerKey));
     const state = this.getRenderState(`worker:${workerKey}`);
     const pending = state.pendingAssistant;
     if (!pending) return;
     state.pendingAssistant = null;
     const text = final ? renderFinalMessage(worker.rootOwnerUserId, pending.text) : pending.text;
     await this.enqueueSlackWrite(this.getWorkerQueueKey(worker), async () => {
-      await this.slack.postThreadReply(worker.channelId, worker.rootTs, text);
+      await this.slack.postThreadReply(worker.channelId, worker.rootTs, text, worker.identity);
     });
   }
 
@@ -881,6 +889,13 @@ export class SlackCodexWorkersService extends EventEmitter {
   private async setThreadStatusReaction(channelId: string, rootTs: string, emoji: string): Promise<void> {
     await this.enqueueSlackWrite(`reactions:${channelId}:${rootTs}`, async () => {
       await this.slack.setStatusReaction(channelId, rootTs, emoji);
+    });
+  }
+
+  private async setWorkerIdentityReaction(worker: WorkerRecord): Promise<void> {
+    if (!worker.identity) return;
+    await this.enqueueSlackWrite(`reactions:${worker.channelId}:${worker.rootTs}`, async () => {
+      await this.slack.addRootReaction(worker.channelId, worker.rootTs, worker.identity!.iconEmoji);
     });
   }
 
@@ -1040,8 +1055,9 @@ export class SlackCodexWorkersService extends EventEmitter {
       ? await this.slack.resolveChannel(parent.teamId, args.channel, parent.channelId)
       : { teamId: parent.teamId, channelId: parent.channelId, name: "", isPrivate: false, isMember: true, updatedAt: new Date().toISOString() };
 
+    const childIdentity = assignWorkerIdentity(this.store.listWorkers());
     const rootTs = await this.enqueueSlackWrite(`spawn:${parent.key}:${targetChannel.channelId}`, async () =>
-      this.slack.postTopLevelMessage(targetChannel.channelId, args.title),
+      this.slack.postTopLevelMessage(targetChannel.channelId, args.title, childIdentity),
     );
 
     let childThread;
@@ -1072,6 +1088,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       currentAgentItemId: null,
       currentWorklogSlackTs: null,
       settings: parent.settings,
+      identity: childIdentity,
       parentWorkerKey: parent.key,
       lastError: null,
       lastInboundMessageTs: null,
@@ -1562,6 +1579,14 @@ export class SlackCodexWorkersService extends EventEmitter {
     const worker = this.store.getWorkerByKey(workerKey);
     if (!worker) throw new Error(`Missing worker ${workerKey}`);
     return worker;
+  }
+
+  private ensureWorkerIdentity(worker: WorkerRecord): WorkerRecord {
+    if (worker.identity) return worker;
+    return this.store.upsertWorker({
+      ...worker,
+      identity: assignWorkerIdentity(this.store.listWorkers()),
+    });
   }
 
   private requireDmSession(teamId: string, userId: string): DmSessionRecord {
