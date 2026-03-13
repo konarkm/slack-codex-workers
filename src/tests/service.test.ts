@@ -31,6 +31,7 @@ function makeConfig(dir: string): AppConfig {
     messageEditThrottleMs: 1,
     appPort: 3013,
     supervisorRestartEnabled: false,
+    launchMode: "dev",
     attachmentStorageDir: path.join(dir, "attachments"),
     attachmentMaxBytes: 1024 * 1024 * 1024,
     attachmentTotalMaxBytes: null,
@@ -61,7 +62,9 @@ async function createService() {
     resolveChannel: vi.fn(),
   };
   const codex = {
+    isRunning: vi.fn().mockReturnValue(true),
     reconcileThreadForSend: vi.fn(),
+    readThreadStatus: vi.fn(),
     startTurnWithResumeFallback: vi.fn(),
     createWorkerThread: vi.fn(),
     createAdminThread: vi.fn(),
@@ -241,7 +244,7 @@ describe("service lifecycle decisions", () => {
     const updated = store.getDmSession("T1", "U-admin");
     expect(updated?.appThreadId).toBe("dm-thread-1");
     expect(codex.createAdminThread).not.toHaveBeenCalled();
-    expect(response).toContain("Recover is only available");
+    expect(response.response).toContain("Recover is only available");
     expect(slack.postTopLevelMessage).not.toHaveBeenCalled();
     store.close();
   });
@@ -382,10 +385,10 @@ describe("service lifecycle decisions", () => {
       activeTurnId: "turn-1",
     });
 
-    const response = await service.handleDmCommand(service.store.getDmSession("T1", "U-admin"), "stop", []);
+    const result = await service.handleDmCommand(service.store.getDmSession("T1", "U-admin"), "stop", []);
     await service.onDmCompleted("T1", "U-admin", "", "interrupted");
 
-    expect(response).toBe("_System_: Interrupt requested.");
+    expect(result.response).toBe("_System_: Interrupt requested.");
     expect(codex.interruptTurn).toHaveBeenCalledWith("dm-thread-1", "turn-1");
     expect(slack.postTopLevelMessage.mock.calls).toEqual([
       ["D1", "_System_: Turn interrupted."],
@@ -485,6 +488,106 @@ describe("service lifecycle decisions", () => {
       "Here it is",
     );
     expect(result).toContain("Uploaded 1 file");
+    store.close();
+  });
+
+  it("reports thread status and health with thread-specific details", async () => {
+    const { service, slack, codex, store } = await createService();
+    const worker = createWorker(service, {
+      status: "blocked_running_turn",
+      lastError: "waiting on prior turn",
+      lastInboundMessageTs: "9.000",
+    });
+    store.setTeamDefaults("T1", { model: "gpt-5.5", effort: "medium" });
+    store.setPendingRestart({
+      target: "both",
+      teamId: "T1",
+      userId: "U-admin",
+      channelId: "D1",
+      requestedAt: "2026-03-12T12:00:00.000Z",
+    });
+    codex.readThreadStatus.mockResolvedValue("idle");
+
+    await service.handleThreadCommand(worker, "status", []);
+    await service.handleThreadCommand(worker, "health", []);
+
+    expect(slack.postThreadReply.mock.calls[0]?.[2]).toContain("effective_model: gpt-5.4 (thread override)");
+    expect(slack.postThreadReply.mock.calls[0]?.[2]).toContain("global_default_model: gpt-5.5");
+    expect(slack.postThreadReply.mock.calls[1]?.[2]).toContain("database_path:");
+    expect(slack.postThreadReply.mock.calls[1]?.[2]).toContain("codex_thread_state: idle");
+    store.close();
+  });
+
+  it("queues restart requests instead of executing them immediately", async () => {
+    const { service, codex, store } = await createService();
+    const session = createDmSession(service);
+
+    const result = await service.handleDmCommand(session, "restart", ["codex"]);
+
+    expect(result.response).toContain("Queued restart: codex");
+    expect(codex.restart).not.toHaveBeenCalled();
+    expect(store.getPendingRestart()).toMatchObject({ target: "codex", teamId: "T1" });
+    store.close();
+  });
+
+  it("forces queued codex restarts after the acknowledgement is sent", async () => {
+    const { service, slack, codex, store } = await createService();
+    const session = createDmSession(service);
+    store.setPendingRestart({
+      target: "codex",
+      teamId: "T1",
+      userId: "U-admin",
+      channelId: "D1",
+      requestedAt: "2026-03-12T12:00:00.000Z",
+    });
+
+    const result = await service.handleDmCommand(session, "restart-now", []);
+    await result.afterSend?.();
+
+    expect(codex.restart).toHaveBeenCalled();
+    expect(store.getPendingRestart()).toBeNull();
+    expect(slack.postTopLevelMessage.mock.calls).toEqual([
+      ["D1", "_System_: Restarting Codex now."],
+      ["D1", "_System_: Codex restarted. Back online."],
+    ]);
+    store.close();
+  });
+
+  it("executes queued restart once active work reaches zero", async () => {
+    const { service, codex, store } = await createService();
+    createWorker(service, {
+      status: "running",
+      activeTurnId: "turn-1",
+    });
+    store.setPendingRestart({
+      target: "codex",
+      teamId: "T1",
+      userId: "U-admin",
+      channelId: "D1",
+      requestedAt: "2026-03-12T12:00:00.000Z",
+    });
+
+    await service.onWorkerCompleted("T1:C1:1.000", "Done.", "completed");
+
+    expect(codex.restart).toHaveBeenCalled();
+    expect(store.getPendingRestart()).toBeNull();
+    store.close();
+  });
+
+  it("posts the pending relaunch notice on startup", async () => {
+    const { service, slack, store } = await createService();
+    store.setPendingRestartNotice({
+      target: "bridge",
+      teamId: "T1",
+      userId: "U-admin",
+      channelId: "D1",
+      requestedAt: "2026-03-12T12:00:00.000Z",
+    });
+
+    await service.postPendingRestartNotice();
+
+    expect(slack.postTopLevelMessage).toHaveBeenCalledWith("D1", "_System_: Bridge restarted. Back online.");
+    expect(store.consumePendingRestartNotice()).toBeNull();
     store.close();
   });
 

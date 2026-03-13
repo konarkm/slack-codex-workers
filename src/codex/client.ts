@@ -110,6 +110,10 @@ export class CodexClient {
     await this.start();
   }
 
+  isRunning(): boolean {
+    return this.rpc.isRunning();
+  }
+
   async createWorkerThread(settings: RuntimeSettings): Promise<{ threadId: string; threadName: string | null }> {
     const raw = await this.rpc.request("thread/start", {
       model: settings.model ?? undefined,

@@ -143,6 +143,10 @@ export class CodexRpcClient extends EventEmitter {
     child.stdin.write(`${JSON.stringify(response)}\n`);
   }
 
+  isRunning(): boolean {
+    return Boolean(this.child?.stdin.writable);
+  }
+
   private onStdout(chunk: string): void {
     this.buffer += chunk;
     while (true) {

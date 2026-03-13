@@ -25,6 +25,40 @@ afterEach(async () => {
 });
 
 describe("store", () => {
+  it("stores and consumes pending restart metadata", async () => {
+    const { store } = await createStore();
+    store.setPendingRestart({
+      target: "both",
+      teamId: "T1",
+      userId: "U1",
+      channelId: "D1",
+      requestedAt: "2026-03-12T00:00:00.000Z",
+    });
+    expect(store.getPendingRestart()).toMatchObject({
+      target: "both",
+      teamId: "T1",
+      userId: "U1",
+      channelId: "D1",
+    });
+
+    store.setPendingRestartNotice({
+      target: "bridge",
+      teamId: "T1",
+      userId: "U1",
+      channelId: "D1",
+      requestedAt: "2026-03-12T00:00:01.000Z",
+    });
+    expect(store.consumePendingRestartNotice()).toMatchObject({
+      target: "bridge",
+      teamId: "T1",
+    });
+    expect(store.consumePendingRestartNotice()).toBeNull();
+
+    store.clearPendingRestart();
+    expect(store.getPendingRestart()).toBeNull();
+    store.close();
+  });
+
   it("clears nullable worker fields when explicitly set to null", async () => {
     const { store } = await createStore();
     store.upsertWorker({

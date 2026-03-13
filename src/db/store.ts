@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import { DEFAULT_RUNTIME_SETTINGS } from "../config.js";
 import type {
   ChannelRecord,
   DmSessionRecord,
@@ -6,6 +7,7 @@ import type {
   InboundMessageRecord,
   InboundMessageStatus,
   MessageAttachmentRecord,
+  PendingRestartRecord,
   PendingRequestState,
   RuntimeSettings,
   SessionStatus,
@@ -360,16 +362,16 @@ export class Store {
   getTeamDefaults(teamId: string): TeamDefaults {
     const row = this.db.prepare("SELECT value FROM metadata WHERE key = ?").get(`defaults:${teamId}`) as { value?: string } | undefined;
     if (!row?.value) {
-      return { model: null, effort: null };
+      return { ...DEFAULT_RUNTIME_SETTINGS };
     }
     try {
       const parsed = JSON.parse(row.value) as Partial<TeamDefaults>;
       return {
-        model: typeof parsed.model === "string" ? parsed.model : null,
-        effort: typeof parsed.effort === "string" ? parsed.effort as TeamDefaults["effort"] : null,
+        model: typeof parsed.model === "string" ? parsed.model : DEFAULT_RUNTIME_SETTINGS.model,
+        effort: typeof parsed.effort === "string" ? parsed.effort as TeamDefaults["effort"] : DEFAULT_RUNTIME_SETTINGS.effort,
       };
     } catch {
-      return { model: null, effort: null };
+      return { ...DEFAULT_RUNTIME_SETTINGS };
     }
   }
 
@@ -378,6 +380,29 @@ export class Store {
       INSERT INTO metadata (key, value) VALUES (?, ?)
       ON CONFLICT(key) DO UPDATE SET value=excluded.value
     `).run(`defaults:${teamId}`, JSON.stringify(defaults));
+  }
+
+  getPendingRestart(): PendingRestartRecord | null {
+    return this.readJsonMetadata<PendingRestartRecord>("restart:pending");
+  }
+
+  setPendingRestart(record: PendingRestartRecord): void {
+    this.writeJsonMetadata("restart:pending", record);
+  }
+
+  clearPendingRestart(): void {
+    this.deleteMetadata("restart:pending");
+  }
+
+  consumePendingRestartNotice(): PendingRestartRecord | null {
+    const notice = this.readJsonMetadata<PendingRestartRecord>("restart:notice");
+    if (!notice) return null;
+    this.deleteMetadata("restart:notice");
+    return notice;
+  }
+
+  setPendingRestartNotice(record: PendingRestartRecord): void {
+    this.writeJsonMetadata("restart:notice", record);
   }
 
   upsertChannels(channels: ChannelRecord[]): void {
@@ -666,5 +691,26 @@ export class Store {
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
     };
+  }
+
+  private readJsonMetadata<T>(key: string): T | null {
+    const row = this.db.prepare("SELECT value FROM metadata WHERE key = ?").get(key) as { value?: string } | undefined;
+    if (!row?.value) return null;
+    try {
+      return JSON.parse(row.value) as T;
+    } catch {
+      return null;
+    }
+  }
+
+  private writeJsonMetadata(key: string, value: unknown): void {
+    this.db.prepare(`
+      INSERT INTO metadata (key, value) VALUES (?, ?)
+      ON CONFLICT(key) DO UPDATE SET value=excluded.value
+    `).run(key, JSON.stringify(value));
+  }
+
+  private deleteMetadata(key: string): void {
+    this.db.prepare("DELETE FROM metadata WHERE key = ?").run(key);
   }
 }

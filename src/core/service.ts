@@ -20,7 +20,10 @@ import type {
   InboundMessageKind,
   InboundMessageRecord,
   JsonRpcId,
+  PendingRestartRecord,
   PendingRequestState,
+  RestartTarget,
+  RuntimeSettings,
   SessionStatus,
   SlackMessageContext,
   TurnInput,
@@ -32,10 +35,14 @@ interface RenderSessionState {
   pendingAssistant: { itemId: string; text: string } | null;
 }
 
-type RestartTarget = "bridge" | "both";
 type InboundHandlingResult =
   | { status: "processed" }
   | { status: "manual_retry"; reason: string };
+
+interface DmCommandResult {
+  response: string;
+  afterSend?: () => Promise<void>;
+}
 
 const BLOCKED_RUNNING_TURN_POLL_INTERVAL_MS = 2_000;
 const BLOCKED_RUNNING_TURN_POLL_WINDOW_MS = 30_000;
@@ -58,6 +65,7 @@ export class SlackCodexWorkersService extends EventEmitter {
   private readonly blockedTurnDeadlines = new Map<string, number>();
   private readonly startingWorkerTurns = new Map<string, Promise<string>>();
   private readonly startingDmTurns = new Map<string, Promise<string>>();
+  private executingQueuedRestart = false;
 
   constructor(private readonly config: AppConfig) {
     super();
@@ -76,6 +84,7 @@ export class SlackCodexWorkersService extends EventEmitter {
     await this.codex.start();
     this.registerSlackHandlers();
     await this.slack.start();
+    await this.postPendingRestartNotice();
     this.store.resetInterruptedInboundMessages();
     await this.reconcilePersistedRuntimeState();
     await this.replayPendingInboundMessages();
@@ -318,7 +327,7 @@ export class SlackCodexWorkersService extends EventEmitter {
         currentAgentSlackTs: null,
         currentAgentItemId: null,
         currentWorklogSlackTs: null,
-        settings: defaults,
+        settings: { model: null, effort: null },
         identity: assignWorkerIdentity(this.store.listWorkers()),
         parentWorkerKey: null,
         lastError: null,
@@ -443,7 +452,7 @@ export class SlackCodexWorkersService extends EventEmitter {
         currentAgentSlackTs: null,
         currentAgentItemId: null,
         currentWorklogSlackTs: null,
-        settings: this.store.getTeamDefaults(context.teamId),
+        settings: { model: null, effort: null },
         lastError: null,
         lastInboundMessageTs: null,
         pendingRequest: null,
@@ -454,10 +463,13 @@ export class SlackCodexWorkersService extends EventEmitter {
 
     const command = parseSlashCommand(context.text);
     if (command) {
-      const response = await this.handleDmCommand(session, command.name, command.args);
+      const result = await this.handleDmCommand(session, command.name, command.args);
       await this.enqueueSlackWrite(this.getDmQueueKey(session.teamId, session.userId), async () => {
-        await this.slack.postTopLevelMessage(session!.channelId, response);
+        await this.slack.postTopLevelMessage(session!.channelId, result.response);
       });
+      if (result.afterSend) {
+        await result.afterSend();
+      }
       return { status: "processed" };
     }
 
@@ -612,7 +624,7 @@ export class SlackCodexWorkersService extends EventEmitter {
         turnId = await this.codex.startTurnWithResumeFallback(
           worker.appThreadId,
           input,
-          worker.settings,
+          resolveRuntimeSettings(worker.settings, this.store.getTeamDefaults(worker.teamId)),
           {
             onTurnStarted: async () => {
               await this.onWorkerTurnStarted(worker.key);
@@ -659,7 +671,9 @@ export class SlackCodexWorkersService extends EventEmitter {
 
     let latestSession = session;
     if (!latestSession.appThreadId) {
-      const created = await this.codex.createAdminThread(latestSession.settings);
+      const created = await this.codex.createAdminThread(
+        resolveRuntimeSettings(latestSession.settings, this.store.getTeamDefaults(latestSession.teamId)),
+      );
       latestSession = this.store.upsertDmSession({
         ...latestSession,
         appThreadId: created.threadId,
@@ -789,6 +803,7 @@ export class SlackCodexWorkersService extends EventEmitter {
           ? STATUS_REACTIONS.interrupted
           : STATUS_REACTIONS.failed,
     );
+    await this.maybeExecuteQueuedRestart();
   }
 
   private async onDmAgentDelta(teamId: string, userId: string, itemId: string, delta: string): Promise<void> {
@@ -868,6 +883,7 @@ export class SlackCodexWorkersService extends EventEmitter {
         );
       });
     }
+    await this.maybeExecuteQueuedRestart();
   }
 
   private getRenderState(key: string): RenderSessionState {
@@ -922,17 +938,32 @@ export class SlackCodexWorkersService extends EventEmitter {
     let response = "";
     if (name === "help") {
       response = helpText("thread");
+    } else if (name === "status") {
+      response = await this.buildThreadStatusMessage(worker, false);
+    } else if (name === "health") {
+      response = await this.buildThreadStatusMessage(worker, true);
     } else if (name === "model") {
+      const defaults = this.store.getTeamDefaults(worker.teamId);
       if (args.length === 0) {
-        response = `Model: ${worker.settings.model ?? "(default)"}\nEffort: ${worker.settings.effort ?? "(default)"}`;
+        response = [
+          `Effective model: ${describeEffectiveSetting(worker.settings.model, defaults.model)}`,
+          `Thread model override: ${worker.settings.model ?? "(none)"}`,
+          `Global default model: ${defaults.model ?? "(unset)"}`,
+        ].join("\n");
       } else {
         worker.settings.model = args.join(" ");
         this.store.updateWorkerState(worker.key, { settings: worker.settings });
         response = `Thread model set: ${worker.settings.model}`;
       }
     } else if (name === "effort") {
+      const defaults = this.store.getTeamDefaults(worker.teamId);
       if (args.length === 0) {
-        response = `Effort: ${worker.settings.effort ?? "(default)"}\nAllowed: ${DEFAULT_EFFORTS.join(", ")}`;
+        response = [
+          `Effective effort: ${describeEffectiveSetting(worker.settings.effort, defaults.effort)}`,
+          `Thread effort override: ${worker.settings.effort ?? "(none)"}`,
+          `Global default effort: ${defaults.effort ?? "(unset)"}`,
+          `Allowed: ${DEFAULT_EFFORTS.join(", ")}`,
+        ].join("\n");
       } else {
         const effort = normalizeEffort(args[0]);
         if (!effort) {
@@ -946,7 +977,7 @@ export class SlackCodexWorkersService extends EventEmitter {
     } else if (name === "compact") {
       if (worker.activeTurnId || worker.pendingRequest) {
         response = "Cannot compact while the worker is active.";
-      } else if (isManuallyBlockedStatus(worker.status)) {
+      } else if (isUnavailableForCompact(worker.status)) {
         response = "Cannot compact while this thread is blocked or waiting for recovery.";
       } else {
         await this.codex.compactThread(worker.appThreadId);
@@ -978,80 +1009,274 @@ export class SlackCodexWorkersService extends EventEmitter {
     });
   }
 
-  private async handleDmCommand(session: DmSessionRecord, name: string, args: string[]): Promise<string> {
+  private async handleDmCommand(session: DmSessionRecord, name: string, args: string[]): Promise<DmCommandResult> {
     const defaults = this.store.getTeamDefaults(session.teamId);
     const currentSession = this.store.getDmSession(session.teamId, session.userId);
 
-    if (name === "help") return helpText("dm");
+    if (name === "help") return { response: helpText("dm") };
     if (name === "status") {
-      const activeWorkerCount = this.store.listWorkersWithActiveTurns().length;
-      return [
-        "Bridge Status",
-        `team: ${session.teamId}`,
-        `codex_cwd: ${this.config.codexCwd}`,
-        `workers_active: ${activeWorkerCount}`,
-        `default_model: ${defaults.model ?? "(unset)"}`,
-        `default_effort: ${defaults.effort ?? "(unset)"}`,
-        `dm_thread: ${currentSession?.appThreadId ?? "(none)"}`,
-        `supervisor_restart: ${this.config.supervisorRestartEnabled ? "enabled" : "disabled"}`,
-      ].join("\n");
+      return { response: await this.buildDmStatusMessage(currentSession ?? session, false) };
+    }
+    if (name === "health") {
+      return { response: await this.buildDmStatusMessage(currentSession ?? session, true) };
     }
     if (name === "model") {
-      if (args.length === 0) return `Default model: ${defaults.model ?? "(unset)"}`;
+      if (args.length === 0) return { response: `Global default model: ${defaults.model ?? "(unset)"}` };
       defaults.model = args.join(" ");
       this.store.setTeamDefaults(session.teamId, defaults);
-      return `Default model set: ${defaults.model}`;
+      return { response: `Default model set: ${defaults.model}` };
     }
     if (name === "effort") {
-      if (args.length === 0) return `Default effort: ${defaults.effort ?? "(unset)"}\nAllowed: ${DEFAULT_EFFORTS.join(", ")}`;
+      if (args.length === 0) {
+        return { response: `Global default effort: ${defaults.effort ?? "(unset)"}\nAllowed: ${DEFAULT_EFFORTS.join(", ")}` };
+      }
       const effort = normalizeEffort(args[0]);
-      if (!effort) return `Usage: /effort <${DEFAULT_EFFORTS.join("|")}>`;
+      if (!effort) return { response: `Usage: /effort <${DEFAULT_EFFORTS.join("|")}>` };
       defaults.effort = effort;
       this.store.setTeamDefaults(session.teamId, defaults);
-      return `Default effort set: ${effort}`;
+      return { response: `Default effort set: ${effort}` };
     }
     if (name === "compact") {
-      if (!currentSession?.appThreadId) return "No DM admin thread to compact.";
-      if (currentSession.activeTurnId || currentSession.pendingRequest) return "Cannot compact while the DM admin thread is active.";
-      if (isManuallyBlockedStatus(currentSession.status)) return "Cannot compact while this DM is blocked or waiting for recovery.";
+      if (!currentSession?.appThreadId) return { response: "No DM admin thread to compact." };
+      if (currentSession.activeTurnId || currentSession.pendingRequest) return { response: "Cannot compact while the DM admin thread is active." };
+      if (isUnavailableForCompact(currentSession.status)) return { response: "Cannot compact while this DM is blocked or waiting for recovery." };
       await this.codex.compactThread(currentSession.appThreadId);
-      return `Compaction requested for thread ${currentSession.appThreadId}`;
+      return { response: `Compaction requested for thread ${currentSession.appThreadId}` };
     }
     if (name === "stop") {
       if (!currentSession?.appThreadId || !currentSession.activeTurnId) {
-        return "No active turn to stop.";
+        return { response: "No active turn to stop." };
       }
       try {
         await this.codex.interruptTurn(currentSession.appThreadId, currentSession.activeTurnId);
       } catch {
         // Best effort: completion may have raced already.
       }
-      return renderSystemMessage("Interrupt requested.");
+      return { response: renderSystemMessage("Interrupt requested.") };
     }
     if (name === "recover") {
       if (!(await this.canRecoverDmNow(currentSession ?? session))) {
-        return "Recover is only available when this DM is blocked or its backing Codex thread is missing.";
+        return { response: "Recover is only available when this DM is blocked or its backing Codex thread is missing." };
       }
       const recovered = await this.recoverDmSession(currentSession ?? session);
-      return `Created a fresh backing Codex admin thread.\nThread: ${recovered.appThreadId ?? "(none)"}`;
+      return { response: `Created a fresh backing Codex admin thread.\nThread: ${recovered.appThreadId ?? "(none)"}` };
     }
     if (name === "restart") {
       const target = (args[0] ?? "").toLowerCase();
       if (!target || !["codex", "bridge", "both"].includes(target)) {
-        return "Usage: /restart <codex|bridge|both>";
+        return { response: "Usage: /restart <codex|bridge|both>" };
       }
-      if (target === "codex") {
+      const queued = this.store.getPendingRestart();
+      if (queued) {
+        return {
+          response: [
+            `Restart already queued: ${queued.target}`,
+            `requested_at: ${queued.requestedAt}`,
+            "Use /restart-now to force it immediately or /restart-cancel to clear it.",
+          ].join("\n"),
+        };
+      }
+      if ((target === "bridge" || target === "both") && !this.config.supervisorRestartEnabled) {
+        return {
+          response: "Bridge restarts require the launcher/supervisor path. Launch via ./scripts/launch.sh or set SUPERVISOR_RESTART_ENABLED=1 under a restart-capable supervisor.",
+        };
+      }
+      const pending = await this.queueRestart(currentSession ?? session, target as RestartTarget);
+      return {
+        response: [
+          `Queued restart: ${pending.target}`,
+          `requested_at: ${pending.requestedAt}`,
+          "The runtime will restart once all active work finishes. New work is still allowed until then.",
+        ].join("\n"),
+        afterSend: async () => {
+          await this.maybeExecuteQueuedRestart();
+        },
+      };
+    }
+    if (name === "restart-now") {
+      const queued = this.store.getPendingRestart();
+      if (!queued) {
+        return { response: "No queued restart is waiting. Use /restart <codex|bridge|both> first." };
+      }
+      if ((queued.target === "bridge" || queued.target === "both") && !this.config.supervisorRestartEnabled) {
+        return { response: "The queued bridge restart requires ./scripts/launch.sh supervisor mode before it can be forced." };
+      }
+      return {
+        response: `Forcing queued restart now: ${queued.target}`,
+        afterSend: async () => {
+          await this.maybeExecuteQueuedRestart(true);
+        },
+      };
+    }
+    if (name === "restart-cancel") {
+      const queued = this.store.getPendingRestart();
+      if (!queued) {
+        return { response: "No queued restart is waiting." };
+      }
+      this.store.clearPendingRestart();
+      return { response: `Canceled queued restart: ${queued.target}` };
+    }
+    return { response: "Unknown command. Use /help" };
+  }
+
+  private async buildThreadStatusMessage(worker: WorkerRecord, includeHealth: boolean): Promise<string> {
+    const current = this.requireWorker(worker.key);
+    const defaults = this.store.getTeamDefaults(current.teamId);
+    const pendingRestart = this.store.getPendingRestart();
+    const codexThreadState = await this.describeThreadState(current.appThreadId);
+    const lines = [
+      includeHealth ? "Worker Health" : "Worker Status",
+      `worker: ${current.identity?.username ?? "Codex Worker"}`,
+      `status: ${current.status}`,
+      `app_thread: ${current.appThreadId}`,
+      `active_turn: ${current.activeTurnId ?? "(none)"}`,
+      `effective_model: ${describeEffectiveSetting(current.settings.model, defaults.model)}`,
+      `effective_effort: ${describeEffectiveSetting(current.settings.effort, defaults.effort)}`,
+      `thread_model_override: ${current.settings.model ?? "(none)"}`,
+      `thread_effort_override: ${current.settings.effort ?? "(none)"}`,
+      `global_default_model: ${defaults.model ?? "(unset)"}`,
+      `global_default_effort: ${defaults.effort ?? "(unset)"}`,
+      `pending_request: ${current.pendingRequest ? current.pendingRequest.kind : "(none)"}`,
+      `last_inbound_ts: ${current.lastInboundMessageTs ?? "(none)"}`,
+      `last_error: ${current.lastError ?? "(none)"}`,
+      `queued_restart: ${pendingRestart ? `${pendingRestart.target} @ ${pendingRestart.requestedAt}` : "(none)"}`,
+    ];
+    if (includeHealth) {
+      lines.push(`workspace_root: ${this.config.codexCwd}`);
+      lines.push(`database_path: ${this.config.databasePath}`);
+      lines.push(`attachment_storage: ${this.config.attachmentStorageDir}`);
+      lines.push(`codex_process: ${this.codex.isRunning() ? "running" : "down"}`);
+      lines.push(`codex_thread_state: ${codexThreadState}`);
+      lines.push(`start_in_flight: ${this.startingWorkerTurns.has(current.key) ? "yes" : "no"}`);
+    }
+    return lines.join("\n");
+  }
+
+  private async buildDmStatusMessage(session: DmSessionRecord, includeHealth: boolean): Promise<string> {
+    const current = this.requireDmSession(session.teamId, session.userId);
+    const defaults = this.store.getTeamDefaults(current.teamId);
+    const workers = this.store.listWorkers();
+    const blockedWorkers = workers.filter((worker) => isManuallyBlockedStatus(worker.status)).length;
+    const pendingRestart = this.store.getPendingRestart();
+    const codexThreadState = current.appThreadId ? await this.describeThreadState(current.appThreadId) : "(no thread)";
+    const lines = [
+      includeHealth ? "Bridge Health" : "Bridge Status",
+      `team: ${current.teamId}`,
+      `dm_thread: ${current.appThreadId ?? "(none)"}`,
+      `dm_status: ${current.status}`,
+      `dm_active_turn: ${current.activeTurnId ?? "(none)"}`,
+      `global_default_model: ${defaults.model ?? "(unset)"}`,
+      `global_default_effort: ${defaults.effort ?? "(unset)"}`,
+      `workers_active: ${this.store.listWorkersWithActiveTurns().length}`,
+      `workers_blocked_or_recovery_required: ${blockedWorkers}`,
+      `queued_restart: ${pendingRestart ? `${pendingRestart.target} @ ${pendingRestart.requestedAt}` : "(none)"}`,
+    ];
+    if (includeHealth) {
+      lines.push(`workspace_root: ${this.config.codexCwd}`);
+      lines.push(`database_path: ${this.config.databasePath}`);
+      lines.push(`attachment_storage: ${this.config.attachmentStorageDir}`);
+      lines.push(`supervisor_restart: ${this.config.supervisorRestartEnabled ? "enabled" : "disabled"}`);
+      lines.push(`launch_mode: ${this.config.launchMode}`);
+      lines.push(`codex_process: ${this.codex.isRunning() ? "running" : "down"}`);
+      lines.push(`codex_thread_state: ${codexThreadState}`);
+      lines.push(`workers_total: ${workers.length}`);
+      lines.push(`dm_sessions_total: ${this.store.listDmSessions().length}`);
+      lines.push(`dm_pending_request: ${current.pendingRequest ? current.pendingRequest.kind : "(none)"}`);
+      lines.push(`dm_last_error: ${current.lastError ?? "(none)"}`);
+    }
+    return lines.join("\n");
+  }
+
+  private async describeThreadState(threadId: string): Promise<string> {
+    if (!this.codex.isRunning()) return "codex-down";
+    try {
+      return await this.codex.readThreadStatus(threadId);
+    } catch (error) {
+      if (isMissingThreadError(error)) return "missing";
+      return "unknown";
+    }
+  }
+
+  private async queueRestart(session: DmSessionRecord, target: RestartTarget): Promise<PendingRestartRecord> {
+    const pending: PendingRestartRecord = {
+      target,
+      teamId: session.teamId,
+      userId: session.userId,
+      channelId: session.channelId,
+      requestedAt: new Date().toISOString(),
+    };
+    this.store.setPendingRestart(pending);
+    return pending;
+  }
+
+  private isRuntimeIdle(): boolean {
+    return this.store.listWorkersWithActiveTurns().length === 0
+      && this.store.listDmSessionsWithActiveTurns().length === 0
+      && this.startingWorkerTurns.size === 0
+      && this.startingDmTurns.size === 0;
+  }
+
+  private async maybeExecuteQueuedRestart(force = false): Promise<void> {
+    if (this.executingQueuedRestart) return;
+    const pending = this.store.getPendingRestart();
+    if (!pending) return;
+    if (!force && !this.isRuntimeIdle()) return;
+    this.executingQueuedRestart = true;
+    try {
+      await this.executeQueuedRestart(pending);
+    } finally {
+      this.executingQueuedRestart = false;
+    }
+  }
+
+  private async executeQueuedRestart(pending: PendingRestartRecord): Promise<void> {
+    if (pending.target === "codex") {
+      this.store.clearPendingRestart();
+      try {
+        await this.enqueueSlackWrite(this.getDmQueueKey(pending.teamId, pending.userId), async () => {
+          await this.slack.postTopLevelMessage(pending.channelId, renderSystemMessage("Restarting Codex now."));
+        });
         await this.codex.restart();
         await this.reconcilePersistedRuntimeState();
-        return "Codex restarted and reconciled.";
+        await this.enqueueSlackWrite(this.getDmQueueKey(pending.teamId, pending.userId), async () => {
+          await this.slack.postTopLevelMessage(pending.channelId, renderSystemMessage("Codex restarted. Back online."));
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await this.enqueueSlackWrite(this.getDmQueueKey(pending.teamId, pending.userId), async () => {
+          await this.slack.postTopLevelMessage(pending.channelId, renderSystemMessage(`Queued Codex restart failed: ${message}`));
+        });
       }
-      if (!this.config.supervisorRestartEnabled) {
-        return "Bridge restarts require supervisor mode. Launch via scripts/run.sh or set SUPERVISOR_RESTART_ENABLED=1 under a restart-capable supervisor.";
-      }
-      this.emit("restartRequested", target as RestartTarget);
-      return `Restarting ${target} now...`;
+      return;
     }
-    return "Unknown command. Use /help";
+
+    if (!this.config.supervisorRestartEnabled) {
+      await this.enqueueSlackWrite(this.getDmQueueKey(pending.teamId, pending.userId), async () => {
+        await this.slack.postTopLevelMessage(pending.channelId, renderSystemMessage("Queued bridge restart cannot run without ./scripts/launch.sh supervisor mode."));
+      });
+      return;
+    }
+
+    this.store.clearPendingRestart();
+    await this.enqueueSlackWrite(this.getDmQueueKey(pending.teamId, pending.userId), async () => {
+      await this.slack.postTopLevelMessage(
+        pending.channelId,
+        renderSystemMessage(pending.target === "both" ? "Restarting bridge and Codex now." : "Restarting bridge now."),
+      );
+    });
+    this.store.setPendingRestartNotice(pending);
+    this.emit("restartRequested", pending.target);
+  }
+
+  private async postPendingRestartNotice(): Promise<void> {
+    const notice = this.store.consumePendingRestartNotice();
+    if (!notice) return;
+    const message = notice.target === "both"
+      ? "Bridge and Codex restarted. Back online."
+      : "Bridge restarted. Back online.";
+    await this.enqueueSlackWrite(this.getDmQueueKey(notice.teamId, notice.userId), async () => {
+      await this.slack.postTopLevelMessage(notice.channelId, renderSystemMessage(message));
+    });
   }
 
   private async handleListChannelsTool(query: string, ctx: DynamicToolHandlerContext): Promise<string> {
@@ -1664,7 +1889,7 @@ function isManuallyBlockedStatus(status: SessionStatus): boolean {
   return status === "recovery_required" || status === "blocked_running_turn";
 }
 
-function canRecover(status: SessionStatus): boolean {
+function isUnavailableForCompact(status: SessionStatus): boolean {
   return status === "recovery_required" || status === "blocked_running_turn";
 }
 
@@ -1739,4 +1964,20 @@ function safeJson(value: string): unknown | null {
   } catch {
     return null;
   }
+}
+
+function describeEffectiveSetting(threadValue: string | null, defaultValue: string | null): string {
+  if (threadValue) return `${threadValue} (thread override)`;
+  if (defaultValue) return `${defaultValue} (global default)`;
+  return "(using default: unset)";
+}
+
+function resolveRuntimeSettings(
+  threadSettings: RuntimeSettings,
+  defaults: RuntimeSettings,
+): RuntimeSettings {
+  return {
+    model: threadSettings.model ?? defaults.model,
+    effort: threadSettings.effort ?? defaults.effort,
+  };
 }

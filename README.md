@@ -25,17 +25,25 @@ Implemented in this repo:
   - `slack_upload_files`
 - channel-thread commands:
   - `/help`
+  - `/status`
+  - `/health`
   - `/model`
   - `/effort`
   - `/compact`
+  - `/stop`
+  - `/recover`
 - admin DM commands:
   - `/help`
   - `/status`
+  - `/health`
   - `/model`
   - `/effort`
   - `/compact`
+  - `/stop`
   - `/recover`
   - `/restart <codex|bridge|both>`
+  - `/restart-now`
+  - `/restart-cancel`
 - image and file attachment ingestion
 
 Not implemented yet:
@@ -79,10 +87,10 @@ Key variables:
 - `SLACK_APP_TOKEN`: Socket Mode app token
 - `SLACK_ADMIN_USER_IDS`: comma-separated Slack user IDs allowed to use DM admin controls
 - `SLACK_ALLOWED_TEAM_ID`: optional hard guard for one workspace
-- `CODEX_CWD`: repo/project directory Codex should operate in by default
-- `DATABASE_PATH`: SQLite path
-- `SUPERVISOR_RESTART_ENABLED`: set to `1` only when launching under `scripts/run.sh` or another restart-capable supervisor
-- `ATTACHMENT_STORAGE_DIR`: local directory for downloaded Slack files
+- `CODEX_CWD`: canonical workspace root. Codex runs here, and bridge state defaults under `CODEX_CWD/.slack-codex-workers/`
+- `DATABASE_PATH`: optional SQLite override. Default: `CODEX_CWD/.slack-codex-workers/bridge.sqlite`
+- `SUPERVISOR_RESTART_ENABLED`: set automatically by `./scripts/launch.sh`; only override it if you know what you are doing
+- `ATTACHMENT_STORAGE_DIR`: optional attachment storage override. Default: `CODEX_CWD/.slack-codex-workers/attachments`
 - `ATTACHMENT_MAX_BYTES`: per-file cap in bytes
 - `ATTACHMENT_TOTAL_MAX_BYTES`: total cap per Slack message in bytes; set to `off` for no total cap
 - `ATTACHMENT_DOWNLOAD_TIMEOUT_MS`: timeout per file download
@@ -94,24 +102,34 @@ Key variables:
 
 ```bash
 npm install
+./scripts/launch.sh
+```
+
+That is the preferred path for local use and dogfooding. It:
+- loads `.env`
+- verifies required env vars and the local `codex` binary
+- keeps one bridge instance running
+- enables queued `/restart` support automatically
+- runs `tsx src/index.ts` in dev mode so queued restarts actually relaunch the bridge cleanly
+
+If you want file-watch autoreload without the restart queue semantics, use:
+
+```bash
 npm run dev
 ```
 
-For a production build:
+For a supervised production build:
 
 ```bash
-npm run build
-npm start
-```
-
-For supervisor-backed bridge restarts:
-
-```bash
-npm run build
-npm run start:supervised
+./scripts/launch.sh --prod
 ```
 
 ## Behavior Notes
+
+- The server repo is just the bridge code. Runtime state lives under the configured workspace root:
+  - SQLite: `CODEX_CWD/.slack-codex-workers/bridge.sqlite`
+  - downloaded Slack files: `CODEX_CWD/.slack-codex-workers/attachments/`
+- You can override those paths explicitly, but the default mental model is “all session state belongs to the workspace.”
 
 - Channel roots create workers keyed by `(teamId, channelId, rootTs)`.
 - Thread replies from humans become `username: message` turn input.
@@ -127,5 +145,10 @@ npm run start:supervised
 - Attachment-only messages are supported; images are passed as images and other files are stored locally with file-path notes.
 - `slack_upload_files` uploads one or more local files from allowed roots into the current Slack conversation; worker threads upload into the active thread, and admin DMs upload into the DM conversation.
 - `slack_list_channels` and child-worker posting only use channels the bot is already a member of.
-- `/restart bridge` and `/restart both` only work when `SUPERVISOR_RESTART_ENABLED=1` and the process is launched under a supervisor that restarts on exit code `42`.
+- `/status` and `/health` are available in worker threads and admin DMs. Thread commands report thread-specific state; DM commands report bridge-wide state.
+- Thread `/model` and `/effort` set thread-local overrides. DM `/model` and `/effort` set the global defaults used by any thread that does not have an override.
+- `/restart <codex|bridge|both>` queues a restart request and waits for the runtime to become idle.
+- `/restart-now` forces the currently queued restart immediately.
+- `/restart-cancel` clears the currently queued restart.
+- `/restart bridge` and `/restart both` only work properly under the launcher/supervisor path because they exit with code `42` and rely on `./scripts/launch.sh` to relaunch the bridge.
 - `/recover` is recovery-only; it is available only when the thread or admin DM is blocked or live Codex reconciliation shows the backing thread is missing.

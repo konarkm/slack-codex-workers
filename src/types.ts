@@ -104,6 +104,16 @@ export interface TeamDefaults {
   effort: ReasoningEffort | null;
 }
 
+export type RestartTarget = "codex" | "bridge" | "both";
+
+export interface PendingRestartRecord {
+  target: RestartTarget;
+  teamId: string;
+  userId: string;
+  channelId: string;
+  requestedAt: string;
+}
+
 export interface ChannelRecord {
   teamId: string;
   channelId: string;

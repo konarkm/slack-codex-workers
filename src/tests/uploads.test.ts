@@ -20,6 +20,7 @@ function makeConfig(dir: string): AppConfig {
     messageEditThrottleMs: 1,
     appPort: 3013,
     supervisorRestartEnabled: false,
+    launchMode: "dev",
     attachmentStorageDir: path.join(dir, "attachments"),
     attachmentMaxBytes: 1024 * 1024 * 1024,
     attachmentTotalMaxBytes: null,

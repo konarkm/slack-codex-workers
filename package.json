@@ -5,9 +5,12 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "dev:run": "tsx src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
-    "start:supervised": "bash scripts/run.sh",
+    "start:supervised": "bash scripts/launch.sh --prod",
+    "launch": "bash scripts/launch.sh",
+    "launch:prod": "bash scripts/launch.sh --prod",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run src/tests"
   },

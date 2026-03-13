@@ -2,23 +2,27 @@ import path from "node:path";
 import process from "node:process";
 import { config as loadDotEnv } from "dotenv";
 import { z } from "zod";
-import type { ReasoningEffort } from "./types.js";
+import type { ReasoningEffort, RuntimeSettings } from "./types.js";
 
 loadDotEnv();
+
+const fallbackWorkspaceRoot = process.cwd();
+const defaultStateDir = path.join(fallbackWorkspaceRoot, ".slack-codex-workers");
 
 const configSchema = z.object({
   slackBotToken: z.string().min(1),
   slackAppToken: z.string().min(1),
   slackSigningSecret: z.string().min(1).default("unused-for-socket-mode"),
   codexBin: z.string().min(1).default("codex"),
-  codexCwd: z.string().min(1).default(process.cwd()),
-  databasePath: z.string().min(1).default(path.join(process.cwd(), "slack-codex-workers.db")),
+  codexCwd: z.string().min(1).default(fallbackWorkspaceRoot),
+  databasePath: z.string().min(1).default(path.join(defaultStateDir, "bridge.sqlite")),
   adminUserIds: z.array(z.string().min(1)).default([]),
   allowedTeamId: z.string().min(1).nullable().default(null),
   messageEditThrottleMs: z.number().int().positive().default(1200),
   appPort: z.number().int().positive().default(3013),
   supervisorRestartEnabled: z.boolean().default(false),
-  attachmentStorageDir: z.string().min(1).default(path.join(process.cwd(), "storage", "attachments")),
+  launchMode: z.enum(["dev", "prod"]).default("dev"),
+  attachmentStorageDir: z.string().min(1).default(path.join(defaultStateDir, "attachments")),
   attachmentMaxBytes: z.number().int().positive().default(1024 * 1024 * 1024),
   attachmentTotalMaxBytes: z.number().int().positive().nullable().default(null),
   attachmentDownloadTimeoutMs: z.number().int().positive().default(600_000),
@@ -30,19 +34,22 @@ const configSchema = z.object({
 export type AppConfig = z.infer<typeof configSchema>;
 
 export function loadConfig(): AppConfig {
+  const workspaceRoot = process.env.CODEX_CWD ?? process.cwd();
+  const stateDir = path.join(workspaceRoot, ".slack-codex-workers");
   const raw = {
     slackBotToken: process.env.SLACK_BOT_TOKEN,
     slackAppToken: process.env.SLACK_APP_TOKEN,
     slackSigningSecret: process.env.SLACK_SIGNING_SECRET ?? "unused-for-socket-mode",
     codexBin: process.env.CODEX_BIN ?? "codex",
-    codexCwd: process.env.CODEX_CWD ?? process.cwd(),
-    databasePath: process.env.DATABASE_PATH ?? path.join(process.cwd(), "slack-codex-workers.db"),
+    codexCwd: workspaceRoot,
+    databasePath: process.env.DATABASE_PATH ?? path.join(stateDir, "bridge.sqlite"),
     adminUserIds: splitCsv(process.env.SLACK_ADMIN_USER_IDS),
     allowedTeamId: process.env.SLACK_ALLOWED_TEAM_ID ?? null,
     messageEditThrottleMs: parseNumber(process.env.MESSAGE_EDIT_THROTTLE_MS, 1200),
     appPort: parseNumber(process.env.PORT, 3013),
     supervisorRestartEnabled: parseBoolean(process.env.SUPERVISOR_RESTART_ENABLED, false),
-    attachmentStorageDir: process.env.ATTACHMENT_STORAGE_DIR ?? path.join(process.cwd(), "storage", "attachments"),
+    launchMode: parseLaunchMode(process.env.LAUNCH_MODE),
+    attachmentStorageDir: process.env.ATTACHMENT_STORAGE_DIR ?? path.join(stateDir, "attachments"),
     attachmentMaxBytes: parseNumber(process.env.ATTACHMENT_MAX_BYTES, 1024 * 1024 * 1024),
     attachmentTotalMaxBytes: parseNullableNumber(process.env.ATTACHMENT_TOTAL_MAX_BYTES, null),
     attachmentDownloadTimeoutMs: parseNumber(process.env.ATTACHMENT_DOWNLOAD_TIMEOUT_MS, 600_000),
@@ -86,5 +93,15 @@ function parseBoolean(value: string | undefined, fallback: boolean): boolean {
   return fallback;
 }
 
+function parseLaunchMode(value: string | undefined): "dev" | "prod" {
+  const normalized = value?.trim().toLowerCase();
+  return normalized === "prod" ? "prod" : "dev";
+}
+
 export const DEFAULT_EFFORTS: ReasoningEffort[] = ["minimal", "low", "medium", "high", "xhigh"];
+export const DEFAULT_MODEL = "gpt-5.4";
+export const DEFAULT_RUNTIME_SETTINGS: RuntimeSettings = {
+  model: DEFAULT_MODEL,
+  effort: "medium",
+};
 export const EXIT_CODE_RESTART = 42;
