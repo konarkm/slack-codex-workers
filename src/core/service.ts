@@ -11,7 +11,7 @@ import {
 import { Store } from "../db/store.js";
 import { logInfo, logWarn } from "../logger.js";
 import { prepareSlackAttachments } from "../slack/attachments.js";
-import { appendFileNotes, renderFinalMessage, renderSystemMessage, renderWorklog } from "../slack/renderer.js";
+import { appendFileNotes, renderEventMessage, renderFinalMessage, renderSystemMessage } from "../slack/renderer.js";
 import { SlackGateway } from "../slack/slackGateway.js";
 import type {
   DmSessionRecord,
@@ -27,10 +27,7 @@ import type {
 } from "../types.js";
 
 interface RenderSessionState {
-  worklogItems: Map<string, WorklogItem>;
-  pendingEdits: Map<string, NodeJS.Timeout>;
-  latestTexts: Map<string, string>;
-  editRetryCounts: Map<string, number>;
+  pendingAssistant: { itemId: string; text: string } | null;
 }
 
 type RestartTarget = "bridge" | "both";
@@ -670,46 +667,40 @@ export class SlackCodexWorkersService extends EventEmitter {
   }
 
   private async onWorkerAgentDelta(workerKey: string, itemId: string, delta: string): Promise<void> {
-    const worker = this.requireWorker(workerKey);
-    await this.freezeWorkerWorklog(worker);
-    const slackTs = await this.ensureWorkerAgentMessage(worker, itemId, delta);
-    await this.scheduleSlackEdit(this.getWorkerQueueKey(worker), this.getWorkerEditKey(worker, slackTs), worker.channelId, slackTs, (current) => `${current}${delta}`);
+    void workerKey;
+    void itemId;
+    void delta;
   }
 
   private async onWorkerAgentMessage(workerKey: string, itemId: string, text: string): Promise<void> {
-    const worker = this.requireWorker(workerKey);
-    await this.freezeWorkerWorklog(worker);
-    const slackTs = await this.ensureWorkerAgentMessage(worker, itemId, text);
-    await this.enqueueSlackWrite(this.getWorkerQueueKey(worker), async () => {
-      await this.flushSlackEdit(this.getWorkerEditKey(worker, slackTs), worker.channelId, slackTs, text);
-    });
+    const state = this.getRenderState(`worker:${workerKey}`);
+    await this.flushPendingWorkerAssistant(workerKey, false);
+    state.pendingAssistant = { itemId, text };
   }
 
   private async onWorkerWorklogItem(workerKey: string, event: WorklogItem): Promise<void> {
+    if (event.status === "started") return;
     const worker = this.requireWorker(workerKey);
-    const state = this.getRenderState(`worker:${workerKey}`);
-    state.worklogItems.set(event.itemId, event);
-
-    if (!worker.currentWorklogSlackTs) {
-      const slackTs = await this.enqueueSlackWrite(this.getWorkerQueueKey(worker), async () =>
-        this.slack.postThreadReply(worker.channelId, worker.rootTs, renderWorklog(state.worklogItems.values())),
-      );
-      this.store.updateWorkerState(worker.key, { currentWorklogSlackTs: slackTs });
-      return;
-    }
-
-    await this.scheduleSlackEdit(
-      this.getWorkerQueueKey(worker),
-      this.getWorkerEditKey(worker, worker.currentWorklogSlackTs),
-      worker.channelId,
-      worker.currentWorklogSlackTs,
-      () => renderWorklog(state.worklogItems.values()),
-    );
+    await this.flushPendingWorkerAssistant(workerKey, false);
+    await this.enqueueSlackWrite(this.getWorkerQueueKey(worker), async () => {
+      await this.slack.postThreadReply(worker.channelId, worker.rootTs, renderEventMessage(event));
+    });
   }
 
   private async onWorkerCompleted(workerKey: string, assistantText: string, status: string, error?: string | null): Promise<void> {
     const worker = this.requireWorker(workerKey);
-    await this.freezeWorkerWorklog(worker);
+    const state = this.getRenderState(`worker:${workerKey}`);
+    const finalAssistantText = state.pendingAssistant?.text ?? assistantText;
+    state.pendingAssistant = null;
+
+    const finalText = status === "completed"
+      ? renderFinalMessage(worker.rootOwnerUserId, finalAssistantText)
+      : renderFinalMessage(worker.rootOwnerUserId, `Turn ${status}.${error ? ` ${error}` : ""}`);
+
+    await this.enqueueSlackWrite(this.getWorkerQueueKey(worker), async () => {
+      await this.slack.postThreadReply(worker.channelId, worker.rootTs, finalText);
+    });
+
     this.store.updateWorkerState(workerKey, {
       activeTurnId: null,
       status: normalizeTurnStatus(status),
@@ -719,55 +710,41 @@ export class SlackCodexWorkersService extends EventEmitter {
       pendingRequest: null,
       lastError: error ?? (status === "completed" ? null : `Turn ${status}`),
     });
-    const finalText = status === "completed"
-      ? renderFinalMessage(worker.rootOwnerUserId, assistantText)
-      : renderFinalMessage(worker.rootOwnerUserId, `Turn ${status}.${error ? ` ${error}` : ""}`);
-    await this.enqueueSlackWrite(this.getWorkerQueueKey(worker), async () => {
-      await this.slack.postThreadReply(worker.channelId, worker.rootTs, finalText);
-    });
   }
 
   private async onDmAgentDelta(teamId: string, userId: string, itemId: string, delta: string): Promise<void> {
-    const session = this.requireDmSession(teamId, userId);
-    await this.freezeDmWorklog(session);
-    const slackTs = await this.ensureDmAgentMessage(session, itemId, delta);
-    await this.scheduleSlackEdit(this.getDmQueueKey(teamId, userId), this.getDmEditKey(teamId, userId, slackTs), session.channelId, slackTs, (current) => `${current}${delta}`);
+    void teamId;
+    void userId;
+    void itemId;
+    void delta;
   }
 
   private async onDmAgentMessage(teamId: string, userId: string, itemId: string, text: string): Promise<void> {
-    const session = this.requireDmSession(teamId, userId);
-    await this.freezeDmWorklog(session);
-    const slackTs = await this.ensureDmAgentMessage(session, itemId, text);
-    await this.enqueueSlackWrite(this.getDmQueueKey(teamId, userId), async () => {
-      await this.flushSlackEdit(this.getDmEditKey(teamId, userId, slackTs), session.channelId, slackTs, text);
-    });
+    const state = this.getRenderState(`dm:${teamId}:${userId}`);
+    await this.flushPendingDmAssistant(teamId, userId, false);
+    state.pendingAssistant = { itemId, text };
   }
 
   private async onDmWorklogItem(teamId: string, userId: string, event: WorklogItem): Promise<void> {
+    if (event.status === "started") return;
     const session = this.requireDmSession(teamId, userId);
-    const state = this.getRenderState(`dm:${teamId}:${userId}`);
-    state.worklogItems.set(event.itemId, event);
-
-    if (!session.currentWorklogSlackTs) {
-      const slackTs = await this.enqueueSlackWrite(this.getDmQueueKey(teamId, userId), async () =>
-        this.slack.postTopLevelMessage(session.channelId, renderWorklog(state.worklogItems.values())),
-      );
-      this.store.upsertDmSession({ ...session, currentWorklogSlackTs: slackTs });
-      return;
-    }
-
-    await this.scheduleSlackEdit(
-      this.getDmQueueKey(teamId, userId),
-      this.getDmEditKey(teamId, userId, session.currentWorklogSlackTs),
-      session.channelId,
-      session.currentWorklogSlackTs,
-      () => renderWorklog(state.worklogItems.values()),
-    );
+    await this.flushPendingDmAssistant(teamId, userId, false);
+    await this.enqueueSlackWrite(this.getDmQueueKey(teamId, userId), async () => {
+      await this.slack.postTopLevelMessage(session.channelId, renderEventMessage(event));
+    });
   }
 
   private async onDmCompleted(teamId: string, userId: string, assistantText: string, status: string, error?: string | null): Promise<void> {
     const session = this.requireDmSession(teamId, userId);
-    await this.freezeDmWorklog(session);
+    const state = this.getRenderState(`dm:${teamId}:${userId}`);
+    const finalAssistantText = state.pendingAssistant?.text ?? assistantText;
+    state.pendingAssistant = null;
+    const text = status === "completed" ? finalAssistantText : `Turn ${status}.${error ? ` ${error}` : ""}`;
+
+    await this.enqueueSlackWrite(this.getDmQueueKey(teamId, userId), async () => {
+      await this.slack.postTopLevelMessage(session.channelId, text || "Done.");
+    });
+
     this.store.upsertDmSession({
       ...session,
       activeTurnId: null,
@@ -778,141 +755,41 @@ export class SlackCodexWorkersService extends EventEmitter {
       pendingRequest: null,
       lastError: error ?? (status === "completed" ? null : `Turn ${status}`),
     });
-    const text = status === "completed" ? assistantText : `Turn ${status}.${error ? ` ${error}` : ""}`;
-    await this.enqueueSlackWrite(this.getDmQueueKey(teamId, userId), async () => {
-      await this.slack.postTopLevelMessage(session.channelId, text || "Done.");
-    });
-  }
-
-  private async ensureWorkerAgentMessage(worker: WorkerRecord, itemId: string, initialText: string): Promise<string> {
-    const latest = this.requireWorker(worker.key);
-    if (latest.currentAgentItemId === itemId && latest.currentAgentSlackTs) {
-      return latest.currentAgentSlackTs;
-    }
-    const slackTs = await this.enqueueSlackWrite(this.getWorkerQueueKey(latest), async () =>
-      this.slack.postThreadReply(latest.channelId, latest.rootTs, initialText),
-    );
-    this.store.updateWorkerState(latest.key, {
-      currentAgentSlackTs: slackTs,
-      currentAgentItemId: itemId,
-      currentWorklogSlackTs: null,
-    });
-    return slackTs;
-  }
-
-  private async ensureDmAgentMessage(session: DmSessionRecord, itemId: string, initialText: string): Promise<string> {
-    const latest = this.requireDmSession(session.teamId, session.userId);
-    if (latest.currentAgentItemId === itemId && latest.currentAgentSlackTs) {
-      return latest.currentAgentSlackTs;
-    }
-    const slackTs = await this.enqueueSlackWrite(this.getDmQueueKey(session.teamId, session.userId), async () =>
-      this.slack.postTopLevelMessage(latest.channelId, initialText),
-    );
-    this.store.upsertDmSession({
-      ...latest,
-      currentAgentSlackTs: slackTs,
-      currentAgentItemId: itemId,
-      currentWorklogSlackTs: null,
-    });
-    return slackTs;
-  }
-
-  private async freezeWorkerWorklog(worker: WorkerRecord): Promise<void> {
-    if (worker.currentWorklogSlackTs) {
-      await this.flushPendingSlackEdit(
-        this.getWorkerQueueKey(worker),
-        this.getWorkerEditKey(worker, worker.currentWorklogSlackTs),
-        worker.channelId,
-        worker.currentWorklogSlackTs,
-      );
-    }
-    const state = this.getRenderState(`worker:${worker.key}`);
-    state.worklogItems.clear();
-  }
-
-  private async freezeDmWorklog(session: DmSessionRecord): Promise<void> {
-    if (session.currentWorklogSlackTs) {
-      await this.flushPendingSlackEdit(
-        this.getDmQueueKey(session.teamId, session.userId),
-        this.getDmEditKey(session.teamId, session.userId, session.currentWorklogSlackTs),
-        session.channelId,
-        session.currentWorklogSlackTs,
-      );
-    }
-    const state = this.getRenderState(`dm:${session.teamId}:${session.userId}`);
-    state.worklogItems.clear();
   }
 
   private getRenderState(key: string): RenderSessionState {
     let state = this.renderState.get(key);
     if (!state) {
       state = {
-        worklogItems: new Map(),
-        pendingEdits: new Map(),
-        latestTexts: new Map(),
-        editRetryCounts: new Map(),
+        pendingAssistant: null,
       };
       this.renderState.set(key, state);
     }
     return state;
   }
 
-  private async scheduleSlackEdit(
-    queueKey: string,
-    editKey: string,
-    channelId: string,
-    slackTs: string,
-    next: ((current: string) => string) | string,
-  ): Promise<void> {
-    const state = this.getRenderState("__edits__");
-    const current = state.latestTexts.get(editKey) ?? "";
-    const nextText = typeof next === "string" ? next : next(current);
-    state.latestTexts.set(editKey, nextText);
-    const existing = state.pendingEdits.get(editKey);
-    if (existing) return;
-    const timer = setTimeout(() => {
-      void this.enqueueSlackWrite(queueKey, async () => {
-        try {
-          await this.flushSlackEdit(editKey, channelId, slackTs, state.latestTexts.get(editKey) ?? "");
-          state.editRetryCounts.delete(editKey);
-        } catch (error) {
-          logWarn("slack edit flush failed", error instanceof Error ? error.message : String(error));
-          const retryCount = state.editRetryCounts.get(editKey) ?? 0;
-          if (retryCount < 1) {
-            state.editRetryCounts.set(editKey, retryCount + 1);
-            state.pendingEdits.delete(editKey);
-            await this.scheduleSlackEdit(queueKey, editKey, channelId, slackTs, state.latestTexts.get(editKey) ?? "");
-          }
-        }
-      });
-    }, this.config.messageEditThrottleMs);
-    state.pendingEdits.set(editKey, timer);
-  }
-
-  private async flushSlackEdit(editKey: string, channelId: string, slackTs: string, text: string): Promise<void> {
-    const state = this.getRenderState("__edits__");
-    const pending = state.pendingEdits.get(editKey);
-    if (pending) {
-      clearTimeout(pending);
-      state.pendingEdits.delete(editKey);
-    }
-    await this.slack.updateMessage(channelId, slackTs, text);
-    state.latestTexts.set(editKey, text);
-  }
-
-  private async flushPendingSlackEdit(queueKey: string, editKey: string, channelId: string, slackTs: string): Promise<void> {
-    const state = this.getRenderState("__edits__");
-    const pending = state.pendingEdits.get(editKey);
+  private async flushPendingWorkerAssistant(workerKey: string, final: boolean): Promise<void> {
+    const worker = this.requireWorker(workerKey);
+    const state = this.getRenderState(`worker:${workerKey}`);
+    const pending = state.pendingAssistant;
     if (!pending) return;
-    clearTimeout(pending);
-    state.pendingEdits.delete(editKey);
-    try {
-      await this.enqueueSlackWrite(queueKey, async () => {
-        await this.flushSlackEdit(editKey, channelId, slackTs, state.latestTexts.get(editKey) ?? "");
-      });
-    } catch (error) {
-      logWarn("failed to flush pending slack edit", error instanceof Error ? error.message : String(error));
-    }
+    state.pendingAssistant = null;
+    const text = final ? renderFinalMessage(worker.rootOwnerUserId, pending.text) : pending.text;
+    await this.enqueueSlackWrite(this.getWorkerQueueKey(worker), async () => {
+      await this.slack.postThreadReply(worker.channelId, worker.rootTs, text);
+    });
+  }
+
+  private async flushPendingDmAssistant(teamId: string, userId: string, final: boolean): Promise<void> {
+    const session = this.requireDmSession(teamId, userId);
+    const state = this.getRenderState(`dm:${teamId}:${userId}`);
+    const pending = state.pendingAssistant;
+    if (!pending) return;
+    state.pendingAssistant = null;
+    const text = final ? (pending.text || "Done.") : pending.text;
+    await this.enqueueSlackWrite(this.getDmQueueKey(teamId, userId), async () => {
+      await this.slack.postTopLevelMessage(session.channelId, text);
+    });
   }
 
   private async handleThreadCommand(worker: WorkerRecord, name: string, args: string[]): Promise<void> {

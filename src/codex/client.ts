@@ -259,11 +259,10 @@ export class CodexClient {
       const active = this.activeTurns.get(turnId);
       if (!active) return;
       this.activeTurns.delete(turnId);
-      const assistantText = active.assistantItemOrder
-        .map((itemId) => active.assistantTextByItem.get(itemId) ?? "")
-        .filter(Boolean)
-        .join("\n\n")
-        .trim();
+      const finalAssistantItemId = active.assistantItemOrder.at(-1);
+      const assistantText = finalAssistantItemId
+        ? (active.assistantTextByItem.get(finalAssistantItemId) ?? "").trim()
+        : "";
       await active.handlers.onCompleted({
         threadId: active.threadId,
         turnId,
@@ -486,7 +485,7 @@ function parseWorklogItem(itemRaw: unknown, phase: "started" | "completed"): Wor
   const item = itemRaw as Record<string, unknown>;
   const itemId = typeof item.id === "string" ? item.id : null;
   const type = typeof item.type === "string" ? item.type : null;
-  if (!itemId || !type || type === "agentMessage" || type === "reasoning") return null;
+  if (!itemId || !type || type === "agentMessage" || type === "reasoning" || type === "userMessage") return null;
 
   const started = phase === "started";
   const status = started ? "started" : hasFailure(item) ? "failed" : "completed";

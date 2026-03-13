@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { appendFileNotes, renderFinalMessage, renderWorklog } from "../slack/renderer.js";
+import { appendFileNotes, normalizeSlackMrkdwn, renderFinalMessage, renderWorklog } from "../slack/renderer.js";
 
 describe("renderer", () => {
   it("renders worklog lines", () => {
@@ -18,5 +18,10 @@ describe("renderer", () => {
 
   it("appends file notes", () => {
     expect(appendFileNotes("hi", ["a.pdf at /tmp/a.pdf"])).toContain("Attached files:");
+  });
+
+  it("normalizes common markdown for Slack mrkdwn", () => {
+    const text = normalizeSlackMrkdwn("**Bold** and __italic__ with [OpenAI](https://openai.com/).");
+    expect(text).toBe("*Bold* and _italic_ with <https://openai.com/|OpenAI>.");
   });
 });

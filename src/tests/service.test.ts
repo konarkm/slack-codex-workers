@@ -254,4 +254,59 @@ describe("service lifecycle decisions", () => {
     expect(store.listWorkers().length).toBe(1);
     store.close();
   });
+
+  it("posts completed work events and final assistant messages as separate worker replies in order", async () => {
+    const { service, slack, store } = await createService();
+    createWorker(service, {
+      status: "running",
+      activeTurnId: "turn-1",
+    });
+
+    await service.onWorkerAgentMessage("T1:C1:1.000", "agent-1", "Checking weather now.");
+    await service.onWorkerWorklogItem("T1:C1:1.000", {
+      itemId: "tool-1",
+      type: "webSearch",
+      title: "Web Search",
+      status: "completed",
+      detail: "weather: San Francisco, CA",
+    });
+    await service.onWorkerAgentMessage("T1:C1:1.000", "agent-2", "San Francisco is 58 F and clear.");
+    await service.onWorkerCompleted("T1:C1:1.000", "San Francisco is 58 F and clear.", "completed");
+
+    expect(slack.postThreadReply.mock.calls).toEqual([
+      ["C1", "1.000", "Checking weather now."],
+      ["C1", "1.000", ":white_check_mark: Web Search"],
+      ["C1", "1.000", "<@U1> San Francisco is 58 F and clear."],
+    ]);
+    expect(slack.updateMessage).not.toHaveBeenCalled();
+    const updated = store.getWorkerByKey("T1:C1:1.000");
+    expect(updated?.currentAgentSlackTs).toBeNull();
+    store.close();
+  });
+
+  it("ignores started work events and posts DM assistant messages without edits", async () => {
+    const { service, slack, store } = await createService();
+    createDmSession(service, {
+      status: "running",
+      activeTurnId: "turn-1",
+    });
+
+    await service.onDmWorklogItem("T1", "U-admin", {
+      itemId: "tool-1",
+      type: "webSearch",
+      title: "Web Search",
+      status: "started",
+      detail: "weather: San Francisco, CA",
+    });
+    await service.onDmAgentMessage("T1", "U-admin", "agent-1", "Checking weather now.");
+    await service.onDmCompleted("T1", "U-admin", "Checking weather now.", "completed");
+
+    expect(slack.postTopLevelMessage.mock.calls).toEqual([
+      ["D1", "Checking weather now."],
+    ]);
+    expect(slack.updateMessage).not.toHaveBeenCalled();
+    const updated = store.getDmSession("T1", "U-admin");
+    expect(updated?.currentAgentSlackTs).toBeNull();
+    store.close();
+  });
 });

@@ -1,5 +1,9 @@
 import type { WorklogItem } from "../types.js";
 
+const markdownLinkRegex = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g;
+const strongRegex = /(^|[^\w*])\*\*([^*\n]+)\*\*(?=[^\w*]|$)/g;
+const doubleUnderscoreRegex = /(^|[^\w_])__([^_\n]+)__(?=[^\w_]|$)/g;
+
 export function renderWorklog(items: Iterable<WorklogItem>): string {
   const rows = [...items];
   if (rows.length === 0) {
@@ -23,6 +27,11 @@ export function renderFinalMessage(ownerUserId: string, text: string): string {
   return `<@${ownerUserId}> ${trimmed}`;
 }
 
+export function renderEventMessage(item: WorklogItem): string {
+  const icon = item.status === "failed" ? ":x:" : ":white_check_mark:";
+  return `${icon} ${item.title}`;
+}
+
 export function appendFileNotes(text: string, fileNotes: string[]): string {
   if (fileNotes.length === 0) return text;
   return [text.trim(), "", "Attached files:", ...fileNotes.map((note) => `- ${note}`)].filter(Boolean).join("\n");
@@ -30,4 +39,11 @@ export function appendFileNotes(text: string, fileNotes: string[]): string {
 
 export function renderSystemMessage(text: string): string {
   return `_System_: ${text.trim()}`;
+}
+
+export function normalizeSlackMrkdwn(text: string): string {
+  return text
+    .replace(markdownLinkRegex, (_match, label: string, url: string) => `<${url}|${label}>`)
+    .replace(strongRegex, (_match, prefix: string, content: string) => `${prefix}*${content}*`)
+    .replace(doubleUnderscoreRegex, (_match, prefix: string, content: string) => `${prefix}_${content}_`);
 }

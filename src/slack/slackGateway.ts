@@ -1,6 +1,7 @@
 import { App } from "@slack/bolt";
 import type { AppConfig } from "../config.js";
 import { logInfo } from "../logger.js";
+import { normalizeSlackMrkdwn } from "./renderer.js";
 import type { ChannelRecord, SlackFileRef } from "../types.js";
 
 interface ConversationsListResponse {
@@ -77,11 +78,12 @@ export class SlackGateway {
   }
 
   async postThreadReply(channelId: string, threadTs: string, text: string): Promise<string> {
+    const normalized = normalizeSlackMrkdwn(text);
     const response = await this.app.client.chat.postMessage({
       token: this.config.slackBotToken,
       channel: channelId,
       thread_ts: threadTs,
-      text,
+      text: normalized,
       mrkdwn: true,
     }) as PostMessageResponse;
     if (!response.ts) {
@@ -91,19 +93,21 @@ export class SlackGateway {
   }
 
   async updateMessage(channelId: string, slackTs: string, text: string): Promise<void> {
+    const normalized = normalizeSlackMrkdwn(text);
     await this.app.client.chat.update({
       token: this.config.slackBotToken,
       channel: channelId,
       ts: slackTs,
-      text,
+      text: normalized,
     });
   }
 
   async postTopLevelMessage(channelId: string, text: string): Promise<string> {
+    const normalized = normalizeSlackMrkdwn(text);
     const response = await this.app.client.chat.postMessage({
       token: this.config.slackBotToken,
       channel: channelId,
-      text,
+      text: normalized,
       mrkdwn: true,
     }) as PostMessageResponse;
     if (!response.ts) {
