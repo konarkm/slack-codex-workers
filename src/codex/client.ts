@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { DEFAULT_EFFORTS } from "../config.js";
-import { logInfo, logWarn } from "../logger.js";
-import type { JsonRpcId, ReasoningEffort, RuntimeSettings, TurnInput, WorklogItem } from "../types.js";
+import { logWarn } from "../logger.js";
+import type { JsonRpcId, PendingRequestKind, ReasoningEffort, RuntimeSettings, TurnInput, WorklogItem } from "../types.js";
 import { CodexRpcClient, type RpcNotification, type RpcServerRequest } from "./rpcClient.js";
 import {
   adminDeveloperInstructions,
@@ -43,10 +43,26 @@ export interface DynamicToolHandlers {
   spawnWorker(args: z.infer<typeof slackSpawnWorkerArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
 }
 
+export interface InteractiveRequest {
+  kind: PendingRequestKind;
+  requestId: JsonRpcId;
+  threadId: string;
+  turnId: string | null;
+  itemId: string | null;
+  promptText: string;
+  questionIds: string[];
+  schemaJson: string | null;
+  params: Record<string, unknown>;
+}
+
+type ThreadRunState = "running" | "idle" | "missing" | "unknown";
+
 export class CodexClient {
   private readonly rpc: CodexRpcClient;
   private readonly activeTurns = new Map<string, ActiveTurnState>();
   private dynamicToolHandlers: DynamicToolHandlers | null = null;
+  private interactiveRequestHandler: ((request: InteractiveRequest) => Promise<void>) | null = null;
+  private notificationQueue = Promise.resolve();
 
   constructor(codexBin: string, cwd: string) {
     this.rpc = new CodexRpcClient(codexBin, cwd, {
@@ -56,7 +72,11 @@ export class CodexClient {
     });
 
     this.rpc.on("notification", (event: RpcNotification) => {
-      void this.handleNotification(event);
+      this.notificationQueue = this.notificationQueue
+        .then(async () => this.handleNotification(event))
+        .catch((error) => {
+          logWarn("notification handling failed", error instanceof Error ? error.message : String(error));
+        });
     });
     this.rpc.on("request", (request: RpcServerRequest) => {
       void this.handleServerRequest(request);
@@ -65,6 +85,10 @@ export class CodexClient {
 
   registerDynamicToolHandlers(handlers: DynamicToolHandlers): void {
     this.dynamicToolHandlers = handlers;
+  }
+
+  registerInteractiveRequestHandler(handler: (request: InteractiveRequest) => Promise<void>): void {
+    this.interactiveRequestHandler = handler;
   }
 
   async start(): Promise<void> {
@@ -168,6 +192,27 @@ export class CodexClient {
     return normalizeThreadStatus(parsed.thread.status);
   }
 
+  async reconcileThreadForSend(threadId: string): Promise<ThreadRunState> {
+    try {
+      const raw = await this.rpc.request<unknown>("thread/resume", {
+        threadId,
+        persistExtendedHistory: true,
+      });
+      const parsed = threadReadSchema.parse(raw);
+      const status = normalizeThreadStatus(parsed.thread.status);
+      if (status === "running" || status === "inProgress" || status === "active") return "running";
+      if (status === "idle" || status === "notLoaded" || status === "systemError") return "idle";
+      return "unknown";
+    } catch (error) {
+      if (isMissingThreadError(error)) return "missing";
+      return "unknown";
+    }
+  }
+
+  async respondToServerRequest(id: JsonRpcId, result: unknown): Promise<void> {
+    await this.rpc.respond(id, result);
+  }
+
   private async handleNotification(event: RpcNotification): Promise<void> {
     if (event.method === "item/agentMessage/delta") {
       const params = event.params as Record<string, unknown>;
@@ -207,8 +252,9 @@ export class CodexClient {
     }
 
     if (event.method === "turn/completed") {
-      const params = event.params as Record<string, any>;
-      const turnId = typeof params.turn?.id === "string" ? params.turn.id : "";
+      const params = event.params as Record<string, unknown>;
+      const turn = (params.turn ?? {}) as Record<string, unknown>;
+      const turnId = typeof turn.id === "string" ? turn.id : "";
       const active = this.activeTurns.get(turnId);
       if (!active) return;
       this.activeTurns.delete(turnId);
@@ -220,32 +266,48 @@ export class CodexClient {
       await active.handlers.onCompleted({
         threadId: active.threadId,
         turnId,
-        status: String(params.turn?.status ?? ""),
+        status: typeof turn.status === "string" ? turn.status : "",
         assistantText,
-        error: params.turn?.error?.message ?? params.turn?.error?.error?.message ?? null,
+        error: extractErrorMessage(turn.error),
       });
     }
   }
 
   private async handleServerRequest(request: RpcServerRequest): Promise<void> {
     try {
-      if (
-        request.method === "item/commandExecution/requestApproval"
-        || request.method === "item/fileChange/requestApproval"
-        || request.method === "execCommandApproval"
-        || request.method === "applyPatchApproval"
-      ) {
-        await this.rpc.respond(request.id, { decision: request.method.startsWith("item/") ? "accept" : "allow" });
+      if (request.method === "item/commandExecution/requestApproval") {
+        await this.rpc.respond(request.id, { decision: "accept" });
+        return;
+      }
+      if (request.method === "item/fileChange/requestApproval") {
+        await this.rpc.respond(request.id, { decision: "accept" });
+        return;
+      }
+      if (request.method === "item/permissions/requestApproval") {
+        const params = request.params as Record<string, unknown>;
+        await this.rpc.respond(request.id, {
+          permissions: params.permissions ?? {},
+          scope: "session",
+        });
+        return;
+      }
+      if (request.method === "execCommandApproval" || request.method === "applyPatchApproval") {
+        await this.rpc.respond(request.id, { decision: "approved_for_session" });
         return;
       }
 
       if (request.method === "item/tool/requestUserInput") {
-        await this.rpc.respond(request.id, { answers: {} });
+        await this.forwardInteractiveRequest("tool_user_input", request);
+        return;
+      }
+
+      if (request.method === "mcpServer/elicitation/request") {
+        await this.forwardInteractiveRequest("mcp_elicitation", request);
         return;
       }
 
       if (request.method === "account/chatgptAuthTokens/refresh") {
-        await this.rpc.respond(request.id, { accepted: true });
+        await this.rpc.respondError(request.id, -32001, "ChatGPT token refresh is unsupported here; authenticate codex locally.");
         return;
       }
 
@@ -258,6 +320,53 @@ export class CodexClient {
     } catch (error) {
       await this.rpc.respondError(request.id, -32603, error instanceof Error ? error.message : "Internal server request error");
     }
+  }
+
+  private async forwardInteractiveRequest(kind: PendingRequestKind, request: RpcServerRequest): Promise<void> {
+    if (!this.interactiveRequestHandler) {
+      await this.rpc.respondError(request.id, -32000, "Interactive request surfaced without handler.");
+      return;
+    }
+
+    const params = (request.params ?? {}) as Record<string, unknown>;
+    if (kind === "tool_user_input") {
+      const questions = Array.isArray(params.questions) ? params.questions as Array<Record<string, unknown>> : [];
+      const promptText = questions.map((question) => {
+        const id = typeof question.id === "string" ? question.id : "question";
+        const header = typeof question.header === "string" ? question.header : id;
+        const text = typeof question.question === "string" ? question.question : header;
+        return `${header} (${id}): ${text}`;
+      }).join("\n");
+      await this.interactiveRequestHandler({
+        kind,
+        requestId: request.id,
+        threadId: stringParam(params.threadId),
+        turnId: nullableStringParam(params.turnId),
+        itemId: nullableStringParam(params.itemId),
+        promptText,
+        questionIds: questions.map((question) => String(question.id ?? "")).filter(Boolean),
+        schemaJson: JSON.stringify(params.questions ?? null),
+        params,
+      });
+      return;
+    }
+
+    const mode = typeof params.mode === "string" ? params.mode : "form";
+    const message = typeof params.message === "string" ? params.message : "Additional input is required.";
+    const promptText = mode === "url"
+      ? `${message}\nOpen: ${String(params.url ?? "")}\nReply with: accept, decline, or cancel`
+      : `${message}\nReply with JSON matching the requested schema.`;
+    await this.interactiveRequestHandler({
+      kind,
+      requestId: request.id,
+      threadId: stringParam(params.threadId),
+      turnId: nullableStringParam(params.turnId),
+      itemId: null,
+      promptText,
+      questionIds: [],
+      schemaJson: JSON.stringify(params),
+      params,
+    });
   }
 
   private async handleDynamicToolCall(id: JsonRpcId, params: unknown): Promise<void> {
@@ -305,8 +414,8 @@ function buildTurnInput(input: TurnInput): Array<{ type: string; [key: string]: 
   return items;
 }
 
-function isAgentMessage(item: any): item is { id?: string; type: string; text: string } {
-  return item && typeof item === "object" && item.type === "agentMessage" && typeof item.text === "string";
+function isAgentMessage(item: unknown): item is { id?: string; type: string; text: string } {
+  return Boolean(item && typeof item === "object" && (item as Record<string, unknown>).type === "agentMessage" && typeof (item as Record<string, unknown>).text === "string");
 }
 
 function normalizeThreadStatus(status: unknown): string {
@@ -317,12 +426,57 @@ function normalizeThreadStatus(status: unknown): string {
   return "";
 }
 
+function extractErrorMessage(error: unknown): string | null {
+  if (!error || typeof error !== "object") return null;
+  const record = error as Record<string, unknown>;
+  if (typeof record.message === "string") return record.message;
+  if (record.error && typeof record.error === "object" && typeof (record.error as Record<string, unknown>).message === "string") {
+    return String((record.error as Record<string, unknown>).message);
+  }
+  return null;
+}
+
+function stringParam(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function nullableStringParam(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
 function shouldRetryWithResume(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   const message = error.message.toLowerCase();
   return message.includes("thread not loaded")
     || message.includes("no active rollout found")
     || message.includes("no rollout found")
+    || message.includes("thread is closing")
+    || message.includes("retry thread/resume")
+    || message.includes("not loaded")
+    || (message.includes("thread") && message.includes("not found"));
+}
+
+export function isMissingThreadError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const message = error.message.toLowerCase();
+  return message.includes("no active rollout found for thread id")
+    || message.includes("no rollout found for thread id")
+    || message.includes("no thread found")
+    || (message.includes("thread") && message.includes("does not exist"))
+    || (message.includes("thread") && message.includes("not found"));
+}
+
+export function shouldStartFreshTurnAfterSteerError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const message = error.message.toLowerCase();
+  return message.includes("no active turn to steer")
+    || message.includes("expected active turn id")
+    || message.includes("thread not loaded")
+    || message.includes("thread is closing")
+    || message.includes("retry thread/resume")
+    || message.includes("no active rollout found for thread id")
+    || message.includes("no rollout found for thread id")
+    || (message.includes("thread") && message.includes("does not exist"))
     || (message.includes("thread") && message.includes("not found"));
 }
 
@@ -373,7 +527,7 @@ function parseWorklogItem(itemRaw: unknown, phase: "started" | "completed"): Wor
     return {
       itemId,
       type,
-      title: "Compact context",
+      title: started ? "Compacting context" : "Context compacted",
       status,
       detail: null,
     };

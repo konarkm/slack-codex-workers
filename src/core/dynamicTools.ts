@@ -23,7 +23,7 @@ export const workerDynamicTools = [
     inputSchema: {
       type: "object",
       additionalProperties: false,
-      required: ["title", "initialUserMessage", "mode"],
+      required: ["title", "initialUserMessage"],
       properties: {
         channel: { type: "string", minLength: 1 },
         title: { type: "string", minLength: 1 },
@@ -50,7 +50,7 @@ export const slackSpawnWorkerArgsSchema = z.object({
   channel: z.string().min(1).optional(),
   title: z.string().min(1),
   initialUserMessage: z.string().min(1),
-  mode: z.enum(["fresh", "fork"]),
+  mode: z.enum(["fresh", "fork"]).default("fresh"),
 });
 
 export const workerDeveloperInstructions = [

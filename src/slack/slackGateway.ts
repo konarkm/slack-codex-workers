@@ -1,5 +1,4 @@
 import { App } from "@slack/bolt";
-import type { AllMiddlewareArgs, SlackEventMiddlewareArgs } from "@slack/bolt";
 import type { AppConfig } from "../config.js";
 import { logInfo } from "../logger.js";
 import type { ChannelRecord, SlackFileRef } from "../types.js";
@@ -137,6 +136,7 @@ export class SlackGateway {
         const name = channel.name?.trim();
         const channelId = channel.id?.trim();
         if (!name || !channelId) continue;
+        if (!channel.is_member) continue;
         if (query && !name.toLowerCase().includes(query.toLowerCase())) continue;
         channels.push({
           teamId,
@@ -159,7 +159,7 @@ export class SlackGateway {
     const channels = await this.listChannels(teamId);
     const normalized = trimmed.replace(/^#/, "").toLowerCase();
     const match = channels.find((channel) => channel.channelId === trimmed || channel.name.toLowerCase() === normalized);
-    if (match) return match;
+    if (match && match.isMember) return match;
     if (!trimmed && fallbackChannelId) {
       const fallback = channels.find((channel) => channel.channelId === fallbackChannelId);
       if (fallback) return fallback;

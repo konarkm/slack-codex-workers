@@ -17,7 +17,7 @@ Slack-first bridge for running many Codex app-server workers behind one Slack bo
 Implemented in this repo:
 
 - single-workspace Bolt Socket Mode bridge
-- SQLite persistence for worker mappings, DM sessions, defaults, cached channels, and message dedupe
+- SQLite persistence for worker mappings, DM sessions, defaults, cached channels, durable inbound message state, and attachment metadata
 - one shared `codex app-server` subprocess
 - dynamic tools:
   - `slack_list_channels`
@@ -33,12 +33,12 @@ Implemented in this repo:
   - `/model`
   - `/effort`
   - `/compact`
+  - `/recover`
   - `/restart <codex|bridge|both>`
 - image and file attachment ingestion
 
 Not implemented yet:
 
-- worker rehydration of in-flight turns after bridge restart
 - parent worker wait/watch loop for child workers
 - multi-workspace OAuth install flow
 - HTTP health/readiness endpoints
@@ -78,6 +78,12 @@ Key variables:
 - `SLACK_ALLOWED_TEAM_ID`: optional hard guard for one workspace
 - `CODEX_CWD`: repo/project directory Codex should operate in by default
 - `DATABASE_PATH`: SQLite path
+- `SUPERVISOR_RESTART_ENABLED`: set to `1` only when launching under `scripts/run.sh` or another restart-capable supervisor
+- `ATTACHMENT_STORAGE_DIR`: local directory for downloaded Slack files
+- `ATTACHMENT_MAX_BYTES`: per-file cap in bytes
+- `ATTACHMENT_TOTAL_MAX_BYTES`: total cap per Slack message in bytes
+- `ATTACHMENT_DOWNLOAD_TIMEOUT_MS`: timeout per file download
+- `ATTACHMENT_RETENTION_MS`: optional future-facing TTL; use `off`/`null` to disable auto-pruning
 
 ## Run
 
@@ -93,6 +99,12 @@ npm run build
 npm start
 ```
 
+For supervisor-backed bridge restarts:
+
+```bash
+npm run start:supervised
+```
+
 ## Behavior Notes
 
 - Channel roots create workers keyed by `(teamId, channelId, rootTs)`.
@@ -101,3 +113,8 @@ npm start
 - If no turn is active, replies start a fresh turn on the same worker.
 - DM conversations are linear and use one Codex admin thread per admin user.
 - Child workers inherit the root human owner for final mentions.
+- If persisted active-turn state is stale after restart, the bridge clears it and posts a visible system note before continuing.
+- If the backing Codex thread is missing, the Slack thread or admin DM enters recovery-required mode until `/recover` is used.
+- Attachment-only messages are supported; images are passed as images and other files are stored locally with file-path notes.
+- `slack_list_channels` and child-worker posting only use channels the bot is already a member of.
+- `/restart bridge` and `/restart both` only work when `SUPERVISOR_RESTART_ENABLED=1` and the process is launched under a supervisor that restarts on exit code `42`.

@@ -1,5 +1,17 @@
 import Database from "better-sqlite3";
-import type { ChannelRecord, DmSessionRecord, RuntimeSettings, TeamDefaults, WorkerRecord } from "../types.js";
+import type {
+  ChannelRecord,
+  DmSessionRecord,
+  InboundMessageKind,
+  InboundMessageRecord,
+  InboundMessageStatus,
+  MessageAttachmentRecord,
+  PendingRequestState,
+  RuntimeSettings,
+  SessionStatus,
+  TeamDefaults,
+  WorkerRecord,
+} from "../types.js";
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -17,6 +29,15 @@ function parseSettings(value: string | null | undefined): RuntimeSettings {
     };
   } catch {
     return { model: null, effort: null };
+  }
+}
+
+function parsePendingRequest(value: string | null | undefined): PendingRequestState | null {
+  if (!value) return null;
+  try {
+    return JSON.parse(value) as PendingRequestState;
+  } catch {
+    return null;
   }
 }
 
@@ -55,6 +76,9 @@ export class Store {
         current_worklog_slack_ts TEXT,
         settings_json TEXT NOT NULL,
         parent_worker_key TEXT,
+        last_error TEXT,
+        last_inbound_message_ts TEXT,
+        pending_request_json TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         UNIQUE(team_id, channel_id, root_ts)
@@ -66,10 +90,14 @@ export class Store {
         channel_id TEXT NOT NULL,
         app_thread_id TEXT,
         active_turn_id TEXT,
+        status TEXT NOT NULL DEFAULT 'idle',
         current_agent_slack_ts TEXT,
         current_agent_item_id TEXT,
         current_worklog_slack_ts TEXT,
         settings_json TEXT NOT NULL,
+        last_error TEXT,
+        last_inbound_message_ts TEXT,
+        pending_request_json TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         PRIMARY KEY(team_id, user_id)
@@ -85,20 +113,57 @@ export class Store {
         PRIMARY KEY(team_id, channel_id)
       );
 
-      CREATE TABLE IF NOT EXISTS processed_messages (
+      CREATE TABLE IF NOT EXISTS inbound_messages (
+        key TEXT PRIMARY KEY,
         team_id TEXT NOT NULL,
         channel_id TEXT NOT NULL,
         message_ts TEXT NOT NULL,
+        root_ts TEXT NOT NULL,
         kind TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        status TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        worker_key TEXT,
+        app_thread_id TEXT,
+        turn_id TEXT,
         created_at TEXT NOT NULL,
-        PRIMARY KEY(team_id, channel_id, message_ts, kind)
+        updated_at TEXT NOT NULL,
+        UNIQUE(team_id, channel_id, message_ts, kind)
+      );
+
+      CREATE TABLE IF NOT EXISTS message_attachments (
+        key TEXT PRIMARY KEY,
+        message_key TEXT NOT NULL,
+        slack_file_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        mimetype TEXT NOT NULL,
+        local_path TEXT NOT NULL,
+        is_image INTEGER NOT NULL,
+        size_bytes INTEGER,
+        status TEXT NOT NULL,
+        note TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(message_key, slack_file_id)
       );
     `);
 
-    const dmSessionColumns = this.db.prepare("PRAGMA table_info(dm_sessions)").all() as Array<{ name?: string }>;
-    const hasChannelId = dmSessionColumns.some((column) => column.name === "channel_id");
-    if (!hasChannelId) {
-      this.db.exec("ALTER TABLE dm_sessions ADD COLUMN channel_id TEXT NOT NULL DEFAULT ''");
+    this.ensureColumn("workers", "last_error", "TEXT");
+    this.ensureColumn("workers", "last_inbound_message_ts", "TEXT");
+    this.ensureColumn("workers", "pending_request_json", "TEXT");
+    this.ensureColumn("dm_sessions", "channel_id", "TEXT NOT NULL DEFAULT ''");
+    this.ensureColumn("dm_sessions", "status", "TEXT NOT NULL DEFAULT 'idle'");
+    this.ensureColumn("dm_sessions", "last_error", "TEXT");
+    this.ensureColumn("dm_sessions", "last_inbound_message_ts", "TEXT");
+    this.ensureColumn("dm_sessions", "pending_request_json", "TEXT");
+  }
+
+  private ensureColumn(table: string, column: string, definition: string): void {
+    const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name?: string }>;
+    const hasColumn = columns.some((entry) => entry.name === column);
+    if (!hasColumn) {
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
     }
   }
 
@@ -116,6 +181,21 @@ export class Store {
     return row ? this.toWorker(row) : null;
   }
 
+  getWorkerByKey(key: string): WorkerRecord | null {
+    const row = this.db.prepare("SELECT * FROM workers WHERE key = ?").get(key) as Record<string, unknown> | undefined;
+    return row ? this.toWorker(row) : null;
+  }
+
+  listWorkers(): WorkerRecord[] {
+    const rows = this.db.prepare("SELECT * FROM workers ORDER BY created_at ASC").all() as Record<string, unknown>[];
+    return rows.map((row) => this.toWorker(row));
+  }
+
+  listWorkersWithActiveTurns(): WorkerRecord[] {
+    const rows = this.db.prepare("SELECT * FROM workers WHERE active_turn_id IS NOT NULL ORDER BY created_at ASC").all() as Record<string, unknown>[];
+    return rows.map((row) => this.toWorker(row));
+  }
+
   upsertWorker(input: Omit<WorkerRecord, "createdAt" | "updatedAt"> & { createdAt?: string; updatedAt?: string }): WorkerRecord {
     const createdAt = input.createdAt ?? nowIso();
     const updatedAt = input.updatedAt ?? nowIso();
@@ -123,8 +203,8 @@ export class Store {
       INSERT INTO workers (
         key, team_id, channel_id, root_ts, app_thread_id, active_turn_id, owner_user_id, root_owner_user_id,
         status, current_agent_slack_ts, current_agent_item_id, current_worklog_slack_ts, settings_json,
-        parent_worker_key, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        parent_worker_key, last_error, last_inbound_message_ts, pending_request_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(team_id, channel_id, root_ts) DO UPDATE SET
         app_thread_id=excluded.app_thread_id,
         active_turn_id=excluded.active_turn_id,
@@ -136,6 +216,9 @@ export class Store {
         current_worklog_slack_ts=excluded.current_worklog_slack_ts,
         settings_json=excluded.settings_json,
         parent_worker_key=excluded.parent_worker_key,
+        last_error=excluded.last_error,
+        last_inbound_message_ts=excluded.last_inbound_message_ts,
+        pending_request_json=excluded.pending_request_json,
         updated_at=excluded.updated_at
     `).run(
       input.key,
@@ -152,6 +235,9 @@ export class Store {
       input.currentWorklogSlackTs,
       JSON.stringify(input.settings),
       input.parentWorkerKey,
+      input.lastError,
+      input.lastInboundMessageTs,
+      input.pendingRequest ? JSON.stringify(input.pendingRequest) : null,
       createdAt,
       updatedAt,
     );
@@ -160,11 +246,10 @@ export class Store {
 
   updateWorkerState(
     key: string,
-    patch: Partial<Pick<WorkerRecord, "activeTurnId" | "status" | "currentAgentSlackTs" | "currentAgentItemId" | "currentWorklogSlackTs" | "settings">>,
+    patch: Partial<Pick<WorkerRecord, "activeTurnId" | "status" | "currentAgentSlackTs" | "currentAgentItemId" | "currentWorklogSlackTs" | "settings" | "lastError" | "lastInboundMessageTs" | "pendingRequest">>,
   ): void {
-    const current = this.db.prepare("SELECT * FROM workers WHERE key = ?").get(key) as Record<string, unknown> | undefined;
-    if (!current) return;
-    const worker = this.toWorker(current);
+    const worker = this.getWorkerByKey(key);
+    if (!worker) return;
     this.db.prepare(`
       UPDATE workers SET
         active_turn_id = ?,
@@ -173,6 +258,9 @@ export class Store {
         current_agent_item_id = ?,
         current_worklog_slack_ts = ?,
         settings_json = ?,
+        last_error = ?,
+        last_inbound_message_ts = ?,
+        pending_request_json = ?,
         updated_at = ?
       WHERE key = ?
     `).run(
@@ -182,34 +270,27 @@ export class Store {
       patch.currentAgentItemId ?? worker.currentAgentItemId,
       patch.currentWorklogSlackTs ?? worker.currentWorklogSlackTs,
       JSON.stringify(patch.settings ?? worker.settings),
+      patch.lastError ?? worker.lastError,
+      patch.lastInboundMessageTs ?? worker.lastInboundMessageTs,
+      JSON.stringify(patch.pendingRequest ?? worker.pendingRequest),
       nowIso(),
       key,
     );
   }
 
-  listActiveWorkers(): WorkerRecord[] {
-    const rows = this.db.prepare("SELECT * FROM workers WHERE active_turn_id IS NOT NULL").all() as Record<string, unknown>[];
-    return rows.map((row) => this.toWorker(row));
-  }
-
-  hasProcessedMessage(teamId: string, channelId: string, messageTs: string, kind: string): boolean {
-    const row = this.db
-      .prepare("SELECT 1 FROM processed_messages WHERE team_id = ? AND channel_id = ? AND message_ts = ? AND kind = ?")
-      .get(teamId, channelId, messageTs, kind) as Record<string, unknown> | undefined;
-    return Boolean(row);
-  }
-
-  markProcessedMessage(teamId: string, channelId: string, messageTs: string, kind: string): void {
-    this.db.prepare(`
-      INSERT INTO processed_messages (team_id, channel_id, message_ts, kind, created_at)
-      VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(team_id, channel_id, message_ts, kind) DO NOTHING
-    `).run(teamId, channelId, messageTs, kind, nowIso());
-  }
-
   getDmSession(teamId: string, userId: string): DmSessionRecord | null {
     const row = this.db.prepare("SELECT * FROM dm_sessions WHERE team_id = ? AND user_id = ?").get(teamId, userId) as Record<string, unknown> | undefined;
     return row ? this.toDmSession(row) : null;
+  }
+
+  listDmSessions(): DmSessionRecord[] {
+    const rows = this.db.prepare("SELECT * FROM dm_sessions ORDER BY created_at ASC").all() as Record<string, unknown>[];
+    return rows.map((row) => this.toDmSession(row));
+  }
+
+  listDmSessionsWithActiveTurns(): DmSessionRecord[] {
+    const rows = this.db.prepare("SELECT * FROM dm_sessions WHERE active_turn_id IS NOT NULL ORDER BY created_at ASC").all() as Record<string, unknown>[];
+    return rows.map((row) => this.toDmSession(row));
   }
 
   upsertDmSession(input: Omit<DmSessionRecord, "createdAt" | "updatedAt"> & { createdAt?: string; updatedAt?: string }): DmSessionRecord {
@@ -218,17 +299,21 @@ export class Store {
     const updatedAt = input.updatedAt ?? nowIso();
     this.db.prepare(`
       INSERT INTO dm_sessions (
-        team_id, user_id, channel_id, app_thread_id, active_turn_id, current_agent_slack_ts, current_agent_item_id,
-        current_worklog_slack_ts, settings_json, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        team_id, user_id, channel_id, app_thread_id, active_turn_id, status, current_agent_slack_ts, current_agent_item_id,
+        current_worklog_slack_ts, settings_json, last_error, last_inbound_message_ts, pending_request_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(team_id, user_id) DO UPDATE SET
         channel_id=excluded.channel_id,
         app_thread_id=excluded.app_thread_id,
         active_turn_id=excluded.active_turn_id,
+        status=excluded.status,
         current_agent_slack_ts=excluded.current_agent_slack_ts,
         current_agent_item_id=excluded.current_agent_item_id,
         current_worklog_slack_ts=excluded.current_worklog_slack_ts,
         settings_json=excluded.settings_json,
+        last_error=excluded.last_error,
+        last_inbound_message_ts=excluded.last_inbound_message_ts,
+        pending_request_json=excluded.pending_request_json,
         updated_at=excluded.updated_at
     `).run(
       input.teamId,
@@ -236,10 +321,14 @@ export class Store {
       input.channelId,
       input.appThreadId,
       input.activeTurnId,
+      input.status,
       input.currentAgentSlackTs,
       input.currentAgentItemId,
       input.currentWorklogSlackTs,
       JSON.stringify(input.settings),
+      input.lastError,
+      input.lastInboundMessageTs,
+      input.pendingRequest ? JSON.stringify(input.pendingRequest) : null,
       createdAt,
       updatedAt,
     );
@@ -292,13 +381,163 @@ export class Store {
       const like = `%${query.toLowerCase()}%`;
       const rows = this.db.prepare(`
         SELECT * FROM channel_cache
-        WHERE team_id = ? AND lower(name) LIKE ?
+        WHERE team_id = ? AND is_member = 1 AND lower(name) LIKE ?
         ORDER BY name ASC
       `).all(teamId, like) as Record<string, unknown>[];
       return rows.map((row) => this.toChannel(row));
     }
-    const rows = this.db.prepare("SELECT * FROM channel_cache WHERE team_id = ? ORDER BY name ASC").all(teamId) as Record<string, unknown>[];
+    const rows = this.db.prepare("SELECT * FROM channel_cache WHERE team_id = ? AND is_member = 1 ORDER BY name ASC").all(teamId) as Record<string, unknown>[];
     return rows.map((row) => this.toChannel(row));
+  }
+
+  createOrGetInboundMessage(input: {
+    key: string;
+    teamId: string;
+    channelId: string;
+    messageTs: string;
+    rootTs: string;
+    kind: InboundMessageKind;
+    payloadJson: string;
+  }): InboundMessageRecord {
+    this.db.prepare(`
+      INSERT INTO inbound_messages (
+        key, team_id, channel_id, message_ts, root_ts, kind, payload_json, status, attempts, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'received', 0, ?, ?)
+      ON CONFLICT(team_id, channel_id, message_ts, kind) DO NOTHING
+    `).run(
+      input.key,
+      input.teamId,
+      input.channelId,
+      input.messageTs,
+      input.rootTs,
+      input.kind,
+      input.payloadJson,
+      nowIso(),
+      nowIso(),
+    );
+    return this.getInboundMessage(input.key)!;
+  }
+
+  getInboundMessage(key: string): InboundMessageRecord | null {
+    const row = this.db.prepare("SELECT * FROM inbound_messages WHERE key = ?").get(key) as Record<string, unknown> | undefined;
+    return row ? this.toInboundMessage(row) : null;
+  }
+
+  listReplayableInboundMessages(): InboundMessageRecord[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM inbound_messages
+      WHERE status = 'received'
+      ORDER BY created_at ASC, key ASC
+    `).all() as Record<string, unknown>[];
+    return rows.map((row) => this.toInboundMessage(row));
+  }
+
+  resetInterruptedInboundMessages(): void {
+    this.db.prepare(`
+      UPDATE inbound_messages
+      SET status = 'received', updated_at = ?
+      WHERE status = 'processing'
+    `).run(nowIso());
+  }
+
+  claimInboundMessage(key: string): InboundMessageRecord | null {
+    const updated = this.db.prepare(`
+      UPDATE inbound_messages
+      SET status = 'processing', attempts = attempts + 1, updated_at = ?
+      WHERE key = ? AND status IN ('received', 'failed')
+    `).run(nowIso(), key);
+    if (updated.changes < 1) {
+      return null;
+    }
+    return this.getInboundMessage(key);
+  }
+
+  updateInboundMessageProgress(
+    key: string,
+    patch: Partial<Pick<InboundMessageRecord, "workerKey" | "appThreadId" | "turnId" | "lastError">>,
+  ): void {
+    const current = this.getInboundMessage(key);
+    if (!current) return;
+    this.db.prepare(`
+      UPDATE inbound_messages
+      SET worker_key = ?, app_thread_id = ?, turn_id = ?, last_error = ?, updated_at = ?
+      WHERE key = ?
+    `).run(
+      patch.workerKey ?? current.workerKey,
+      patch.appThreadId ?? current.appThreadId,
+      patch.turnId ?? current.turnId,
+      patch.lastError ?? current.lastError,
+      nowIso(),
+      key,
+    );
+  }
+
+  markInboundMessageProcessed(key: string, patch?: Partial<Pick<InboundMessageRecord, "workerKey" | "appThreadId" | "turnId">>): void {
+    const current = this.getInboundMessage(key);
+    if (!current) return;
+    this.db.prepare(`
+      UPDATE inbound_messages
+      SET status = 'processed', worker_key = ?, app_thread_id = ?, turn_id = ?, last_error = NULL, updated_at = ?
+      WHERE key = ?
+    `).run(
+      patch?.workerKey ?? current.workerKey,
+      patch?.appThreadId ?? current.appThreadId,
+      patch?.turnId ?? current.turnId,
+      nowIso(),
+      key,
+    );
+  }
+
+  markInboundMessageFailed(key: string, errorText: string): void {
+    this.db.prepare(`
+      UPDATE inbound_messages
+      SET status = 'failed', last_error = ?, updated_at = ?
+      WHERE key = ?
+    `).run(errorText, nowIso(), key);
+  }
+
+  listAttachmentsForMessage(messageKey: string): MessageAttachmentRecord[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM message_attachments
+      WHERE message_key = ?
+      ORDER BY created_at ASC
+    `).all(messageKey) as Record<string, unknown>[];
+    return rows.map((row) => this.toAttachment(row));
+  }
+
+  upsertAttachments(records: MessageAttachmentRecord[]): void {
+    if (records.length === 0) return;
+    const statement = this.db.prepare(`
+      INSERT INTO message_attachments (
+        key, message_key, slack_file_id, name, mimetype, local_path, is_image, size_bytes, status, note, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(message_key, slack_file_id) DO UPDATE SET
+        local_path=excluded.local_path,
+        is_image=excluded.is_image,
+        size_bytes=excluded.size_bytes,
+        status=excluded.status,
+        note=excluded.note,
+        updated_at=excluded.updated_at
+    `);
+    const transaction = this.db.transaction((items: MessageAttachmentRecord[]) => {
+      for (const record of items) {
+        statement.run(
+          record.key,
+          record.messageKey,
+          record.slackFileId,
+          record.name,
+          record.mimetype,
+          record.localPath,
+          record.isImage ? 1 : 0,
+          record.sizeBytes,
+          record.status,
+          record.note,
+          record.createdAt,
+          record.updatedAt,
+        );
+      }
+    });
+    transaction(records);
   }
 
   private toWorker(row: Record<string, unknown>): WorkerRecord {
@@ -311,12 +550,15 @@ export class Store {
       activeTurnId: row.active_turn_id ? String(row.active_turn_id) : null,
       ownerUserId: String(row.owner_user_id),
       rootOwnerUserId: String(row.root_owner_user_id),
-      status: String(row.status),
+      status: String(row.status) as SessionStatus,
       currentAgentSlackTs: row.current_agent_slack_ts ? String(row.current_agent_slack_ts) : null,
       currentAgentItemId: row.current_agent_item_id ? String(row.current_agent_item_id) : null,
       currentWorklogSlackTs: row.current_worklog_slack_ts ? String(row.current_worklog_slack_ts) : null,
       settings: parseSettings(typeof row.settings_json === "string" ? row.settings_json : null),
       parentWorkerKey: row.parent_worker_key ? String(row.parent_worker_key) : null,
+      lastError: row.last_error ? String(row.last_error) : null,
+      lastInboundMessageTs: row.last_inbound_message_ts ? String(row.last_inbound_message_ts) : null,
+      pendingRequest: parsePendingRequest(typeof row.pending_request_json === "string" ? row.pending_request_json : null),
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
     };
@@ -329,10 +571,14 @@ export class Store {
       channelId: String(row.channel_id ?? ""),
       appThreadId: row.app_thread_id ? String(row.app_thread_id) : null,
       activeTurnId: row.active_turn_id ? String(row.active_turn_id) : null,
+      status: String(row.status ?? "idle") as SessionStatus,
       currentAgentSlackTs: row.current_agent_slack_ts ? String(row.current_agent_slack_ts) : null,
       currentAgentItemId: row.current_agent_item_id ? String(row.current_agent_item_id) : null,
       currentWorklogSlackTs: row.current_worklog_slack_ts ? String(row.current_worklog_slack_ts) : null,
       settings: parseSettings(typeof row.settings_json === "string" ? row.settings_json : null),
+      lastError: row.last_error ? String(row.last_error) : null,
+      lastInboundMessageTs: row.last_inbound_message_ts ? String(row.last_inbound_message_ts) : null,
+      pendingRequest: parsePendingRequest(typeof row.pending_request_json === "string" ? row.pending_request_json : null),
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
     };
@@ -345,6 +591,43 @@ export class Store {
       name: String(row.name),
       isPrivate: Boolean(row.is_private),
       isMember: Boolean(row.is_member),
+      updatedAt: String(row.updated_at),
+    };
+  }
+
+  private toInboundMessage(row: Record<string, unknown>): InboundMessageRecord {
+    return {
+      key: String(row.key),
+      teamId: String(row.team_id),
+      channelId: String(row.channel_id),
+      messageTs: String(row.message_ts),
+      rootTs: String(row.root_ts),
+      kind: String(row.kind) as InboundMessageKind,
+      payloadJson: String(row.payload_json),
+      status: String(row.status) as InboundMessageStatus,
+      attempts: Number(row.attempts ?? 0),
+      lastError: row.last_error ? String(row.last_error) : null,
+      workerKey: row.worker_key ? String(row.worker_key) : null,
+      appThreadId: row.app_thread_id ? String(row.app_thread_id) : null,
+      turnId: row.turn_id ? String(row.turn_id) : null,
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+    };
+  }
+
+  private toAttachment(row: Record<string, unknown>): MessageAttachmentRecord {
+    return {
+      key: String(row.key),
+      messageKey: String(row.message_key),
+      slackFileId: String(row.slack_file_id),
+      name: String(row.name),
+      mimetype: String(row.mimetype),
+      localPath: String(row.local_path),
+      isImage: Boolean(row.is_image),
+      sizeBytes: row.size_bytes === null || row.size_bytes === undefined ? null : Number(row.size_bytes),
+      status: String(row.status) as MessageAttachmentRecord["status"],
+      note: row.note ? String(row.note) : null,
+      createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
     };
   }

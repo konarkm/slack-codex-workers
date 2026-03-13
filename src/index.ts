@@ -1,4 +1,4 @@
-import { loadConfig } from "./config.js";
+import { EXIT_CODE_RESTART, loadConfig } from "./config.js";
 import { logError, logInfo } from "./logger.js";
 import { SlackCodexWorkersService } from "./core/service.js";
 
@@ -8,6 +8,7 @@ let shuttingDown = false;
 
 async function main(): Promise<void> {
   registerSignalHandlers();
+  registerRestartHandler();
   await service.start();
 }
 
@@ -31,6 +32,25 @@ function registerSignalHandlers(): void {
   process.once("SIGTERM", () => {
     void shutdown("SIGTERM");
   });
+}
+
+function registerRestartHandler(): void {
+  service.on("restartRequested", (target: string) => {
+    void handleRestartRequest(target);
+  });
+}
+
+async function handleRestartRequest(target: string): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  logInfo(`restart requested: ${target}`);
+  try {
+    await service.stop();
+  } catch (error) {
+    logError("restart shutdown error", error);
+  } finally {
+    process.exit(target === "bridge" || target === "both" ? EXIT_CODE_RESTART : 0);
+  }
 }
 
 main().catch((error) => {

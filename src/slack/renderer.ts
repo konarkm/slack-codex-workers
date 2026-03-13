@@ -8,7 +8,7 @@ export function renderWorklog(items: Iterable<WorklogItem>): string {
 
   const lines = ["_Worklog_"];
   for (const item of rows) {
-    const icon = item.status === "failed" ? "x" : item.status === "completed" ? "check" : "hourglass_flowing_sand";
+    const icon = item.status === "failed" ? "x" : item.status === "completed" ? "white_check_mark" : "hourglass_flowing_sand";
     const detail = item.detail ? ` - ${item.detail}` : "";
     lines.push(`:${icon}: ${item.title}${detail}`);
   }
@@ -26,4 +26,8 @@ export function renderFinalMessage(ownerUserId: string, text: string): string {
 export function appendFileNotes(text: string, fileNotes: string[]): string {
   if (fileNotes.length === 0) return text;
   return [text.trim(), "", "Attached files:", ...fileNotes.map((note) => `- ${note}`)].filter(Boolean).join("\n");
+}
+
+export function renderSystemMessage(text: string): string {
+  return `_System_: ${text.trim()}`;
 }

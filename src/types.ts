@@ -27,6 +27,24 @@ export interface RuntimeSettings {
   effort: ReasoningEffort | null;
 }
 
+export type SessionStatus = "idle" | "running" | "completed" | "failed" | "recovery_required" | "blocked_input";
+
+export type InboundMessageKind = "channel-root" | "thread-reply" | "dm-message";
+export type InboundMessageStatus = "received" | "processing" | "processed" | "failed";
+export type PendingRequestKind = "tool_user_input" | "mcp_elicitation";
+
+export interface PendingRequestState {
+  kind: PendingRequestKind;
+  requestId: string | null;
+  promptText: string;
+  threadId: string;
+  turnId: string | null;
+  itemId: string | null;
+  questionIds: string[];
+  schemaJson: string | null;
+  createdAt: string;
+}
+
 export interface WorkerRecord {
   key: string;
   teamId: string;
@@ -36,12 +54,15 @@ export interface WorkerRecord {
   activeTurnId: string | null;
   ownerUserId: string;
   rootOwnerUserId: string;
-  status: string;
+  status: SessionStatus;
   currentAgentSlackTs: string | null;
   currentAgentItemId: string | null;
   currentWorklogSlackTs: string | null;
   settings: RuntimeSettings;
   parentWorkerKey: string | null;
+  lastError: string | null;
+  lastInboundMessageTs: string | null;
+  pendingRequest: PendingRequestState | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -52,10 +73,14 @@ export interface DmSessionRecord {
   channelId: string;
   appThreadId: string | null;
   activeTurnId: string | null;
+  status: SessionStatus;
   currentAgentSlackTs: string | null;
   currentAgentItemId: string | null;
   currentWorklogSlackTs: string | null;
   settings: RuntimeSettings;
+  lastError: string | null;
+  lastInboundMessageTs: string | null;
+  pendingRequest: PendingRequestState | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -77,6 +102,7 @@ export interface ChannelRecord {
 export interface SlackAttachmentInput {
   imagePaths: string[];
   fileNotes: string[];
+  storedAttachments: MessageAttachmentRecord[];
 }
 
 export interface TurnInput {
@@ -88,6 +114,7 @@ export interface SlackMessageContext {
   teamId: string;
   channelId: string;
   channelName?: string | null;
+  channelType: string | null;
   userId: string;
   username: string;
   text: string;
@@ -110,4 +137,37 @@ export interface WorklogItem {
   title: string;
   status: "started" | "completed" | "failed";
   detail?: string | null;
+}
+
+export interface InboundMessageRecord {
+  key: string;
+  teamId: string;
+  channelId: string;
+  messageTs: string;
+  rootTs: string;
+  kind: InboundMessageKind;
+  payloadJson: string;
+  status: InboundMessageStatus;
+  attempts: number;
+  lastError: string | null;
+  workerKey: string | null;
+  appThreadId: string | null;
+  turnId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MessageAttachmentRecord {
+  key: string;
+  messageKey: string;
+  slackFileId: string;
+  name: string;
+  mimetype: string;
+  localPath: string;
+  isImage: boolean;
+  sizeBytes: number | null;
+  status: "ready" | "failed";
+  note: string | null;
+  createdAt: string;
+  updatedAt: string;
 }

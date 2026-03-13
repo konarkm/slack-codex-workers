@@ -9,7 +9,7 @@ describe("renderer", () => {
     ]);
     expect(text).toContain("_Worklog_");
     expect(text).toContain(":hourglass_flowing_sand: Run command");
-    expect(text).toContain(":check: MCP: github/list - ok");
+    expect(text).toContain(":white_check_mark: MCP: github/list - ok");
   });
 
   it("renders final owner mention", () => {

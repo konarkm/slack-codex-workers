@@ -21,5 +21,11 @@ describe("commands", () => {
 
   it("renders dm help", () => {
     expect(helpText("dm")).toContain("/restart <codex|bridge|both>");
+    expect(helpText("dm")).toContain("/recover");
+  });
+
+  it("renders thread help", () => {
+    expect(helpText("thread")).toContain("/recover");
+    expect(helpText("thread")).not.toContain("/restart");
   });
 });

@@ -1,6 +1,6 @@
 import type { ReasoningEffort } from "../types.js";
 
-export type CommandName = "help" | "status" | "restart" | "model" | "effort" | "compact";
+export type CommandName = "help" | "status" | "restart" | "model" | "effort" | "compact" | "recover";
 
 export interface ParsedCommand {
   name: CommandName;
@@ -8,7 +8,7 @@ export interface ParsedCommand {
   raw: string;
 }
 
-const COMMANDS = new Set<CommandName>(["help", "status", "restart", "model", "effort", "compact"]);
+const COMMANDS = new Set<CommandName>(["help", "status", "restart", "model", "effort", "compact", "recover"]);
 
 export function parseSlashCommand(input: string): ParsedCommand | null {
   const trimmed = input.trim();
@@ -30,12 +30,14 @@ export function helpText(scope: "dm" | "thread"): string {
     lines.push("/model [id] - show or set global defaults for new workers");
     lines.push("/effort [level] - show or set global defaults for new workers");
     lines.push("/compact - compact the DM admin conversation");
+    lines.push("/recover - recreate the backing Codex thread when runtime context is missing");
     return lines.join("\n");
   }
   lines.push("/help - show thread command help");
   lines.push("/model [id] - show or set model for this worker thread");
   lines.push("/effort [level] - show or set reasoning effort for this worker thread");
   lines.push("/compact - compact this worker thread when idle");
+  lines.push("/recover - recreate the backing Codex thread if it is missing");
   return lines.join("\n");
 }
 

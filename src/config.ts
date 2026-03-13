@@ -17,6 +17,12 @@ const configSchema = z.object({
   allowedTeamId: z.string().min(1).nullable().default(null),
   messageEditThrottleMs: z.number().int().positive().default(1200),
   appPort: z.number().int().positive().default(3013),
+  supervisorRestartEnabled: z.boolean().default(false),
+  attachmentStorageDir: z.string().min(1).default(path.join(process.cwd(), "storage", "attachments")),
+  attachmentMaxBytes: z.number().int().positive().default(25 * 1024 * 1024),
+  attachmentTotalMaxBytes: z.number().int().positive().default(50 * 1024 * 1024),
+  attachmentDownloadTimeoutMs: z.number().int().positive().default(30_000),
+  attachmentRetentionMs: z.number().int().positive().nullable().default(null),
 });
 
 export type AppConfig = z.infer<typeof configSchema>;
@@ -33,6 +39,12 @@ export function loadConfig(): AppConfig {
     allowedTeamId: process.env.SLACK_ALLOWED_TEAM_ID ?? null,
     messageEditThrottleMs: parseNumber(process.env.MESSAGE_EDIT_THROTTLE_MS, 1200),
     appPort: parseNumber(process.env.PORT, 3013),
+    supervisorRestartEnabled: parseBoolean(process.env.SUPERVISOR_RESTART_ENABLED, false),
+    attachmentStorageDir: process.env.ATTACHMENT_STORAGE_DIR ?? path.join(process.cwd(), "storage", "attachments"),
+    attachmentMaxBytes: parseNumber(process.env.ATTACHMENT_MAX_BYTES, 25 * 1024 * 1024),
+    attachmentTotalMaxBytes: parseNumber(process.env.ATTACHMENT_TOTAL_MAX_BYTES, 50 * 1024 * 1024),
+    attachmentDownloadTimeoutMs: parseNumber(process.env.ATTACHMENT_DOWNLOAD_TIMEOUT_MS, 30_000),
+    attachmentRetentionMs: parseNullableNumber(process.env.ATTACHMENT_RETENTION_MS, null),
   };
 
   return configSchema.parse(raw);
@@ -52,4 +64,23 @@ function parseNumber(value: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function parseNullableNumber(value: string | undefined, fallback: number | null): number | null {
+  if (!value) return fallback;
+  const trimmed = value.trim().toLowerCase();
+  if (trimmed === "null" || trimmed === "none" || trimmed === "infinite" || trimmed === "off") {
+    return null;
+  }
+  const parsed = Number.parseInt(trimmed, 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function parseBoolean(value: string | undefined, fallback: boolean): boolean {
+  if (!value) return fallback;
+  const normalized = value.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
 export const DEFAULT_EFFORTS: ReasoningEffort[] = ["minimal", "low", "medium", "high", "xhigh"];
+export const EXIT_CODE_RESTART = 42;

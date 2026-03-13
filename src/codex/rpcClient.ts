@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import process from "node:process";
 import type { JsonRpcId, JsonRpcIncoming, JsonRpcRequest, JsonRpcResponse } from "../types.js";
 
 interface PendingRequest {
@@ -24,6 +25,8 @@ export class CodexRpcClient extends EventEmitter {
   private buffer = "";
   private requestId = 1;
   private readonly pending = new Map<JsonRpcId, PendingRequest>();
+  private childExitPromise: Promise<void> | null = null;
+  private childExitResolve: (() => void) | null = null;
 
   constructor(
     private readonly codexBin: string,
@@ -36,26 +39,35 @@ export class CodexRpcClient extends EventEmitter {
   async start(): Promise<void> {
     if (this.child) return;
 
-    this.child = spawn(this.codexBin, ["app-server"], {
+    const child = spawn(this.codexBin, ["app-server"], {
       cwd: this.cwd,
       env: process.env,
       stdio: ["pipe", "pipe", "pipe"],
     });
+    this.child = child;
+    this.childExitPromise = new Promise<void>((resolve) => {
+      this.childExitResolve = resolve;
+    });
 
-    this.child.stdout.setEncoding("utf8");
-    this.child.stdout.on("data", (chunk: string) => this.onStdout(chunk));
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => this.onStdout(chunk));
 
-    this.child.stderr.setEncoding("utf8");
-    this.child.stderr.on("data", (chunk: string) => this.emit("stderr", chunk));
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => this.emit("stderr", chunk));
 
-    this.child.on("exit", (code, signal) => {
-      const error = new Error(`codex app-server exited code=${String(code)} signal=${String(signal)}`);
-      for (const pending of this.pending.values()) {
-        clearTimeout(pending.timer);
-        pending.reject(error);
+    child.on("exit", (code, signal) => {
+      if (this.child === child) {
+        const error = new Error(`codex app-server exited code=${String(code)} signal=${String(signal)}`);
+        for (const pending of this.pending.values()) {
+          clearTimeout(pending.timer);
+          pending.reject(error);
+        }
+        this.pending.clear();
+        this.child = null;
       }
-      this.pending.clear();
-      this.child = null;
+      this.childExitResolve?.();
+      this.childExitResolve = null;
+      this.childExitPromise = null;
       this.emit("exit", { code, signal });
     });
 
@@ -67,13 +79,15 @@ export class CodexRpcClient extends EventEmitter {
   }
 
   async stop(): Promise<void> {
-    if (!this.child) return;
-    this.child.kill("SIGTERM");
-    this.child = null;
+    const child = this.child;
+    if (!child) return;
+    child.kill("SIGTERM");
+    await this.childExitPromise;
   }
 
   async request<T>(method: string, params: unknown, timeoutMs = 180_000): Promise<T> {
-    if (!this.child?.stdin.writable) throw new Error("codex app-server is not running");
+    const child = this.child;
+    if (!child?.stdin.writable) throw new Error("codex app-server is not running");
     const id = this.requestId++;
     const req: JsonRpcRequest = { jsonrpc: "2.0", id, method, params };
 
@@ -89,26 +103,29 @@ export class CodexRpcClient extends EventEmitter {
       });
     });
 
-    this.child.stdin.write(`${JSON.stringify(req)}\n`);
+    child.stdin.write(`${JSON.stringify(req)}\n`);
     return promise;
   }
 
   async notify(method: string, params: unknown): Promise<void> {
-    if (!this.child?.stdin.writable) throw new Error("codex app-server is not running");
+    const child = this.child;
+    if (!child?.stdin.writable) throw new Error("codex app-server is not running");
     const req: JsonRpcRequest = { jsonrpc: "2.0", method, params };
-    this.child.stdin.write(`${JSON.stringify(req)}\n`);
+    child.stdin.write(`${JSON.stringify(req)}\n`);
   }
 
   async respond(id: JsonRpcId, result: unknown): Promise<void> {
-    if (!this.child?.stdin.writable) throw new Error("codex app-server is not running");
+    const child = this.child;
+    if (!child?.stdin.writable) throw new Error("codex app-server is not running");
     const response: JsonRpcResponse = { jsonrpc: "2.0", id, result };
-    this.child.stdin.write(`${JSON.stringify(response)}\n`);
+    child.stdin.write(`${JSON.stringify(response)}\n`);
   }
 
   async respondError(id: JsonRpcId, code: number, message: string): Promise<void> {
-    if (!this.child?.stdin.writable) throw new Error("codex app-server is not running");
+    const child = this.child;
+    if (!child?.stdin.writable) throw new Error("codex app-server is not running");
     const response: JsonRpcResponse = { jsonrpc: "2.0", id, error: { code, message } };
-    this.child.stdin.write(`${JSON.stringify(response)}\n`);
+    child.stdin.write(`${JSON.stringify(response)}\n`);
   }
 
   private onStdout(chunk: string): void {
