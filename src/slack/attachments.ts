@@ -41,7 +41,9 @@ export async function prepareSlackAttachments(
     if (existingRecord && existingRecord.status === "ready") {
       continue;
     }
-    const remainingBudget = Math.max(config.attachmentTotalMaxBytes - totalBytes, 0);
+    const remainingBudget = config.attachmentTotalMaxBytes === null
+      ? Number.POSITIVE_INFINITY
+      : Math.max(config.attachmentTotalMaxBytes - totalBytes, 0);
     const download = await downloadSlackAttachment(messageKey, file, botToken, config, remainingBudget);
     downloads.push(download);
     if (download.record.sizeBytes) {
@@ -109,7 +111,7 @@ async function downloadSlackAttachment(
           note: `${file.name} exceeds the per-file attachment limit`,
         };
       }
-      if (declaredBytes > remainingBudget) {
+      if (Number.isFinite(remainingBudget) && declaredBytes > remainingBudget) {
         return {
           record: buildAttachmentRecord(recordKey, messageKey, file, filePath, isImage, declaredBytes, "failed", `${file.name} exceeds remaining attachment budget`),
           note: `${file.name} exceeds the total attachment budget for this message`,
@@ -126,7 +128,7 @@ async function downloadSlackAttachment(
         if (done) break;
         if (!value) continue;
         writtenBytes += value.byteLength;
-        if (writtenBytes > config.attachmentMaxBytes || writtenBytes > remainingBudget) {
+        if (writtenBytes > config.attachmentMaxBytes || (Number.isFinite(remainingBudget) && writtenBytes > remainingBudget)) {
           controller.abort();
           throw new Error("attachment exceeds configured limits");
         }

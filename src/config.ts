@@ -19,10 +19,12 @@ const configSchema = z.object({
   appPort: z.number().int().positive().default(3013),
   supervisorRestartEnabled: z.boolean().default(false),
   attachmentStorageDir: z.string().min(1).default(path.join(process.cwd(), "storage", "attachments")),
-  attachmentMaxBytes: z.number().int().positive().default(25 * 1024 * 1024),
-  attachmentTotalMaxBytes: z.number().int().positive().default(50 * 1024 * 1024),
-  attachmentDownloadTimeoutMs: z.number().int().positive().default(30_000),
+  attachmentMaxBytes: z.number().int().positive().default(1024 * 1024 * 1024),
+  attachmentTotalMaxBytes: z.number().int().positive().nullable().default(null),
+  attachmentDownloadTimeoutMs: z.number().int().positive().default(600_000),
   attachmentRetentionMs: z.number().int().positive().nullable().default(null),
+  slackUploadTimeoutMs: z.number().int().positive().default(600_000),
+  slackUploadMaxFiles: z.number().int().positive().default(10),
 });
 
 export type AppConfig = z.infer<typeof configSchema>;
@@ -41,10 +43,12 @@ export function loadConfig(): AppConfig {
     appPort: parseNumber(process.env.PORT, 3013),
     supervisorRestartEnabled: parseBoolean(process.env.SUPERVISOR_RESTART_ENABLED, false),
     attachmentStorageDir: process.env.ATTACHMENT_STORAGE_DIR ?? path.join(process.cwd(), "storage", "attachments"),
-    attachmentMaxBytes: parseNumber(process.env.ATTACHMENT_MAX_BYTES, 25 * 1024 * 1024),
-    attachmentTotalMaxBytes: parseNumber(process.env.ATTACHMENT_TOTAL_MAX_BYTES, 50 * 1024 * 1024),
-    attachmentDownloadTimeoutMs: parseNumber(process.env.ATTACHMENT_DOWNLOAD_TIMEOUT_MS, 30_000),
+    attachmentMaxBytes: parseNumber(process.env.ATTACHMENT_MAX_BYTES, 1024 * 1024 * 1024),
+    attachmentTotalMaxBytes: parseNullableNumber(process.env.ATTACHMENT_TOTAL_MAX_BYTES, null),
+    attachmentDownloadTimeoutMs: parseNumber(process.env.ATTACHMENT_DOWNLOAD_TIMEOUT_MS, 600_000),
     attachmentRetentionMs: parseNullableNumber(process.env.ATTACHMENT_RETENTION_MS, null),
+    slackUploadTimeoutMs: parseNumber(process.env.SLACK_UPLOAD_TIMEOUT_MS, 600_000),
+    slackUploadMaxFiles: parseNumber(process.env.SLACK_UPLOAD_MAX_FILES, 10),
   };
 
   return configSchema.parse(raw);

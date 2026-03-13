@@ -22,6 +22,7 @@ Implemented in this repo:
 - dynamic tools:
   - `slack_list_channels`
   - `slack_spawn_worker`
+  - `slack_upload_files`
 - channel-thread commands:
   - `/help`
   - `/model`
@@ -57,6 +58,7 @@ Recommended Slack bot scopes:
 - `chat:write`
 - `chat:write.customize`
 - `files:read`
+- `files:write`
 - `groups:history`
 - `groups:read`
 - `im:history`
@@ -82,9 +84,11 @@ Key variables:
 - `SUPERVISOR_RESTART_ENABLED`: set to `1` only when launching under `scripts/run.sh` or another restart-capable supervisor
 - `ATTACHMENT_STORAGE_DIR`: local directory for downloaded Slack files
 - `ATTACHMENT_MAX_BYTES`: per-file cap in bytes
-- `ATTACHMENT_TOTAL_MAX_BYTES`: total cap per Slack message in bytes
+- `ATTACHMENT_TOTAL_MAX_BYTES`: total cap per Slack message in bytes; set to `off` for no total cap
 - `ATTACHMENT_DOWNLOAD_TIMEOUT_MS`: timeout per file download
 - `ATTACHMENT_RETENTION_MS`: reserved for future retention cleanup; currently a no-op and should stay `off`/`null`
+- `SLACK_UPLOAD_TIMEOUT_MS`: timeout for outbound Slack file upload calls
+- `SLACK_UPLOAD_MAX_FILES`: max files accepted by one `slack_upload_files` tool call
 
 ## Run
 
@@ -121,6 +125,7 @@ npm run start:supervised
 - If Codex is still running but the bridge lost the turn id during a crash/restart window, the thread enters a temporary blocked state and polls until the turn settles or recovery is required.
 - Normal user messages sent while a thread is blocked or recovery-required are rejected and must be resent after the thread becomes usable again.
 - Attachment-only messages are supported; images are passed as images and other files are stored locally with file-path notes.
+- `slack_upload_files` uploads one or more local files from allowed roots into the current Slack conversation; worker threads upload into the active thread, and admin DMs upload into the DM conversation.
 - `slack_list_channels` and child-worker posting only use channels the bot is already a member of.
 - `/restart bridge` and `/restart both` only work when `SUPERVISOR_RESTART_ENABLED=1` and the process is launched under a supervisor that restarts on exit code `42`.
 - `/recover` is recovery-only; it is available only when the thread or admin DM is blocked or live Codex reconciliation shows the backing thread is missing.

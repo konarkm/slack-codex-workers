@@ -12,7 +12,8 @@ import { Store } from "../db/store.js";
 import { logInfo, logWarn } from "../logger.js";
 import { prepareSlackAttachments } from "../slack/attachments.js";
 import { appendFileNotes, renderEventMessage, renderFinalMessage, renderSystemMessage } from "../slack/renderer.js";
-import { SlackGateway } from "../slack/slackGateway.js";
+import { SlackGateway, type SlackUploadedFile } from "../slack/slackGateway.js";
+import { validateSlackUploadFiles } from "../slack/uploads.js";
 import { assignWorkerIdentity } from "../slack/workerIdentity.js";
 import type {
   DmSessionRecord,
@@ -66,6 +67,7 @@ export class SlackCodexWorkersService extends EventEmitter {
     this.codex.registerDynamicToolHandlers({
       listChannels: async (args, ctx) => this.handleListChannelsTool(args.query ?? "", ctx),
       spawnWorker: async (args, ctx) => this.handleSpawnWorkerTool(args, ctx),
+      uploadFiles: async (args, ctx) => this.handleUploadFilesTool(args, ctx),
     });
     this.codex.registerInteractiveRequestHandler(async (request) => this.handleInteractiveRequest(request));
   }
@@ -1109,6 +1111,30 @@ export class SlackCodexWorkersService extends EventEmitter {
     }
   }
 
+  private async handleUploadFilesTool(
+    args: { files: Array<{ path: string; title?: string | undefined }>; comment?: string | undefined },
+    ctx: DynamicToolHandlerContext,
+  ): Promise<string> {
+    const files = await validateSlackUploadFiles(args.files, this.config);
+    const worker = this.store.getWorkerByAppThreadId(ctx.threadId);
+    if (worker) {
+      const uploaded = await this.enqueueSlackWrite(this.getWorkerQueueKey(worker), async () =>
+        this.slack.uploadFilesToConversation(worker.channelId, worker.rootTs, files, args.comment),
+      );
+      return formatUploadResult(uploaded);
+    }
+
+    const session = this.store.listDmSessions().find((candidate) => candidate.appThreadId === ctx.threadId) ?? null;
+    if (session) {
+      const uploaded = await this.enqueueSlackWrite(this.getDmQueueKey(session.teamId, session.userId), async () =>
+        this.slack.uploadFilesToConversation(session.channelId, null, files, args.comment),
+      );
+      return formatUploadResult(uploaded);
+    }
+
+    return "No Slack upload context found.";
+  }
+
   private async handleInteractiveRequest(request: InteractiveRequest): Promise<void> {
     this.pendingInteractiveRequests.set(request.threadId, request);
 
@@ -1598,6 +1624,16 @@ export class SlackCodexWorkersService extends EventEmitter {
 
 function buildInboundMessageKey(context: SlackMessageContext, kind: InboundMessageKind): string {
   return `${context.teamId}:${context.channelId}:${context.ts}:${kind}`;
+}
+
+function formatUploadResult(files: SlackUploadedFile[]): string {
+  if (files.length === 0) {
+    return "Upload completed, but Slack returned no file metadata.";
+  }
+  const summary = files
+    .map((file) => file.title ?? file.name)
+    .join(", ");
+  return `Uploaded ${files.length} file${files.length === 1 ? "" : "s"} to Slack: ${summary}`;
 }
 
 function isManuallyBlockedStatus(status: SessionStatus): boolean {

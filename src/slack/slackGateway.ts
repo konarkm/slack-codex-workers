@@ -3,6 +3,7 @@ import type { AppConfig } from "../config.js";
 import { logInfo } from "../logger.js";
 import { normalizeSlackMrkdwn } from "./renderer.js";
 import type { ChannelRecord, SlackFileRef, WorkerIdentity } from "../types.js";
+import type { ValidatedSlackUploadFile } from "./uploads.js";
 
 interface ConversationsListResponse {
   channels?: Array<{ id?: string; name?: string; is_private?: boolean; is_member?: boolean }>;
@@ -28,6 +29,18 @@ interface SlackApiErrorLike {
   data?: {
     error?: string;
   };
+}
+
+interface FilesUploadV2ResponseLike {
+  files?: Array<{ id?: string; title?: string; name?: string; permalink?: string }>;
+  file?: { id?: string; title?: string; name?: string; permalink?: string };
+}
+
+export interface SlackUploadedFile {
+  id: string | null;
+  name: string;
+  title: string | null;
+  permalink: string | null;
 }
 
 export class SlackGateway {
@@ -145,6 +158,37 @@ export class SlackGateway {
     await this.addReaction(channelId, messageTs, emoji);
   }
 
+  async uploadFilesToConversation(
+    channelId: string,
+    threadTs: string | null,
+    files: ValidatedSlackUploadFile[],
+    comment?: string,
+  ): Promise<SlackUploadedFile[]> {
+    const uploadPromise = (this.app.client.files.uploadV2 as unknown as (args: Record<string, unknown>) => Promise<FilesUploadV2ResponseLike>)({
+      token: this.config.slackBotToken,
+      channel_id: channelId,
+      thread_ts: threadTs ?? undefined,
+      initial_comment: comment?.trim() || undefined,
+      file_uploads: files.map((file) => ({
+        file: file.path,
+        filename: file.filename,
+        title: file.title,
+      })),
+    });
+    const response = await promiseWithTimeout(
+      uploadPromise,
+      this.config.slackUploadTimeoutMs,
+      "Slack file upload timed out.",
+    );
+    const uploaded = response.files ?? (response.file ? [response.file] : []);
+    return uploaded.map((file, index) => ({
+      id: typeof file.id === "string" ? file.id : null,
+      name: typeof file.name === "string" ? file.name : files[index]?.filename ?? `file-${index + 1}`,
+      title: typeof file.title === "string" ? file.title : files[index]?.title ?? null,
+      permalink: typeof file.permalink === "string" ? file.permalink : null,
+    }));
+  }
+
   async listChannels(teamId: string, query?: string): Promise<ChannelRecord[]> {
     const channels: ChannelRecord[] = [];
     let cursor: string | undefined;
@@ -235,5 +279,19 @@ export class SlackGateway {
       if (slackError === "no_reaction") return;
       throw error;
     }
+  }
+}
+
+async function promiseWithTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: NodeJS.Timeout | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }

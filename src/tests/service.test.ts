@@ -32,10 +32,12 @@ function makeConfig(dir: string): AppConfig {
     appPort: 3013,
     supervisorRestartEnabled: false,
     attachmentStorageDir: path.join(dir, "attachments"),
-    attachmentMaxBytes: 25 * 1024 * 1024,
-    attachmentTotalMaxBytes: 50 * 1024 * 1024,
-    attachmentDownloadTimeoutMs: 30_000,
+    attachmentMaxBytes: 1024 * 1024 * 1024,
+    attachmentTotalMaxBytes: null,
+    attachmentDownloadTimeoutMs: 600_000,
     attachmentRetentionMs: null,
+    slackUploadTimeoutMs: 600_000,
+    slackUploadMaxFiles: 10,
   };
 }
 
@@ -49,6 +51,7 @@ async function createService() {
     updateMessage: vi.fn().mockResolvedValue(undefined),
     addRootReaction: vi.fn().mockResolvedValue(undefined),
     setStatusReaction: vi.fn().mockResolvedValue(undefined),
+    uploadFilesToConversation: vi.fn().mockResolvedValue([{ id: "F1", name: "artifact.txt", title: "Artifact", permalink: null }]),
     start: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn().mockResolvedValue(undefined),
     app: { event: vi.fn() },
@@ -420,6 +423,50 @@ describe("service lifecycle decisions", () => {
       "<@U1> Checking weather now.",
       expect.objectContaining({ username: expect.any(String), iconEmoji: expect.any(String) }),
     );
+    store.close();
+  });
+
+  it("uploads files into the current worker thread", async () => {
+    const { dir, service, slack, store } = await createService();
+    createWorker(service);
+    const artifactPath = path.join(dir, "artifact.txt");
+    await fs.writeFile(artifactPath, "hello");
+    const realArtifactPath = await fs.realpath(artifactPath);
+
+    const result = await service.handleUploadFilesTool(
+      { files: [{ path: "artifact.txt", title: "Artifact" }], comment: "Here it is" },
+      { threadId: "thread-1", turnId: "turn-1", callId: "call-1" },
+    );
+
+    expect(slack.uploadFilesToConversation).toHaveBeenCalledWith(
+      "C1",
+      "1.000",
+      [expect.objectContaining({ path: realArtifactPath, filename: "artifact.txt", title: "Artifact" })],
+      "Here it is",
+    );
+    expect(result).toContain("Uploaded 1 file");
+    store.close();
+  });
+
+  it("uploads files into the current admin DM conversation", async () => {
+    const { dir, service, slack, store } = await createService();
+    createDmSession(service);
+    const artifactPath = path.join(dir, "report.json");
+    await fs.writeFile(artifactPath, "{}");
+    const realArtifactPath = await fs.realpath(artifactPath);
+
+    const result = await service.handleUploadFilesTool(
+      { files: [{ path: "./report.json" }] },
+      { threadId: "dm-thread-1", turnId: "turn-1", callId: "call-1" },
+    );
+
+    expect(slack.uploadFilesToConversation).toHaveBeenCalledWith(
+      "D1",
+      null,
+      [expect.objectContaining({ path: realArtifactPath, filename: "report.json" })],
+      undefined,
+    );
+    expect(result).toContain("Uploaded 1 file");
     store.close();
   });
 

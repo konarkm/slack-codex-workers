@@ -4,12 +4,15 @@ import { logWarn } from "../logger.js";
 import type { JsonRpcId, PendingRequestKind, ReasoningEffort, RuntimeSettings, TurnInput, WorklogItem } from "../types.js";
 import { CodexRpcClient, type RpcNotification, type RpcServerRequest } from "./rpcClient.js";
 import {
+  adminDynamicTools,
   adminDeveloperInstructions,
   dynamicToolCallParamsSchema,
   slackListChannelsArgsSchema,
   slackListChannelsToolName,
   slackSpawnWorkerArgsSchema,
   slackSpawnWorkerToolName,
+  slackUploadFilesArgsSchema,
+  slackUploadFilesToolName,
   workerDeveloperInstructions,
   workerDynamicTools,
 } from "../core/dynamicTools.js";
@@ -42,6 +45,7 @@ export interface DynamicToolHandlerContext {
 export interface DynamicToolHandlers {
   listChannels(args: z.infer<typeof slackListChannelsArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
   spawnWorker(args: z.infer<typeof slackSpawnWorkerArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
+  uploadFiles(args: z.infer<typeof slackUploadFilesArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
 }
 
 export interface InteractiveRequest {
@@ -126,6 +130,7 @@ export class CodexClient {
       sandbox: "danger-full-access",
       persistExtendedHistory: true,
       developerInstructions: adminDeveloperInstructions,
+      dynamicTools: adminDynamicTools,
     });
     const parsed = threadStartSchema.parse(raw);
     return { threadId: parsed.thread.id, threadName: parsed.thread.name ?? null };
@@ -414,6 +419,13 @@ export class CodexClient {
     if (parsed.data.tool === slackSpawnWorkerToolName) {
       const args = slackSpawnWorkerArgsSchema.parse(parsed.data.arguments);
       const text = await this.dynamicToolHandlers.spawnWorker(args, ctx);
+      await this.rpc.respond(id, { contentItems: [{ type: "inputText", text }], success: true });
+      return;
+    }
+
+    if (parsed.data.tool === slackUploadFilesToolName) {
+      const args = slackUploadFilesArgsSchema.parse(parsed.data.arguments);
+      const text = await this.dynamicToolHandlers.uploadFiles(args, ctx);
       await this.rpc.respond(id, { contentItems: [{ type: "inputText", text }], success: true });
       return;
     }
