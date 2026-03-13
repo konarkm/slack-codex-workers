@@ -83,7 +83,7 @@ Key variables:
 - `ATTACHMENT_MAX_BYTES`: per-file cap in bytes
 - `ATTACHMENT_TOTAL_MAX_BYTES`: total cap per Slack message in bytes
 - `ATTACHMENT_DOWNLOAD_TIMEOUT_MS`: timeout per file download
-- `ATTACHMENT_RETENTION_MS`: optional future-facing TTL; use `off`/`null` to disable auto-pruning
+- `ATTACHMENT_RETENTION_MS`: reserved for future retention cleanup; currently a no-op and should stay `off`/`null`
 
 ## Run
 
@@ -102,6 +102,7 @@ npm start
 For supervisor-backed bridge restarts:
 
 ```bash
+npm run build
 npm run start:supervised
 ```
 
@@ -115,6 +116,9 @@ npm run start:supervised
 - Child workers inherit the root human owner for final mentions.
 - If persisted active-turn state is stale after restart, the bridge clears it and posts a visible system note before continuing.
 - If the backing Codex thread is missing, the Slack thread or admin DM enters recovery-required mode until `/recover` is used.
+- If Codex is still running but the bridge lost the turn id during a crash/restart window, the thread enters a temporary blocked state and polls until the turn settles or recovery is required.
+- Normal user messages sent while a thread is blocked or recovery-required are rejected and must be resent after the thread becomes usable again.
 - Attachment-only messages are supported; images are passed as images and other files are stored locally with file-path notes.
 - `slack_list_channels` and child-worker posting only use channels the bot is already a member of.
 - `/restart bridge` and `/restart both` only work when `SUPERVISOR_RESTART_ENABLED=1` and the process is launched under a supervisor that restarts on exit code `42`.
+- `/recover` is recovery-only; it is available only when the thread or admin DM is blocked or live Codex reconciliation shows the backing thread is missing.

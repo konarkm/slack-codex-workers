@@ -55,6 +55,21 @@ export class CodexRpcClient extends EventEmitter {
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => this.emit("stderr", chunk));
 
+    child.on("error", (error) => {
+      if (this.child === child) {
+        for (const pending of this.pending.values()) {
+          clearTimeout(pending.timer);
+          pending.reject(error);
+        }
+        this.pending.clear();
+        this.child = null;
+      }
+      this.childExitResolve?.();
+      this.childExitResolve = null;
+      this.childExitPromise = null;
+      this.emit("stderr", error.message);
+    });
+
     child.on("exit", (code, signal) => {
       if (this.child === child) {
         const error = new Error(`codex app-server exited code=${String(code)} signal=${String(signal)}`);

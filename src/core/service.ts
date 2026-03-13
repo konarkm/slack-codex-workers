@@ -30,9 +30,16 @@ interface RenderSessionState {
   worklogItems: Map<string, WorklogItem>;
   pendingEdits: Map<string, NodeJS.Timeout>;
   latestTexts: Map<string, string>;
+  editRetryCounts: Map<string, number>;
 }
 
 type RestartTarget = "bridge" | "both";
+type InboundHandlingResult =
+  | { status: "processed" }
+  | { status: "manual_retry"; reason: string };
+
+const BLOCKED_RUNNING_TURN_POLL_INTERVAL_MS = 2_000;
+const BLOCKED_RUNNING_TURN_POLL_WINDOW_MS = 30_000;
 
 export class SlackCodexWorkersService extends EventEmitter {
   private readonly store: Store;
@@ -41,6 +48,10 @@ export class SlackCodexWorkersService extends EventEmitter {
   private readonly renderState = new Map<string, RenderSessionState>();
   private readonly slackWriteQueues = new Map<string, Promise<unknown>>();
   private readonly pendingInteractiveRequests = new Map<string, InteractiveRequest>();
+  private readonly blockedTurnPolls = new Map<string, NodeJS.Timeout>();
+  private readonly blockedTurnDeadlines = new Map<string, number>();
+  private readonly startingWorkerTurns = new Map<string, Promise<string>>();
+  private readonly startingDmTurns = new Map<string, Promise<string>>();
 
   constructor(private readonly config: AppConfig) {
     super();
@@ -65,6 +76,11 @@ export class SlackCodexWorkersService extends EventEmitter {
   }
 
   async stop(): Promise<void> {
+    for (const timer of this.blockedTurnPolls.values()) {
+      clearTimeout(timer);
+    }
+    this.blockedTurnPolls.clear();
+    this.blockedTurnDeadlines.clear();
     await this.slack.stop();
     await this.codex.stop();
     this.store.close();
@@ -141,14 +157,19 @@ export class SlackCodexWorkersService extends EventEmitter {
     }
 
     try {
+      let outcome: InboundHandlingResult;
       if (record.kind === "channel-root") {
-        await this.handleTopLevelChannelMessage(context, record);
+        outcome = await this.handleTopLevelChannelMessage(context, record);
       } else if (record.kind === "thread-reply") {
-        await this.handleChannelThreadReply(context, record);
+        outcome = await this.handleChannelThreadReply(context, record);
       } else {
-        await this.handleDmMessage(context, record);
+        outcome = await this.handleDmMessage(context, record);
       }
-      this.store.markInboundMessageProcessed(messageKey);
+      if (outcome.status === "processed") {
+        this.store.markInboundMessageProcessed(messageKey);
+      } else {
+        this.store.markInboundMessageRejected(messageKey, outcome.reason);
+      }
     } catch (error) {
       const errorText = error instanceof Error ? error.message : String(error);
       this.store.markInboundMessageFailed(messageKey, errorText);
@@ -185,7 +206,19 @@ export class SlackCodexWorkersService extends EventEmitter {
       worker = this.requireWorker(worker.key);
     }
 
-    if (!worker.activeTurnId) return;
+    if (!worker.activeTurnId) {
+      const state = await this.codex.reconcileThreadForSend(worker.appThreadId);
+      if (state === "running") {
+        await this.markWorkerBlockedRunningTurn(worker, "A previous Codex turn is still running after restart. Wait for it to finish or use /recover to abandon it.");
+      }
+      if (state === "idle" && worker.status === "blocked_running_turn") {
+        await this.clearWorkerBlockedRunningTurn(worker, "The previous Codex turn finished. This thread is ready for new messages.");
+      }
+      if (state === "missing" && worker.status === "blocked_running_turn") {
+        await this.markWorkerRecoveryRequired(worker, "Backing Codex thread is missing. Run /recover to attach a fresh Codex thread to this Slack conversation.");
+      }
+      return;
+    }
     const state = await this.codex.reconcileThreadForSend(worker.appThreadId);
     if (state === "running") return;
     if (state === "idle") {
@@ -211,8 +244,21 @@ export class SlackCodexWorkersService extends EventEmitter {
       session = this.requireDmSession(session.teamId, session.userId);
     }
 
-    if (!session.appThreadId || !session.activeTurnId) return;
-    const state = await this.codex.reconcileThreadForSend(session.appThreadId);
+    if (!session.appThreadId) return;
+    if (!session.activeTurnId) {
+      const state = await this.codex.reconcileThreadForSend(session.appThreadId);
+      if (state === "running") {
+        await this.markDmBlockedRunningTurn(session, "A previous Codex turn is still running after restart. Wait for it to finish or use /recover to abandon it.");
+      }
+      if (state === "idle" && session.status === "blocked_running_turn") {
+        await this.clearDmBlockedRunningTurn(session, "The previous Codex turn finished. This DM is ready for new messages.");
+      }
+      if (state === "missing" && session.status === "blocked_running_turn") {
+        await this.markDmRecoveryRequired(session, "Backing Codex thread is missing. Run /recover to create a fresh admin Codex thread.");
+      }
+      return;
+    }
+    const state = await this.codex.reconcileThreadForSend(session.appThreadId!);
     if (state === "running") return;
     if (state === "idle") {
       await this.clearDmStaleActiveTurn(session, "Recovered stale active turn after runtime startup.");
@@ -223,7 +269,7 @@ export class SlackCodexWorkersService extends EventEmitter {
     }
   }
 
-  private async handleTopLevelChannelMessage(context: SlackMessageContext, record: InboundMessageRecord): Promise<void> {
+  private async handleTopLevelChannelMessage(context: SlackMessageContext, record: InboundMessageRecord): Promise<InboundHandlingResult> {
     let worker = this.store.getWorker(context.teamId, context.channelId, context.ts);
     if (!worker) {
       const defaults = this.store.getTeamDefaults(context.teamId);
@@ -258,7 +304,7 @@ export class SlackCodexWorkersService extends EventEmitter {
           appThreadId: worker.appThreadId,
           turnId: worker.activeTurnId,
         });
-        return;
+        return { status: "processed" };
       }
     }
 
@@ -273,27 +319,29 @@ export class SlackCodexWorkersService extends EventEmitter {
       appThreadId: worker.appThreadId,
       turnId,
     });
+    return { status: "processed" };
   }
 
-  private async handleChannelThreadReply(context: SlackMessageContext, record: InboundMessageRecord): Promise<void> {
+  private async handleChannelThreadReply(context: SlackMessageContext, record: InboundMessageRecord): Promise<InboundHandlingResult> {
     let worker = this.store.getWorker(context.teamId, context.channelId, context.threadTs!);
-    if (!worker) return;
+    if (!worker) return { status: "processed" };
 
     const command = parseSlashCommand(context.text);
     if (command) {
       await this.handleThreadCommand(worker, command.name, command.args);
-      return;
+      return { status: "processed" };
     }
 
     if (worker.pendingRequest) {
       await this.resolveWorkerPendingRequest(worker, context);
-      return;
+      return { status: "processed" };
     }
 
     worker = await this.prepareWorkerForSend(worker);
-    if (worker.status === "recovery_required") {
-      await this.postWorkerSystemMessage(worker, worker.lastError ?? "Backing Codex thread is missing. Run /recover.");
-      return;
+    if (isManuallyBlockedStatus(worker.status)) {
+      const reason = worker.lastError ?? "Backing Codex thread is missing. Run /recover.";
+      await this.postWorkerSystemMessage(worker, reason);
+      return { status: "manual_retry", reason };
     }
 
     const input = await this.toTurnInput(context, record.key, true);
@@ -307,7 +355,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       try {
         await this.codex.steerTurn(worker.appThreadId, worker.activeTurnId, input);
         this.store.updateInboundMessageProgress(record.key, { turnId: worker.activeTurnId });
-        return;
+        return { status: "processed" };
       } catch (error) {
         if (isMissingThreadError(error)) {
           worker = await this.markWorkerRecoveryRequired(worker, "Backing Codex thread is missing. Run /recover to attach a fresh Codex thread to this Slack conversation.");
@@ -320,8 +368,9 @@ export class SlackCodexWorkersService extends EventEmitter {
     }
 
     if (worker.status === "recovery_required") {
-      await this.postWorkerSystemMessage(worker, worker.lastError ?? "Backing Codex thread is missing. Run /recover.");
-      return;
+      const reason = worker.lastError ?? "Backing Codex thread is missing. Run /recover.";
+      await this.postWorkerSystemMessage(worker, reason);
+      return { status: "manual_retry", reason };
     }
 
     const turnId = await this.startWorkerTurn(worker, input);
@@ -330,14 +379,15 @@ export class SlackCodexWorkersService extends EventEmitter {
       appThreadId: worker.appThreadId,
       turnId,
     });
+    return { status: "processed" };
   }
 
-  private async handleDmMessage(context: SlackMessageContext, record: InboundMessageRecord): Promise<void> {
+  private async handleDmMessage(context: SlackMessageContext, record: InboundMessageRecord): Promise<InboundHandlingResult> {
     if (!this.config.adminUserIds.includes(context.userId)) {
       await this.enqueueSlackWrite(this.getDmQueueKey(context.teamId, context.userId), async () => {
         await this.slack.postTopLevelMessage(context.channelId, "Not authorized.");
       });
-      return;
+      return { status: "processed" };
     }
 
     let session = this.store.getDmSession(context.teamId, context.userId);
@@ -367,18 +417,19 @@ export class SlackCodexWorkersService extends EventEmitter {
       await this.enqueueSlackWrite(this.getDmQueueKey(session.teamId, session.userId), async () => {
         await this.slack.postTopLevelMessage(session!.channelId, response);
       });
-      return;
+      return { status: "processed" };
     }
 
     if (session.pendingRequest) {
       await this.resolveDmPendingRequest(session, context);
-      return;
+      return { status: "processed" };
     }
 
     session = await this.prepareDmForSend(session);
-    if (session.status === "recovery_required") {
-      await this.postDmSystemMessage(session, session.lastError ?? "Backing Codex thread is missing. Run /recover.");
-      return;
+    if (isManuallyBlockedStatus(session.status)) {
+      const reason = session.lastError ?? "Backing Codex thread is missing. Run /recover.";
+      await this.postDmSystemMessage(session, reason);
+      return { status: "manual_retry", reason };
     }
 
     this.store.upsertDmSession({
@@ -395,7 +446,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       try {
         await this.codex.steerTurn(session.appThreadId, session.activeTurnId, input);
         this.store.updateInboundMessageProgress(record.key, { turnId: session.activeTurnId });
-        return;
+        return { status: "processed" };
       } catch (error) {
         if (isMissingThreadError(error)) {
           session = await this.markDmRecoveryRequired(session, "Backing Codex thread is missing. Run /recover to create a fresh admin Codex thread.");
@@ -408,8 +459,9 @@ export class SlackCodexWorkersService extends EventEmitter {
     }
 
     if (session.status === "recovery_required") {
-      await this.postDmSystemMessage(session, session.lastError ?? "Backing Codex thread is missing. Run /recover.");
-      return;
+      const reason = session.lastError ?? "Backing Codex thread is missing. Run /recover.";
+      await this.postDmSystemMessage(session, reason);
+      return { status: "manual_retry", reason };
     }
 
     const turnId = await this.startDmTurn(session, input);
@@ -417,9 +469,23 @@ export class SlackCodexWorkersService extends EventEmitter {
       appThreadId: session.appThreadId,
       turnId,
     });
+    return { status: "processed" };
   }
 
   private async prepareWorkerForSend(worker: WorkerRecord): Promise<WorkerRecord> {
+    const startingTurn = this.startingWorkerTurns.get(worker.key);
+    if (startingTurn) {
+      try {
+        await startingTurn;
+      } catch {
+        // Turn-start failure is handled by the originating request path.
+      }
+      worker = this.requireWorker(worker.key);
+      if (worker.activeTurnId || worker.status === "running") {
+        return worker;
+      }
+    }
+
     const state = await this.codex.reconcileThreadForSend(worker.appThreadId);
     if (worker.activeTurnId) {
       if (state === "idle") {
@@ -434,8 +500,17 @@ export class SlackCodexWorkersService extends EventEmitter {
       return this.requireWorker(worker.key);
     }
 
+    if (state === "idle" && worker.status === "blocked_running_turn") {
+      return this.clearWorkerBlockedRunningTurn(worker, "The previous Codex turn finished. This thread is ready for new messages.");
+    }
+    if (state === "running") {
+      return this.markWorkerBlockedRunningTurn(worker, "The previous Codex turn is still finishing. Wait for it to settle or use /recover to abandon it.");
+    }
     if (state === "missing") {
       return this.markWorkerRecoveryRequired(worker, "Backing Codex thread is missing. Run /recover to attach a fresh Codex thread to this Slack conversation.");
+    }
+    if (state === "unknown") {
+      throw new Error("Could not reconcile worker thread state with Codex app-server.");
     }
 
     return this.requireWorker(worker.key);
@@ -445,7 +520,20 @@ export class SlackCodexWorkersService extends EventEmitter {
     if (!session.appThreadId) {
       return this.requireDmSession(session.teamId, session.userId);
     }
-    const state = await this.codex.reconcileThreadForSend(session.appThreadId);
+    const sessionKey = this.getDmSessionKey(session.teamId, session.userId);
+    const startingTurn = this.startingDmTurns.get(sessionKey);
+    if (startingTurn) {
+      try {
+        await startingTurn;
+      } catch {
+        // Turn-start failure is handled by the originating request path.
+      }
+      session = this.requireDmSession(session.teamId, session.userId);
+      if (session.activeTurnId || session.status === "running") {
+        return session;
+      }
+    }
+    const state = await this.codex.reconcileThreadForSend(session.appThreadId!);
     if (session.activeTurnId) {
       if (state === "idle") {
         return this.clearDmStaleActiveTurn(session, "Recovered stale active turn before sending.");
@@ -458,95 +546,139 @@ export class SlackCodexWorkersService extends EventEmitter {
       }
       return this.requireDmSession(session.teamId, session.userId);
     }
+    if (state === "idle" && session.status === "blocked_running_turn") {
+      return this.clearDmBlockedRunningTurn(session, "The previous Codex turn finished. This DM is ready for new messages.");
+    }
+    if (state === "running") {
+      return this.markDmBlockedRunningTurn(session, "The previous Codex turn is still finishing. Wait for it to settle or use /recover to abandon it.");
+    }
     if (state === "missing") {
       return this.markDmRecoveryRequired(session, "Backing Codex thread is missing. Run /recover to create a fresh admin Codex thread.");
+    }
+    if (state === "unknown") {
+      throw new Error("Could not reconcile DM thread state with Codex app-server.");
     }
     return this.requireDmSession(session.teamId, session.userId);
   }
 
   private async startWorkerTurn(worker: WorkerRecord, input: TurnInput): Promise<string> {
-    const turnId = await this.codex.startTurnWithResumeFallback(
-      worker.appThreadId,
-      input,
-      worker.settings,
-      {
-        onAgentDelta: async ({ itemId, delta }) => {
-          await this.onWorkerAgentDelta(worker.key, itemId, delta);
-        },
-        onAgentMessage: async ({ itemId, text }) => {
-          await this.onWorkerAgentMessage(worker.key, itemId, text);
-        },
-        onWorklogItem: async (event) => {
-          await this.onWorkerWorklogItem(worker.key, event);
-        },
-        onCompleted: async ({ assistantText, status, error }) => {
-          await this.onWorkerCompleted(worker.key, assistantText, status, error);
-        },
-      },
-    );
-    this.store.updateWorkerState(worker.key, {
-      activeTurnId: turnId,
-      status: "running",
-      lastError: null,
-      pendingRequest: null,
-    });
-    return turnId;
+    const existing = this.startingWorkerTurns.get(worker.key);
+    if (existing) return existing;
+
+    const turnPromise = (async () => {
+      let turnId: string;
+      try {
+        turnId = await this.codex.startTurnWithResumeFallback(
+          worker.appThreadId,
+          input,
+          worker.settings,
+          {
+            onAgentDelta: async ({ itemId, delta }) => {
+              await this.onWorkerAgentDelta(worker.key, itemId, delta);
+            },
+            onAgentMessage: async ({ itemId, text }) => {
+              await this.onWorkerAgentMessage(worker.key, itemId, text);
+            },
+            onWorklogItem: async (event) => {
+              await this.onWorkerWorklogItem(worker.key, event);
+            },
+            onCompleted: async ({ assistantText, status, error }) => {
+              await this.onWorkerCompleted(worker.key, assistantText, status, error);
+            },
+          },
+        );
+      } catch (error) {
+        this.store.updateWorkerState(worker.key, {
+          status: "idle",
+          lastError: null,
+        });
+        throw error;
+      } finally {
+        this.startingWorkerTurns.delete(worker.key);
+      }
+      this.store.updateWorkerState(worker.key, {
+        activeTurnId: turnId,
+        status: "running",
+        lastError: null,
+        pendingRequest: null,
+      });
+      return turnId;
+    })();
+    this.startingWorkerTurns.set(worker.key, turnPromise);
+    return turnPromise;
   }
 
   private async startDmTurn(session: DmSessionRecord, input: TurnInput): Promise<string> {
+    const sessionKey = this.getDmSessionKey(session.teamId, session.userId);
+    const existing = this.startingDmTurns.get(sessionKey);
+    if (existing) return existing;
+
     let latestSession = session;
-    let appThreadId = latestSession.appThreadId;
-    if (!appThreadId) {
+    if (!latestSession.appThreadId) {
       const created = await this.codex.createAdminThread(latestSession.settings);
       latestSession = this.store.upsertDmSession({
         ...latestSession,
         appThreadId: created.threadId,
         status: "idle",
       });
-      appThreadId = created.threadId;
     }
 
-    const turnId = await this.codex.startTurnWithResumeFallback(
-      appThreadId,
-      input,
-      latestSession.settings,
-      {
-        onAgentDelta: async ({ itemId, delta }) => {
-          await this.onDmAgentDelta(latestSession.teamId, latestSession.userId, itemId, delta);
-        },
-        onAgentMessage: async ({ itemId, text }) => {
-          await this.onDmAgentMessage(latestSession.teamId, latestSession.userId, itemId, text);
-        },
-        onWorklogItem: async (event) => {
-          await this.onDmWorklogItem(latestSession.teamId, latestSession.userId, event);
-        },
-        onCompleted: async ({ assistantText, status, error }) => {
-          await this.onDmCompleted(latestSession.teamId, latestSession.userId, assistantText, status, error);
-        },
-      },
-    );
+    const turnPromise = (async () => {
+      let turnId: string;
+      try {
+        turnId = await this.codex.startTurnWithResumeFallback(
+          latestSession.appThreadId!,
+          input,
+          latestSession.settings,
+          {
+            onAgentDelta: async ({ itemId, delta }) => {
+              await this.onDmAgentDelta(latestSession.teamId, latestSession.userId, itemId, delta);
+            },
+            onAgentMessage: async ({ itemId, text }) => {
+              await this.onDmAgentMessage(latestSession.teamId, latestSession.userId, itemId, text);
+            },
+            onWorklogItem: async (event) => {
+              await this.onDmWorklogItem(latestSession.teamId, latestSession.userId, event);
+            },
+            onCompleted: async ({ assistantText, status, error }) => {
+              await this.onDmCompleted(latestSession.teamId, latestSession.userId, assistantText, status, error);
+            },
+          },
+        );
+      } catch (error) {
+        this.store.upsertDmSession({
+          ...this.requireDmSession(latestSession.teamId, latestSession.userId),
+          status: "idle",
+          lastError: null,
+        });
+        throw error;
+      } finally {
+        this.startingDmTurns.delete(sessionKey);
+      }
 
-    this.store.upsertDmSession({
-      ...latestSession,
-      appThreadId,
-      activeTurnId: turnId,
-      status: "running",
-      lastError: null,
-      pendingRequest: null,
-    });
-    return turnId;
+      this.store.upsertDmSession({
+        ...this.requireDmSession(latestSession.teamId, latestSession.userId),
+        activeTurnId: turnId,
+        status: "running",
+        lastError: null,
+        pendingRequest: null,
+      });
+      return turnId;
+    })();
+    this.startingDmTurns.set(sessionKey, turnPromise);
+    return turnPromise;
   }
 
   private async onWorkerAgentDelta(workerKey: string, itemId: string, delta: string): Promise<void> {
     const worker = this.requireWorker(workerKey);
-    this.freezeWorklog(workerKey, "worker");
+    await this.freezeWorkerWorklog(worker);
     const slackTs = await this.ensureWorkerAgentMessage(worker, itemId, delta);
     await this.scheduleSlackEdit(this.getWorkerQueueKey(worker), this.getWorkerEditKey(worker, slackTs), worker.channelId, slackTs, (current) => `${current}${delta}`);
   }
 
   private async onWorkerAgentMessage(workerKey: string, itemId: string, text: string): Promise<void> {
     const worker = this.requireWorker(workerKey);
-    this.freezeWorklog(workerKey, "worker");
+    await this.freezeWorkerWorklog(worker);
     const slackTs = await this.ensureWorkerAgentMessage(worker, itemId, text);
     await this.enqueueSlackWrite(this.getWorkerQueueKey(worker), async () => {
       await this.flushSlackEdit(this.getWorkerEditKey(worker, slackTs), worker.channelId, slackTs, text);
@@ -577,7 +709,7 @@ export class SlackCodexWorkersService extends EventEmitter {
 
   private async onWorkerCompleted(workerKey: string, assistantText: string, status: string, error?: string | null): Promise<void> {
     const worker = this.requireWorker(workerKey);
-    this.freezeWorklog(workerKey, "worker");
+    await this.freezeWorkerWorklog(worker);
     this.store.updateWorkerState(workerKey, {
       activeTurnId: null,
       status: normalizeTurnStatus(status),
@@ -597,14 +729,14 @@ export class SlackCodexWorkersService extends EventEmitter {
 
   private async onDmAgentDelta(teamId: string, userId: string, itemId: string, delta: string): Promise<void> {
     const session = this.requireDmSession(teamId, userId);
-    this.freezeWorklog(`${teamId}:${userId}`, "dm");
+    await this.freezeDmWorklog(session);
     const slackTs = await this.ensureDmAgentMessage(session, itemId, delta);
     await this.scheduleSlackEdit(this.getDmQueueKey(teamId, userId), this.getDmEditKey(teamId, userId, slackTs), session.channelId, slackTs, (current) => `${current}${delta}`);
   }
 
   private async onDmAgentMessage(teamId: string, userId: string, itemId: string, text: string): Promise<void> {
     const session = this.requireDmSession(teamId, userId);
-    this.freezeWorklog(`${teamId}:${userId}`, "dm");
+    await this.freezeDmWorklog(session);
     const slackTs = await this.ensureDmAgentMessage(session, itemId, text);
     await this.enqueueSlackWrite(this.getDmQueueKey(teamId, userId), async () => {
       await this.flushSlackEdit(this.getDmEditKey(teamId, userId, slackTs), session.channelId, slackTs, text);
@@ -635,7 +767,7 @@ export class SlackCodexWorkersService extends EventEmitter {
 
   private async onDmCompleted(teamId: string, userId: string, assistantText: string, status: string, error?: string | null): Promise<void> {
     const session = this.requireDmSession(teamId, userId);
-    this.freezeWorklog(`${teamId}:${userId}`, "dm");
+    await this.freezeDmWorklog(session);
     this.store.upsertDmSession({
       ...session,
       activeTurnId: null,
@@ -685,8 +817,29 @@ export class SlackCodexWorkersService extends EventEmitter {
     return slackTs;
   }
 
-  private freezeWorklog(key: string, scope: "worker" | "dm"): void {
-    const state = this.getRenderState(`${scope}:${key}`);
+  private async freezeWorkerWorklog(worker: WorkerRecord): Promise<void> {
+    if (worker.currentWorklogSlackTs) {
+      await this.flushPendingSlackEdit(
+        this.getWorkerQueueKey(worker),
+        this.getWorkerEditKey(worker, worker.currentWorklogSlackTs),
+        worker.channelId,
+        worker.currentWorklogSlackTs,
+      );
+    }
+    const state = this.getRenderState(`worker:${worker.key}`);
+    state.worklogItems.clear();
+  }
+
+  private async freezeDmWorklog(session: DmSessionRecord): Promise<void> {
+    if (session.currentWorklogSlackTs) {
+      await this.flushPendingSlackEdit(
+        this.getDmQueueKey(session.teamId, session.userId),
+        this.getDmEditKey(session.teamId, session.userId, session.currentWorklogSlackTs),
+        session.channelId,
+        session.currentWorklogSlackTs,
+      );
+    }
+    const state = this.getRenderState(`dm:${session.teamId}:${session.userId}`);
     state.worklogItems.clear();
   }
 
@@ -697,6 +850,7 @@ export class SlackCodexWorkersService extends EventEmitter {
         worklogItems: new Map(),
         pendingEdits: new Map(),
         latestTexts: new Map(),
+        editRetryCounts: new Map(),
       };
       this.renderState.set(key, state);
     }
@@ -720,8 +874,15 @@ export class SlackCodexWorkersService extends EventEmitter {
       void this.enqueueSlackWrite(queueKey, async () => {
         try {
           await this.flushSlackEdit(editKey, channelId, slackTs, state.latestTexts.get(editKey) ?? "");
+          state.editRetryCounts.delete(editKey);
         } catch (error) {
           logWarn("slack edit flush failed", error instanceof Error ? error.message : String(error));
+          const retryCount = state.editRetryCounts.get(editKey) ?? 0;
+          if (retryCount < 1) {
+            state.editRetryCounts.set(editKey, retryCount + 1);
+            state.pendingEdits.delete(editKey);
+            await this.scheduleSlackEdit(queueKey, editKey, channelId, slackTs, state.latestTexts.get(editKey) ?? "");
+          }
         }
       });
     }, this.config.messageEditThrottleMs);
@@ -735,8 +896,23 @@ export class SlackCodexWorkersService extends EventEmitter {
       clearTimeout(pending);
       state.pendingEdits.delete(editKey);
     }
-    state.latestTexts.set(editKey, text);
     await this.slack.updateMessage(channelId, slackTs, text);
+    state.latestTexts.set(editKey, text);
+  }
+
+  private async flushPendingSlackEdit(queueKey: string, editKey: string, channelId: string, slackTs: string): Promise<void> {
+    const state = this.getRenderState("__edits__");
+    const pending = state.pendingEdits.get(editKey);
+    if (!pending) return;
+    clearTimeout(pending);
+    state.pendingEdits.delete(editKey);
+    try {
+      await this.enqueueSlackWrite(queueKey, async () => {
+        await this.flushSlackEdit(editKey, channelId, slackTs, state.latestTexts.get(editKey) ?? "");
+      });
+    } catch (error) {
+      logWarn("failed to flush pending slack edit", error instanceof Error ? error.message : String(error));
+    }
   }
 
   private async handleThreadCommand(worker: WorkerRecord, name: string, args: string[]): Promise<void> {
@@ -767,13 +943,19 @@ export class SlackCodexWorkersService extends EventEmitter {
     } else if (name === "compact") {
       if (worker.activeTurnId || worker.pendingRequest) {
         response = "Cannot compact while the worker is active.";
+      } else if (isManuallyBlockedStatus(worker.status)) {
+        response = "Cannot compact while this thread is blocked or waiting for recovery.";
       } else {
         await this.codex.compactThread(worker.appThreadId);
         response = `Compaction requested for thread ${worker.appThreadId}`;
       }
     } else if (name === "recover") {
-      const recovered = await this.recoverWorker(worker);
-      response = `Created a fresh backing Codex thread for this Slack conversation.\nThread: ${recovered.appThreadId}`;
+      if (!(await this.canRecoverWorkerNow(worker))) {
+        response = "Recover is only available when this thread is blocked or its backing Codex thread is missing.";
+      } else {
+        const recovered = await this.recoverWorker(worker);
+        response = `Created a fresh backing Codex thread for this Slack conversation.\nThread: ${recovered.appThreadId}`;
+      }
     } else {
       response = "This command is only available in DMs.";
     }
@@ -817,10 +999,14 @@ export class SlackCodexWorkersService extends EventEmitter {
     if (name === "compact") {
       if (!currentSession?.appThreadId) return "No DM admin thread to compact.";
       if (currentSession.activeTurnId || currentSession.pendingRequest) return "Cannot compact while the DM admin thread is active.";
+      if (isManuallyBlockedStatus(currentSession.status)) return "Cannot compact while this DM is blocked or waiting for recovery.";
       await this.codex.compactThread(currentSession.appThreadId);
       return `Compaction requested for thread ${currentSession.appThreadId}`;
     }
     if (name === "recover") {
+      if (!(await this.canRecoverDmNow(currentSession ?? session))) {
+        return "Recover is only available when this DM is blocked or its backing Codex thread is missing.";
+      }
       const recovered = await this.recoverDmSession(currentSession ?? session);
       return `Created a fresh backing Codex admin thread.\nThread: ${recovered.appThreadId ?? "(none)"}`;
     }
@@ -863,13 +1049,23 @@ export class SlackCodexWorkersService extends EventEmitter {
       ? await this.slack.resolveChannel(parent.teamId, args.channel, parent.channelId)
       : { teamId: parent.teamId, channelId: parent.channelId, name: "", isPrivate: false, isMember: true, updatedAt: new Date().toISOString() };
 
-    const childThread = args.mode === "fork"
-      ? await this.codex.forkWorkerThread(parent.appThreadId, parent.settings)
-      : await this.codex.createWorkerThread(parent.settings);
-
     const rootTs = await this.enqueueSlackWrite(`spawn:${parent.key}:${targetChannel.channelId}`, async () =>
       this.slack.postTopLevelMessage(targetChannel.channelId, args.title),
     );
+
+    let childThread;
+    try {
+      childThread = args.mode === "fork"
+        ? await this.codex.forkWorkerThread(parent.appThreadId, parent.settings)
+        : await this.codex.createWorkerThread(parent.settings);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await this.enqueueSlackWrite(
+        `spawn:${parent.key}:${targetChannel.channelId}:${rootTs}`,
+        async () => this.slack.postThreadReply(targetChannel.channelId, rootTs, renderSystemMessage(`Child worker creation failed: ${message}`)),
+      );
+      return `Created child Slack thread in ${targetChannel.channelId}, but failed to create the backing worker: ${message}`;
+    }
 
     const child = this.store.upsertWorker({
       key: `${parent.teamId}:${targetChannel.channelId}:${rootTs}`,
@@ -1002,6 +1198,7 @@ export class SlackCodexWorkersService extends EventEmitter {
   }
 
   private async recoverWorker(worker: WorkerRecord): Promise<WorkerRecord> {
+    this.clearBlockedTurnPoll(this.getWorkerPollKey(worker.key));
     const created = await this.codex.createWorkerThread(worker.settings);
     const recovered = this.store.upsertWorker({
       ...worker,
@@ -1019,6 +1216,7 @@ export class SlackCodexWorkersService extends EventEmitter {
   }
 
   private async recoverDmSession(session: DmSessionRecord): Promise<DmSessionRecord> {
+    this.clearBlockedTurnPoll(this.getDmPollKey(session.teamId, session.userId));
     const created = await this.codex.createAdminThread(session.settings);
     const recovered = this.store.upsertDmSession({
       ...session,
@@ -1035,7 +1233,21 @@ export class SlackCodexWorkersService extends EventEmitter {
     return recovered;
   }
 
+  private async canRecoverWorkerNow(worker: WorkerRecord): Promise<boolean> {
+    if (canRecover(worker.status)) return true;
+    const state = await this.codex.reconcileThreadForSend(worker.appThreadId);
+    return state === "missing" || (state === "running" && !worker.activeTurnId);
+  }
+
+  private async canRecoverDmNow(session: DmSessionRecord): Promise<boolean> {
+    if (canRecover(session.status)) return true;
+    if (!session.appThreadId) return false;
+    const state = await this.codex.reconcileThreadForSend(session.appThreadId);
+    return state === "missing" || (state === "running" && !session.activeTurnId);
+  }
+
   private async clearWorkerStaleActiveTurn(worker: WorkerRecord, reason: string): Promise<WorkerRecord> {
+    this.clearBlockedTurnPoll(this.getWorkerPollKey(worker.key));
     this.store.updateWorkerState(worker.key, {
       activeTurnId: null,
       status: "idle",
@@ -1051,6 +1263,7 @@ export class SlackCodexWorkersService extends EventEmitter {
   }
 
   private async markWorkerRecoveryRequired(worker: WorkerRecord, reason: string): Promise<WorkerRecord> {
+    this.clearBlockedTurnPoll(this.getWorkerPollKey(worker.key));
     this.store.updateWorkerState(worker.key, {
       activeTurnId: null,
       status: "recovery_required",
@@ -1065,7 +1278,35 @@ export class SlackCodexWorkersService extends EventEmitter {
     return updated;
   }
 
+  private async markWorkerBlockedRunningTurn(worker: WorkerRecord, reason: string): Promise<WorkerRecord> {
+    if (worker.status === "blocked_running_turn" && worker.lastError === reason) {
+      this.scheduleWorkerBlockedTurnPoll(worker.key);
+      return worker;
+    }
+    this.store.updateWorkerState(worker.key, {
+      status: "blocked_running_turn",
+      lastError: reason,
+      pendingRequest: null,
+    });
+    const updated = this.requireWorker(worker.key);
+    await this.postWorkerSystemMessage(updated, reason);
+    this.scheduleWorkerBlockedTurnPoll(updated.key);
+    return updated;
+  }
+
+  private async clearWorkerBlockedRunningTurn(worker: WorkerRecord, reason: string): Promise<WorkerRecord> {
+    this.clearBlockedTurnPoll(this.getWorkerPollKey(worker.key));
+    this.store.updateWorkerState(worker.key, {
+      status: "idle",
+      lastError: null,
+    });
+    const updated = this.requireWorker(worker.key);
+    await this.postWorkerSystemMessage(updated, reason);
+    return updated;
+  }
+
   private async clearDmStaleActiveTurn(session: DmSessionRecord, reason: string): Promise<DmSessionRecord> {
+    this.clearBlockedTurnPoll(this.getDmPollKey(session.teamId, session.userId));
     this.store.upsertDmSession({
       ...session,
       activeTurnId: null,
@@ -1082,6 +1323,7 @@ export class SlackCodexWorkersService extends EventEmitter {
   }
 
   private async markDmRecoveryRequired(session: DmSessionRecord, reason: string): Promise<DmSessionRecord> {
+    this.clearBlockedTurnPoll(this.getDmPollKey(session.teamId, session.userId));
     this.store.upsertDmSession({
       ...session,
       activeTurnId: null,
@@ -1091,6 +1333,35 @@ export class SlackCodexWorkersService extends EventEmitter {
       currentWorklogSlackTs: null,
       pendingRequest: null,
       lastError: reason,
+    });
+    const updated = this.requireDmSession(session.teamId, session.userId);
+    await this.postDmSystemMessage(updated, reason);
+    return updated;
+  }
+
+  private async markDmBlockedRunningTurn(session: DmSessionRecord, reason: string): Promise<DmSessionRecord> {
+    if (session.status === "blocked_running_turn" && session.lastError === reason) {
+      this.scheduleDmBlockedTurnPoll(session.teamId, session.userId);
+      return session;
+    }
+    this.store.upsertDmSession({
+      ...session,
+      status: "blocked_running_turn",
+      lastError: reason,
+      pendingRequest: null,
+    });
+    const updated = this.requireDmSession(session.teamId, session.userId);
+    await this.postDmSystemMessage(updated, reason);
+    this.scheduleDmBlockedTurnPoll(updated.teamId, updated.userId);
+    return updated;
+  }
+
+  private async clearDmBlockedRunningTurn(session: DmSessionRecord, reason: string): Promise<DmSessionRecord> {
+    this.clearBlockedTurnPoll(this.getDmPollKey(session.teamId, session.userId));
+    this.store.upsertDmSession({
+      ...session,
+      status: "idle",
+      lastError: null,
     });
     const updated = this.requireDmSession(session.teamId, session.userId);
     await this.postDmSystemMessage(updated, reason);
@@ -1159,8 +1430,20 @@ export class SlackCodexWorkersService extends EventEmitter {
     return `dm:${teamId}:${userId}`;
   }
 
+  private getDmSessionKey(teamId: string, userId: string): string {
+    return this.getDmQueueKey(teamId, userId);
+  }
+
   private getDmEditKey(teamId: string, userId: string, slackTs: string): string {
     return `${this.getDmQueueKey(teamId, userId)}:${slackTs}`;
+  }
+
+  private getWorkerPollKey(workerKey: string): string {
+    return `worker:${workerKey}`;
+  }
+
+  private getDmPollKey(teamId: string, userId: string): string {
+    return `dm:${teamId}:${userId}`;
   }
 
   private async enqueueSlackWrite<T>(queueKey: string, operation: () => Promise<T>): Promise<T> {
@@ -1184,6 +1467,108 @@ export class SlackCodexWorkersService extends EventEmitter {
     };
   }
 
+  private scheduleWorkerBlockedTurnPoll(workerKey: string): void {
+    const pollKey = this.getWorkerPollKey(workerKey);
+    if (this.blockedTurnPolls.has(pollKey)) return;
+    this.blockedTurnDeadlines.set(pollKey, Date.now() + BLOCKED_RUNNING_TURN_POLL_WINDOW_MS);
+    this.queueWorkerBlockedTurnPoll(workerKey);
+  }
+
+  private queueWorkerBlockedTurnPoll(workerKey: string): void {
+    const pollKey = this.getWorkerPollKey(workerKey);
+    const timer = setTimeout(() => {
+      void this.runWorkerBlockedTurnPoll(workerKey);
+    }, BLOCKED_RUNNING_TURN_POLL_INTERVAL_MS);
+    this.blockedTurnPolls.set(pollKey, timer);
+  }
+
+  private async runWorkerBlockedTurnPoll(workerKey: string): Promise<void> {
+    const pollKey = this.getWorkerPollKey(workerKey);
+    this.blockedTurnPolls.delete(pollKey);
+    const worker = this.store.getWorkerByKey(workerKey);
+    if (!worker || worker.status !== "blocked_running_turn") {
+      this.clearBlockedTurnPoll(pollKey);
+      return;
+    }
+    const deadline = this.blockedTurnDeadlines.get(pollKey) ?? 0;
+    const state = await this.codex.reconcileThreadForSend(worker.appThreadId);
+    if (state === "idle") {
+      this.clearBlockedTurnPoll(pollKey);
+      this.store.updateWorkerState(worker.key, {
+        status: "idle",
+        lastError: null,
+      });
+      await this.postWorkerSystemMessage(this.requireWorker(worker.key), "The previous Codex turn finished. This thread is ready for new messages.");
+      return;
+    }
+    if (state === "missing" || Date.now() >= deadline) {
+      await this.markWorkerRecoveryRequired(
+        worker,
+        state === "missing"
+          ? "Backing Codex thread is missing. Run /recover to attach a fresh Codex thread to this Slack conversation."
+          : "The previous Codex turn did not settle in time. Run /recover to attach a fresh Codex thread to this Slack conversation.",
+      );
+      return;
+    }
+    this.queueWorkerBlockedTurnPoll(workerKey);
+  }
+
+  private scheduleDmBlockedTurnPoll(teamId: string, userId: string): void {
+    const pollKey = this.getDmPollKey(teamId, userId);
+    if (this.blockedTurnPolls.has(pollKey)) return;
+    this.blockedTurnDeadlines.set(pollKey, Date.now() + BLOCKED_RUNNING_TURN_POLL_WINDOW_MS);
+    this.queueDmBlockedTurnPoll(teamId, userId);
+  }
+
+  private queueDmBlockedTurnPoll(teamId: string, userId: string): void {
+    const pollKey = this.getDmPollKey(teamId, userId);
+    const timer = setTimeout(() => {
+      void this.runDmBlockedTurnPoll(teamId, userId);
+    }, BLOCKED_RUNNING_TURN_POLL_INTERVAL_MS);
+    this.blockedTurnPolls.set(pollKey, timer);
+  }
+
+  private async runDmBlockedTurnPoll(teamId: string, userId: string): Promise<void> {
+    const pollKey = this.getDmPollKey(teamId, userId);
+    this.blockedTurnPolls.delete(pollKey);
+    const session = this.store.getDmSession(teamId, userId);
+    if (!session || session.status !== "blocked_running_turn" || !session.appThreadId) {
+      this.clearBlockedTurnPoll(pollKey);
+      return;
+    }
+    const deadline = this.blockedTurnDeadlines.get(pollKey) ?? 0;
+    const state = await this.codex.reconcileThreadForSend(session.appThreadId);
+    if (state === "idle") {
+      this.clearBlockedTurnPoll(pollKey);
+      this.store.upsertDmSession({
+        ...session,
+        status: "idle",
+        lastError: null,
+      });
+      await this.postDmSystemMessage(this.requireDmSession(teamId, userId), "The previous Codex turn finished. This DM is ready for new messages.");
+      return;
+    }
+    if (state === "missing" || Date.now() >= deadline) {
+      await this.markDmRecoveryRequired(
+        session,
+        state === "missing"
+          ? "Backing Codex thread is missing. Run /recover to create a fresh admin Codex thread."
+          : "The previous Codex turn did not settle in time. Run /recover to create a fresh admin Codex thread.",
+      );
+      return;
+    }
+    this.queueDmBlockedTurnPoll(teamId, userId);
+  }
+
+  private clearBlockedTurnPoll(pollKey: string): void {
+    const timer = this.blockedTurnPolls.get(pollKey);
+    if (timer) {
+      clearTimeout(timer);
+    }
+    this.blockedTurnPolls.delete(pollKey);
+    this.blockedTurnDeadlines.delete(pollKey);
+  }
+
   private requireWorker(workerKey: string): WorkerRecord {
     const worker = this.store.getWorkerByKey(workerKey);
     if (!worker) throw new Error(`Missing worker ${workerKey}`);
@@ -1199,6 +1584,14 @@ export class SlackCodexWorkersService extends EventEmitter {
 
 function buildInboundMessageKey(context: SlackMessageContext, kind: InboundMessageKind): string {
   return `${context.teamId}:${context.channelId}:${context.ts}:${kind}`;
+}
+
+function isManuallyBlockedStatus(status: SessionStatus): boolean {
+  return status === "recovery_required" || status === "blocked_running_turn";
+}
+
+function canRecover(status: SessionStatus): boolean {
+  return status === "recovery_required" || status === "blocked_running_turn";
 }
 
 function normalizeTurnStatus(status: string): SessionStatus {

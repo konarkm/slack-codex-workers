@@ -27,7 +27,14 @@ export interface RuntimeSettings {
   effort: ReasoningEffort | null;
 }
 
-export type SessionStatus = "idle" | "running" | "completed" | "failed" | "recovery_required" | "blocked_input";
+export type SessionStatus =
+  | "idle"
+  | "running"
+  | "completed"
+  | "failed"
+  | "recovery_required"
+  | "blocked_input"
+  | "blocked_running_turn";
 
 export type InboundMessageKind = "channel-root" | "thread-reply" | "dm-message";
 export type InboundMessageStatus = "received" | "processing" | "processed" | "failed";
@@ -149,6 +156,7 @@ export interface InboundMessageRecord {
   payloadJson: string;
   status: InboundMessageStatus;
   attempts: number;
+  retryable: boolean;
   lastError: string | null;
   workerKey: string | null;
   appThreadId: string | null;

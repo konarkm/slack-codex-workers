@@ -123,6 +123,7 @@ export class Store {
         payload_json TEXT NOT NULL,
         status TEXT NOT NULL,
         attempts INTEGER NOT NULL DEFAULT 0,
+        retryable INTEGER NOT NULL DEFAULT 1,
         last_error TEXT,
         worker_key TEXT,
         app_thread_id TEXT,
@@ -157,6 +158,7 @@ export class Store {
     this.ensureColumn("dm_sessions", "last_error", "TEXT");
     this.ensureColumn("dm_sessions", "last_inbound_message_ts", "TEXT");
     this.ensureColumn("dm_sessions", "pending_request_json", "TEXT");
+    this.ensureColumn("inbound_messages", "retryable", "INTEGER NOT NULL DEFAULT 1");
   }
 
   private ensureColumn(table: string, column: string, definition: string): void {
@@ -264,15 +266,15 @@ export class Store {
         updated_at = ?
       WHERE key = ?
     `).run(
-      patch.activeTurnId ?? worker.activeTurnId,
-      patch.status ?? worker.status,
-      patch.currentAgentSlackTs ?? worker.currentAgentSlackTs,
-      patch.currentAgentItemId ?? worker.currentAgentItemId,
-      patch.currentWorklogSlackTs ?? worker.currentWorklogSlackTs,
-      JSON.stringify(patch.settings ?? worker.settings),
-      patch.lastError ?? worker.lastError,
-      patch.lastInboundMessageTs ?? worker.lastInboundMessageTs,
-      JSON.stringify(patch.pendingRequest ?? worker.pendingRequest),
+      Object.hasOwn(patch, "activeTurnId") ? patch.activeTurnId : worker.activeTurnId,
+      Object.hasOwn(patch, "status") ? patch.status : worker.status,
+      Object.hasOwn(patch, "currentAgentSlackTs") ? patch.currentAgentSlackTs : worker.currentAgentSlackTs,
+      Object.hasOwn(patch, "currentAgentItemId") ? patch.currentAgentItemId : worker.currentAgentItemId,
+      Object.hasOwn(patch, "currentWorklogSlackTs") ? patch.currentWorklogSlackTs : worker.currentWorklogSlackTs,
+      JSON.stringify(Object.hasOwn(patch, "settings") ? patch.settings : worker.settings),
+      Object.hasOwn(patch, "lastError") ? patch.lastError : worker.lastError,
+      Object.hasOwn(patch, "lastInboundMessageTs") ? patch.lastInboundMessageTs : worker.lastInboundMessageTs,
+      Object.hasOwn(patch, "pendingRequest") ? JSON.stringify(patch.pendingRequest) : JSON.stringify(worker.pendingRequest),
       nowIso(),
       key,
     );
@@ -401,9 +403,12 @@ export class Store {
   }): InboundMessageRecord {
     this.db.prepare(`
       INSERT INTO inbound_messages (
-        key, team_id, channel_id, message_ts, root_ts, kind, payload_json, status, attempts, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'received', 0, ?, ?)
-      ON CONFLICT(team_id, channel_id, message_ts, kind) DO NOTHING
+        key, team_id, channel_id, message_ts, root_ts, kind, payload_json, status, attempts, retryable, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'received', 0, 1, ?, ?)
+      ON CONFLICT(team_id, channel_id, message_ts, kind) DO UPDATE SET
+        payload_json=excluded.payload_json,
+        root_ts=excluded.root_ts,
+        updated_at=excluded.updated_at
     `).run(
       input.key,
       input.teamId,
@@ -427,6 +432,7 @@ export class Store {
     const rows = this.db.prepare(`
       SELECT * FROM inbound_messages
       WHERE status = 'received'
+        OR (status = 'failed' AND retryable = 1 AND attempts < 3)
       ORDER BY created_at ASC, key ASC
     `).all() as Record<string, unknown>[];
     return rows.map((row) => this.toInboundMessage(row));
@@ -444,7 +450,7 @@ export class Store {
     const updated = this.db.prepare(`
       UPDATE inbound_messages
       SET status = 'processing', attempts = attempts + 1, updated_at = ?
-      WHERE key = ? AND status IN ('received', 'failed')
+      WHERE key = ? AND (status = 'received' OR (status = 'failed' AND retryable = 1))
     `).run(nowIso(), key);
     if (updated.changes < 1) {
       return null;
@@ -463,10 +469,10 @@ export class Store {
       SET worker_key = ?, app_thread_id = ?, turn_id = ?, last_error = ?, updated_at = ?
       WHERE key = ?
     `).run(
-      patch.workerKey ?? current.workerKey,
-      patch.appThreadId ?? current.appThreadId,
-      patch.turnId ?? current.turnId,
-      patch.lastError ?? current.lastError,
+      Object.hasOwn(patch, "workerKey") ? patch.workerKey : current.workerKey,
+      Object.hasOwn(patch, "appThreadId") ? patch.appThreadId : current.appThreadId,
+      Object.hasOwn(patch, "turnId") ? patch.turnId : current.turnId,
+      Object.hasOwn(patch, "lastError") ? patch.lastError : current.lastError,
       nowIso(),
       key,
     );
@@ -477,12 +483,12 @@ export class Store {
     if (!current) return;
     this.db.prepare(`
       UPDATE inbound_messages
-      SET status = 'processed', worker_key = ?, app_thread_id = ?, turn_id = ?, last_error = NULL, updated_at = ?
+      SET status = 'processed', retryable = 0, worker_key = ?, app_thread_id = ?, turn_id = ?, last_error = NULL, updated_at = ?
       WHERE key = ?
     `).run(
-      patch?.workerKey ?? current.workerKey,
-      patch?.appThreadId ?? current.appThreadId,
-      patch?.turnId ?? current.turnId,
+      Object.hasOwn(patch ?? {}, "workerKey") ? patch?.workerKey : current.workerKey,
+      Object.hasOwn(patch ?? {}, "appThreadId") ? patch?.appThreadId : current.appThreadId,
+      Object.hasOwn(patch ?? {}, "turnId") ? patch?.turnId : current.turnId,
       nowIso(),
       key,
     );
@@ -491,7 +497,15 @@ export class Store {
   markInboundMessageFailed(key: string, errorText: string): void {
     this.db.prepare(`
       UPDATE inbound_messages
-      SET status = 'failed', last_error = ?, updated_at = ?
+      SET status = 'failed', retryable = 1, last_error = ?, updated_at = ?
+      WHERE key = ?
+    `).run(errorText, nowIso(), key);
+  }
+
+  markInboundMessageRejected(key: string, errorText: string): void {
+    this.db.prepare(`
+      UPDATE inbound_messages
+      SET status = 'failed', retryable = 0, last_error = ?, updated_at = ?
       WHERE key = ?
     `).run(errorText, nowIso(), key);
   }
@@ -606,6 +620,7 @@ export class Store {
       payloadJson: String(row.payload_json),
       status: String(row.status) as InboundMessageStatus,
       attempts: Number(row.attempts ?? 0),
+      retryable: Boolean(row.retryable),
       lastError: row.last_error ? String(row.last_error) : null,
       workerKey: row.worker_key ? String(row.worker_key) : null,
       appThreadId: row.app_thread_id ? String(row.app_thread_id) : null,

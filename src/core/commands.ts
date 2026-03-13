@@ -30,14 +30,14 @@ export function helpText(scope: "dm" | "thread"): string {
     lines.push("/model [id] - show or set global defaults for new workers");
     lines.push("/effort [level] - show or set global defaults for new workers");
     lines.push("/compact - compact the DM admin conversation");
-    lines.push("/recover - recreate the backing Codex thread when runtime context is missing");
+    lines.push("/recover - recover this DM only when the backing Codex thread is missing or blocked");
     return lines.join("\n");
   }
   lines.push("/help - show thread command help");
   lines.push("/model [id] - show or set model for this worker thread");
   lines.push("/effort [level] - show or set reasoning effort for this worker thread");
   lines.push("/compact - compact this worker thread when idle");
-  lines.push("/recover - recreate the backing Codex thread if it is missing");
+  lines.push("/recover - recover this thread only when the backing Codex thread is missing or blocked");
   return lines.join("\n");
 }
 

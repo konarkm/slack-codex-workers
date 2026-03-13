@@ -22,10 +22,12 @@ describe("commands", () => {
   it("renders dm help", () => {
     expect(helpText("dm")).toContain("/restart <codex|bridge|both>");
     expect(helpText("dm")).toContain("/recover");
+    expect(helpText("dm")).toContain("missing or blocked");
   });
 
   it("renders thread help", () => {
     expect(helpText("thread")).toContain("/recover");
     expect(helpText("thread")).not.toContain("/restart");
+    expect(helpText("thread")).toContain("missing or blocked");
   });
 });

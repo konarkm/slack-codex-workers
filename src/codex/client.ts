@@ -205,6 +205,7 @@ export class CodexClient {
       return "unknown";
     } catch (error) {
       if (isMissingThreadError(error)) return "missing";
+      if (shouldRetryWithResume(error)) return "running";
       return "unknown";
     }
   }
@@ -406,7 +407,7 @@ export class CodexClient {
 
 function buildTurnInput(input: TurnInput): Array<{ type: string; [key: string]: unknown }> {
   const items: Array<{ type: string; [key: string]: unknown }> = [
-    { type: "text", text: input.text, textElements: [] },
+    { type: "text", text: input.text, text_elements: [] },
   ];
   for (const imagePath of input.imagePaths ?? []) {
     items.push({ type: "localImage", path: imagePath });
