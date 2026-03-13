@@ -1234,13 +1234,11 @@ export class SlackCodexWorkersService extends EventEmitter {
   }
 
   private async canRecoverWorkerNow(worker: WorkerRecord): Promise<boolean> {
-    if (canRecover(worker.status)) return true;
     const state = await this.codex.reconcileThreadForSend(worker.appThreadId);
     return state === "missing" || (state === "running" && !worker.activeTurnId);
   }
 
   private async canRecoverDmNow(session: DmSessionRecord): Promise<boolean> {
-    if (canRecover(session.status)) return true;
     if (!session.appThreadId) return false;
     const state = await this.codex.reconcileThreadForSend(session.appThreadId);
     return state === "missing" || (state === "running" && !session.activeTurnId);

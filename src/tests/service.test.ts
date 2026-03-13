@@ -4,7 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AppConfig } from "../config.js";
 import { SlackCodexWorkersService } from "../core/service.js";
-import type { SlackMessageContext, WorkerRecord } from "../types.js";
+import type { DmSessionRecord, SlackMessageContext, WorkerRecord } from "../types.js";
 
 const tempDirs: string[] = [];
 
@@ -96,6 +96,25 @@ function createWorker(service: any, overrides: Partial<WorkerRecord> = {}): Work
   });
 }
 
+function createDmSession(service: any, overrides: Partial<DmSessionRecord> = {}): DmSessionRecord {
+  return service.store.upsertDmSession({
+    teamId: "T1",
+    userId: "U-admin",
+    channelId: "D1",
+    appThreadId: "dm-thread-1",
+    activeTurnId: null,
+    status: "idle",
+    currentAgentSlackTs: null,
+    currentAgentItemId: null,
+    currentWorklogSlackTs: null,
+    settings: { model: "gpt-5.4", effort: "high" },
+    lastError: null,
+    lastInboundMessageTs: null,
+    pendingRequest: null,
+    ...overrides,
+  });
+}
+
 afterEach(async () => {
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop();
@@ -178,6 +197,45 @@ describe("service lifecycle decisions", () => {
     expect(updated?.appThreadId).toBe("thread-2");
     expect(updated?.status).toBe("idle");
     expect(slack.postThreadReply).toHaveBeenCalled();
+    store.close();
+  });
+
+  it("refuses recover when blocked state is stale but the backing thread is healthy", async () => {
+    const { service, slack, codex, store } = await createService();
+    const worker = createWorker(service, {
+      status: "blocked_running_turn",
+      lastError: "Wait for it to settle or use /recover.",
+    });
+    codex.reconcileThreadForSend.mockResolvedValue("idle");
+
+    await service.handleThreadCommand(worker, "recover", []);
+
+    const updated = store.getWorkerByKey(worker.key);
+    expect(updated?.appThreadId).toBe("thread-1");
+    expect(codex.createWorkerThread).not.toHaveBeenCalled();
+    expect(slack.postThreadReply).toHaveBeenCalledWith(
+      "C1",
+      "1.000",
+      expect.stringContaining("Recover is only available"),
+    );
+    store.close();
+  });
+
+  it("refuses DM recover when blocked state is stale but the backing thread is healthy", async () => {
+    const { service, slack, codex, store } = await createService();
+    const session = createDmSession(service, {
+      status: "blocked_running_turn",
+      lastError: "Wait for it to settle or use /recover.",
+    });
+    codex.reconcileThreadForSend.mockResolvedValue("idle");
+
+    const response = await service.handleDmCommand(session, "recover", []);
+
+    const updated = store.getDmSession("T1", "U-admin");
+    expect(updated?.appThreadId).toBe("dm-thread-1");
+    expect(codex.createAdminThread).not.toHaveBeenCalled();
+    expect(response).toContain("Recover is only available");
+    expect(slack.postTopLevelMessage).not.toHaveBeenCalled();
     store.close();
   });
 
