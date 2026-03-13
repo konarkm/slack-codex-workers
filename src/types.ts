@@ -31,6 +31,7 @@ export type SessionStatus =
   | "idle"
   | "running"
   | "completed"
+  | "interrupted"
   | "failed"
   | "recovery_required"
   | "blocked_input"

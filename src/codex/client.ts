@@ -178,6 +178,13 @@ export class CodexClient {
     });
   }
 
+  async interruptTurn(threadId: string, turnId: string): Promise<void> {
+    await this.rpc.request("turn/interrupt", {
+      threadId,
+      turnId,
+    });
+  }
+
   async compactThread(threadId: string): Promise<void> {
     await this.rpc.request("thread/compact/start", { threadId });
   }

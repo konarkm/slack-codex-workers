@@ -691,15 +691,26 @@ export class SlackCodexWorkersService extends EventEmitter {
     const worker = this.requireWorker(workerKey);
     const state = this.getRenderState(`worker:${workerKey}`);
     const finalAssistantText = state.pendingAssistant?.text ?? assistantText;
+    if (status === "interrupted" && state.pendingAssistant) {
+      await this.flushPendingWorkerAssistant(workerKey, false);
+    }
     state.pendingAssistant = null;
 
-    const finalText = status === "completed"
-      ? renderFinalMessage(worker.rootOwnerUserId, finalAssistantText)
-      : renderFinalMessage(worker.rootOwnerUserId, `Turn ${status}.${error ? ` ${error}` : ""}`);
-
-    await this.enqueueSlackWrite(this.getWorkerQueueKey(worker), async () => {
-      await this.slack.postThreadReply(worker.channelId, worker.rootTs, finalText);
-    });
+    if (status === "completed") {
+      const finalText = renderFinalMessage(worker.rootOwnerUserId, finalAssistantText);
+      await this.enqueueSlackWrite(this.getWorkerQueueKey(worker), async () => {
+        await this.slack.postThreadReply(worker.channelId, worker.rootTs, finalText);
+      });
+    } else if (status === "interrupted") {
+      await this.enqueueSlackWrite(this.getWorkerQueueKey(worker), async () => {
+        await this.slack.postThreadReply(worker.channelId, worker.rootTs, renderSystemMessage("Turn interrupted."));
+      });
+    } else {
+      const finalText = renderFinalMessage(worker.rootOwnerUserId, `Turn ${status}.${error ? ` ${error}` : ""}`);
+      await this.enqueueSlackWrite(this.getWorkerQueueKey(worker), async () => {
+        await this.slack.postThreadReply(worker.channelId, worker.rootTs, finalText);
+      });
+    }
 
     this.store.updateWorkerState(workerKey, {
       activeTurnId: null,
@@ -708,7 +719,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       currentAgentItemId: null,
       currentWorklogSlackTs: null,
       pendingRequest: null,
-      lastError: error ?? (status === "completed" ? null : `Turn ${status}`),
+      lastError: status === "interrupted" ? null : error ?? (status === "completed" ? null : `Turn ${status}`),
     });
   }
 
@@ -738,12 +749,25 @@ export class SlackCodexWorkersService extends EventEmitter {
     const session = this.requireDmSession(teamId, userId);
     const state = this.getRenderState(`dm:${teamId}:${userId}`);
     const finalAssistantText = state.pendingAssistant?.text ?? assistantText;
+    if (status === "interrupted" && state.pendingAssistant) {
+      await this.flushPendingDmAssistant(teamId, userId, false);
+    }
     state.pendingAssistant = null;
-    const text = status === "completed" ? finalAssistantText : `Turn ${status}.${error ? ` ${error}` : ""}`;
-
-    await this.enqueueSlackWrite(this.getDmQueueKey(teamId, userId), async () => {
-      await this.slack.postTopLevelMessage(session.channelId, text || "Done.");
-    });
+    if (status === "completed") {
+      const text = finalAssistantText || "Done.";
+      await this.enqueueSlackWrite(this.getDmQueueKey(teamId, userId), async () => {
+        await this.slack.postTopLevelMessage(session.channelId, text);
+      });
+    } else if (status === "interrupted") {
+      await this.enqueueSlackWrite(this.getDmQueueKey(teamId, userId), async () => {
+        await this.slack.postTopLevelMessage(session.channelId, renderSystemMessage("Turn interrupted."));
+      });
+    } else {
+      const text = `Turn ${status}.${error ? ` ${error}` : ""}`;
+      await this.enqueueSlackWrite(this.getDmQueueKey(teamId, userId), async () => {
+        await this.slack.postTopLevelMessage(session.channelId, text);
+      });
+    }
 
     this.store.upsertDmSession({
       ...session,
@@ -753,7 +777,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       currentAgentItemId: null,
       currentWorklogSlackTs: null,
       pendingRequest: null,
-      lastError: error ?? (status === "completed" ? null : `Turn ${status}`),
+      lastError: status === "interrupted" ? null : error ?? (status === "completed" ? null : `Turn ${status}`),
     });
   }
 
@@ -826,6 +850,17 @@ export class SlackCodexWorkersService extends EventEmitter {
         await this.codex.compactThread(worker.appThreadId);
         response = `Compaction requested for thread ${worker.appThreadId}`;
       }
+    } else if (name === "stop") {
+      if (!worker.activeTurnId) {
+        response = "No active turn to stop.";
+      } else {
+        try {
+          await this.codex.interruptTurn(worker.appThreadId, worker.activeTurnId);
+        } catch {
+          // Best effort: completion may have raced already.
+        }
+        response = renderSystemMessage("Interrupt requested.");
+      }
     } else if (name === "recover") {
       if (!(await this.canRecoverWorkerNow(worker))) {
         response = "Recover is only available when this thread is blocked or its backing Codex thread is missing.";
@@ -879,6 +914,17 @@ export class SlackCodexWorkersService extends EventEmitter {
       if (isManuallyBlockedStatus(currentSession.status)) return "Cannot compact while this DM is blocked or waiting for recovery.";
       await this.codex.compactThread(currentSession.appThreadId);
       return `Compaction requested for thread ${currentSession.appThreadId}`;
+    }
+    if (name === "stop") {
+      if (!currentSession?.appThreadId || !currentSession.activeTurnId) {
+        return "No active turn to stop.";
+      }
+      try {
+        await this.codex.interruptTurn(currentSession.appThreadId, currentSession.activeTurnId);
+      } catch {
+        // Best effort: completion may have raced already.
+      }
+      return renderSystemMessage("Interrupt requested.");
     }
     if (name === "recover") {
       if (!(await this.canRecoverDmNow(currentSession ?? session))) {
@@ -1470,7 +1516,9 @@ function canRecover(status: SessionStatus): boolean {
 }
 
 function normalizeTurnStatus(status: string): SessionStatus {
-  return status === "completed" ? "completed" : "failed";
+  if (status === "completed") return "completed";
+  if (status === "interrupted") return "interrupted";
+  return "failed";
 }
 
 function parseInteractiveReply(

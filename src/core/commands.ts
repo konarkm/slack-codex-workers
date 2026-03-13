@@ -1,6 +1,6 @@
 import type { ReasoningEffort } from "../types.js";
 
-export type CommandName = "help" | "status" | "restart" | "model" | "effort" | "compact" | "recover";
+export type CommandName = "help" | "status" | "restart" | "model" | "effort" | "compact" | "recover" | "stop";
 
 export interface ParsedCommand {
   name: CommandName;
@@ -8,7 +8,7 @@ export interface ParsedCommand {
   raw: string;
 }
 
-const COMMANDS = new Set<CommandName>(["help", "status", "restart", "model", "effort", "compact", "recover"]);
+const COMMANDS = new Set<CommandName>(["help", "status", "restart", "model", "effort", "compact", "recover", "stop"]);
 
 export function parseSlashCommand(input: string): ParsedCommand | null {
   const trimmed = input.trim();
@@ -30,6 +30,7 @@ export function helpText(scope: "dm" | "thread"): string {
     lines.push("/model [id] - show or set global defaults for new workers");
     lines.push("/effort [level] - show or set global defaults for new workers");
     lines.push("/compact - compact the DM admin conversation");
+    lines.push("/stop - request interruption of the active DM admin turn");
     lines.push("/recover - recover this DM only when the backing Codex thread is missing or blocked");
     return lines.join("\n");
   }
@@ -37,6 +38,7 @@ export function helpText(scope: "dm" | "thread"): string {
   lines.push("/model [id] - show or set model for this worker thread");
   lines.push("/effort [level] - show or set reasoning effort for this worker thread");
   lines.push("/compact - compact this worker thread when idle");
+  lines.push("/stop - request interruption of the active worker turn");
   lines.push("/recover - recover this thread only when the backing Codex thread is missing or blocked");
   return lines.join("\n");
 }

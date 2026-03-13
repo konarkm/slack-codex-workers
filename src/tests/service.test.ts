@@ -66,6 +66,7 @@ async function createService() {
     start: vi.fn().mockResolvedValue(undefined),
     restart: vi.fn().mockResolvedValue(undefined),
     steerTurn: vi.fn().mockResolvedValue(undefined),
+    interruptTurn: vi.fn().mockResolvedValue(undefined),
     respondToServerRequest: vi.fn().mockResolvedValue(undefined),
   };
   service.slack = slack;
@@ -252,6 +253,67 @@ describe("service lifecycle decisions", () => {
     expect(slack.postTopLevelMessage.mock.invocationCallOrder[0]).toBeLessThan(codex.createWorkerThread.mock.invocationCallOrder[0]);
     expect(result).toContain("failed to create the backing worker");
     expect(store.listWorkers().length).toBe(1);
+    store.close();
+  });
+
+  it("requests worker interruption and posts requested plus confirmed system messages", async () => {
+    const { service, slack, codex, store } = await createService();
+    const worker = createWorker(service, {
+      status: "running",
+      activeTurnId: "turn-1",
+    });
+
+    await service.handleThreadCommand(worker, "stop", []);
+    await service.onWorkerCompleted(worker.key, "", "interrupted");
+
+    expect(codex.interruptTurn).toHaveBeenCalledWith("thread-1", "turn-1");
+    expect(slack.postThreadReply.mock.calls).toEqual([
+      ["C1", "1.000", "_System_: Interrupt requested."],
+      ["C1", "1.000", "_System_: Turn interrupted."],
+    ]);
+    const updated = store.getWorkerByKey(worker.key);
+    expect(updated?.status).toBe("interrupted");
+    expect(updated?.lastError).toBeNull();
+    store.close();
+  });
+
+  it("requests DM interruption and posts requested plus confirmed system messages", async () => {
+    const { service, slack, codex, store } = await createService();
+    createDmSession(service, {
+      status: "running",
+      activeTurnId: "turn-1",
+    });
+
+    const response = await service.handleDmCommand(service.store.getDmSession("T1", "U-admin"), "stop", []);
+    await service.onDmCompleted("T1", "U-admin", "", "interrupted");
+
+    expect(response).toBe("_System_: Interrupt requested.");
+    expect(codex.interruptTurn).toHaveBeenCalledWith("dm-thread-1", "turn-1");
+    expect(slack.postTopLevelMessage.mock.calls).toEqual([
+      ["D1", "_System_: Turn interrupted."],
+    ]);
+    const updated = store.getDmSession("T1", "U-admin");
+    expect(updated?.status).toBe("interrupted");
+    expect(updated?.lastError).toBeNull();
+    store.close();
+  });
+
+  it("flushes pending assistant text before confirming interruption", async () => {
+    const { service, slack, store } = await createService();
+    createWorker(service, {
+      status: "running",
+      activeTurnId: "turn-1",
+    });
+
+    await service.onWorkerAgentMessage("T1:C1:1.000", "agent-1", "Checking the repo now.");
+    await service.onWorkerCompleted("T1:C1:1.000", "", "interrupted");
+
+    expect(slack.postThreadReply.mock.calls).toEqual([
+      ["C1", "1.000", "Checking the repo now."],
+      ["C1", "1.000", "_System_: Turn interrupted."],
+    ]);
+    const updated = store.getWorkerByKey("T1:C1:1.000");
+    expect(updated?.status).toBe("interrupted");
     store.close();
   });
 
