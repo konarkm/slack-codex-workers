@@ -8,7 +8,7 @@ export const workerDynamicTools = [
   {
     name: slackListChannelsToolName,
     description:
-      "List accessible Slack channels so you can decide where a public child worker should be created. Use when you need to route a follow-up task to the right channel. Returns channel ids and names.",
+      "List registered Slack workstream channels so you can decide where a public child worker should be created. Use when you need to route a follow-up task to the right workstream home. Returns channel ids and names.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -20,7 +20,7 @@ export const workerDynamicTools = [
   {
     name: slackSpawnWorkerToolName,
     description:
-      "Create a top-level Slack post that immediately starts a separate Codex worker thread for a distinct user-facing task. Use this only for visible child work, not for internal delegation. If channel is omitted, use the current channel. Use mode='fresh' unless the child truly needs the parent thread context; use mode='fork' only when inheriting context is important.",
+      "Create a top-level Slack post in a registered workstream channel and immediately start a separate Codex worker thread for a distinct user-facing task. Use this only for visible child work, not for internal delegation. If channel is omitted, use the current workstream channel. Use mode='fresh' unless the child truly needs the parent thread context; use mode='fork' only when inheriting context is important.",
     inputSchema: {
       type: "object",
       additionalProperties: false,

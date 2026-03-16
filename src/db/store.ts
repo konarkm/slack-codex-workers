@@ -12,6 +12,7 @@ import type {
   RuntimeSettings,
   SessionStatus,
   TeamDefaults,
+  WorkstreamRecord,
   WorkerIdentity,
   WorkerRecord,
 } from "../types.js";
@@ -84,6 +85,7 @@ export class Store {
         team_id TEXT NOT NULL,
         channel_id TEXT NOT NULL,
         root_ts TEXT NOT NULL,
+        workstream_id TEXT,
         app_thread_id TEXT NOT NULL,
         active_turn_id TEXT,
         owner_user_id TEXT NOT NULL,
@@ -95,12 +97,29 @@ export class Store {
         settings_json TEXT NOT NULL,
         identity_json TEXT,
         parent_worker_key TEXT,
+        request_item_id TEXT,
+        request_item_path TEXT,
         last_error TEXT,
         last_inbound_message_ts TEXT,
         pending_request_json TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         UNIQUE(team_id, channel_id, root_ts)
+      );
+
+      CREATE TABLE IF NOT EXISTS workstreams (
+        id TEXT PRIMARY KEY,
+        team_id TEXT NOT NULL,
+        parent_id TEXT,
+        slug TEXT NOT NULL,
+        relative_path TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
+        channel_name TEXT NOT NULL,
+        description TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(team_id, relative_path),
+        UNIQUE(team_id, channel_id)
       );
 
       CREATE TABLE IF NOT EXISTS dm_sessions (
@@ -173,6 +192,9 @@ export class Store {
     this.ensureColumn("workers", "last_inbound_message_ts", "TEXT");
     this.ensureColumn("workers", "pending_request_json", "TEXT");
     this.ensureColumn("workers", "identity_json", "TEXT");
+    this.ensureColumn("workers", "workstream_id", "TEXT");
+    this.ensureColumn("workers", "request_item_id", "TEXT");
+    this.ensureColumn("workers", "request_item_path", "TEXT");
     this.ensureColumn("dm_sessions", "channel_id", "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn("dm_sessions", "status", "TEXT NOT NULL DEFAULT 'idle'");
     this.ensureColumn("dm_sessions", "last_error", "TEXT");
@@ -223,11 +245,12 @@ export class Store {
     const updatedAt = input.updatedAt ?? nowIso();
     this.db.prepare(`
       INSERT INTO workers (
-        key, team_id, channel_id, root_ts, app_thread_id, active_turn_id, owner_user_id, root_owner_user_id,
+        key, team_id, channel_id, root_ts, workstream_id, app_thread_id, active_turn_id, owner_user_id, root_owner_user_id,
         status, current_agent_slack_ts, current_agent_item_id, current_worklog_slack_ts, settings_json, identity_json,
-        parent_worker_key, last_error, last_inbound_message_ts, pending_request_json, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        parent_worker_key, request_item_id, request_item_path, last_error, last_inbound_message_ts, pending_request_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(team_id, channel_id, root_ts) DO UPDATE SET
+        workstream_id=excluded.workstream_id,
         app_thread_id=excluded.app_thread_id,
         active_turn_id=excluded.active_turn_id,
         owner_user_id=excluded.owner_user_id,
@@ -239,6 +262,8 @@ export class Store {
         settings_json=excluded.settings_json,
         identity_json=excluded.identity_json,
         parent_worker_key=excluded.parent_worker_key,
+        request_item_id=excluded.request_item_id,
+        request_item_path=excluded.request_item_path,
         last_error=excluded.last_error,
         last_inbound_message_ts=excluded.last_inbound_message_ts,
         pending_request_json=excluded.pending_request_json,
@@ -248,6 +273,7 @@ export class Store {
       input.teamId,
       input.channelId,
       input.rootTs,
+      input.workstreamId,
       input.appThreadId,
       input.activeTurnId,
       input.ownerUserId,
@@ -259,6 +285,8 @@ export class Store {
       JSON.stringify(input.settings),
       input.identity ? JSON.stringify(input.identity) : null,
       input.parentWorkerKey,
+      input.requestItemId,
+      input.requestItemPath,
       input.lastError,
       input.lastInboundMessageTs,
       input.pendingRequest ? JSON.stringify(input.pendingRequest) : null,
@@ -270,30 +298,36 @@ export class Store {
 
   updateWorkerState(
     key: string,
-    patch: Partial<Pick<WorkerRecord, "activeTurnId" | "status" | "currentAgentSlackTs" | "currentAgentItemId" | "currentWorklogSlackTs" | "settings" | "lastError" | "lastInboundMessageTs" | "pendingRequest">>,
+    patch: Partial<Pick<WorkerRecord, "activeTurnId" | "status" | "currentAgentSlackTs" | "currentAgentItemId" | "currentWorklogSlackTs" | "settings" | "lastError" | "lastInboundMessageTs" | "pendingRequest" | "workstreamId" | "requestItemId" | "requestItemPath">>,
   ): void {
     const worker = this.getWorkerByKey(key);
     if (!worker) return;
     this.db.prepare(`
       UPDATE workers SET
+        workstream_id = ?,
         active_turn_id = ?,
         status = ?,
         current_agent_slack_ts = ?,
         current_agent_item_id = ?,
         current_worklog_slack_ts = ?,
         settings_json = ?,
+        request_item_id = ?,
+        request_item_path = ?,
         last_error = ?,
         last_inbound_message_ts = ?,
         pending_request_json = ?,
         updated_at = ?
       WHERE key = ?
     `).run(
+      Object.hasOwn(patch, "workstreamId") ? patch.workstreamId : worker.workstreamId,
       Object.hasOwn(patch, "activeTurnId") ? patch.activeTurnId : worker.activeTurnId,
       Object.hasOwn(patch, "status") ? patch.status : worker.status,
       Object.hasOwn(patch, "currentAgentSlackTs") ? patch.currentAgentSlackTs : worker.currentAgentSlackTs,
       Object.hasOwn(patch, "currentAgentItemId") ? patch.currentAgentItemId : worker.currentAgentItemId,
       Object.hasOwn(patch, "currentWorklogSlackTs") ? patch.currentWorklogSlackTs : worker.currentWorklogSlackTs,
       JSON.stringify(Object.hasOwn(patch, "settings") ? patch.settings : worker.settings),
+      Object.hasOwn(patch, "requestItemId") ? patch.requestItemId : worker.requestItemId,
+      Object.hasOwn(patch, "requestItemPath") ? patch.requestItemPath : worker.requestItemPath,
       Object.hasOwn(patch, "lastError") ? patch.lastError : worker.lastError,
       Object.hasOwn(patch, "lastInboundMessageTs") ? patch.lastInboundMessageTs : worker.lastInboundMessageTs,
       Object.hasOwn(patch, "pendingRequest") ? JSON.stringify(patch.pendingRequest) : JSON.stringify(worker.pendingRequest),
@@ -435,6 +469,57 @@ export class Store {
     }
     const rows = this.db.prepare("SELECT * FROM channel_cache WHERE team_id = ? AND is_member = 1 ORDER BY name ASC").all(teamId) as Record<string, unknown>[];
     return rows.map((row) => this.toChannel(row));
+  }
+
+  getWorkstreamById(id: string): WorkstreamRecord | null {
+    const row = this.db.prepare("SELECT * FROM workstreams WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+    return row ? this.toWorkstream(row) : null;
+  }
+
+  getWorkstreamByChannel(teamId: string, channelId: string): WorkstreamRecord | null {
+    const row = this.db.prepare("SELECT * FROM workstreams WHERE team_id = ? AND channel_id = ?").get(teamId, channelId) as Record<string, unknown> | undefined;
+    return row ? this.toWorkstream(row) : null;
+  }
+
+  getWorkstreamByRelativePath(teamId: string, relativePath: string): WorkstreamRecord | null {
+    const row = this.db.prepare("SELECT * FROM workstreams WHERE team_id = ? AND relative_path = ?").get(teamId, relativePath) as Record<string, unknown> | undefined;
+    return row ? this.toWorkstream(row) : null;
+  }
+
+  listWorkstreams(teamId: string): WorkstreamRecord[] {
+    const rows = this.db.prepare("SELECT * FROM workstreams WHERE team_id = ? ORDER BY relative_path ASC").all(teamId) as Record<string, unknown>[];
+    return rows.map((row) => this.toWorkstream(row));
+  }
+
+  upsertWorkstream(input: Omit<WorkstreamRecord, "createdAt" | "updatedAt"> & { createdAt?: string; updatedAt?: string }): WorkstreamRecord {
+    const current = this.getWorkstreamById(input.id);
+    const createdAt = current?.createdAt ?? input.createdAt ?? nowIso();
+    const updatedAt = input.updatedAt ?? nowIso();
+    this.db.prepare(`
+      INSERT INTO workstreams (
+        id, team_id, parent_id, slug, relative_path, channel_id, channel_name, description, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        parent_id=excluded.parent_id,
+        slug=excluded.slug,
+        relative_path=excluded.relative_path,
+        channel_id=excluded.channel_id,
+        channel_name=excluded.channel_name,
+        description=excluded.description,
+        updated_at=excluded.updated_at
+    `).run(
+      input.id,
+      input.teamId,
+      input.parentId,
+      input.slug,
+      input.relativePath,
+      input.channelId,
+      input.channelName,
+      input.description,
+      createdAt,
+      updatedAt,
+    );
+    return this.getWorkstreamById(input.id)!;
   }
 
   createOrGetInboundMessage(input: {
@@ -605,6 +690,7 @@ export class Store {
       teamId: String(row.team_id),
       channelId: String(row.channel_id),
       rootTs: String(row.root_ts),
+      workstreamId: row.workstream_id ? String(row.workstream_id) : null,
       appThreadId: String(row.app_thread_id),
       activeTurnId: row.active_turn_id ? String(row.active_turn_id) : null,
       ownerUserId: String(row.owner_user_id),
@@ -616,9 +702,26 @@ export class Store {
       settings: parseSettings(typeof row.settings_json === "string" ? row.settings_json : null),
       identity: parseIdentity(typeof row.identity_json === "string" ? row.identity_json : null),
       parentWorkerKey: row.parent_worker_key ? String(row.parent_worker_key) : null,
+      requestItemId: row.request_item_id ? String(row.request_item_id) : null,
+      requestItemPath: row.request_item_path ? String(row.request_item_path) : null,
       lastError: row.last_error ? String(row.last_error) : null,
       lastInboundMessageTs: row.last_inbound_message_ts ? String(row.last_inbound_message_ts) : null,
       pendingRequest: parsePendingRequest(typeof row.pending_request_json === "string" ? row.pending_request_json : null),
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+    };
+  }
+
+  private toWorkstream(row: Record<string, unknown>): WorkstreamRecord {
+    return {
+      id: String(row.id),
+      teamId: String(row.team_id),
+      parentId: row.parent_id ? String(row.parent_id) : null,
+      slug: String(row.slug),
+      relativePath: String(row.relative_path),
+      channelId: String(row.channel_id),
+      channelName: String(row.channel_name),
+      description: row.description ? String(row.description) : null,
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
     };

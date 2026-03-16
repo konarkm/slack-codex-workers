@@ -15,6 +15,7 @@ import { appendFileNotes, renderEventMessage, renderFinalMessage, renderSystemMe
 import { SlackGateway, type SlackUploadedFile } from "../slack/slackGateway.js";
 import { validateSlackUploadFiles } from "../slack/uploads.js";
 import { assignWorkerIdentity } from "../slack/workerIdentity.js";
+import { WorkstreamManager, buildRequestTitle, formatWorkstreamAddress } from "../workstreams/manager.js";
 import type {
   DmSessionRecord,
   InboundMessageKind,
@@ -27,6 +28,7 @@ import type {
   SessionStatus,
   SlackMessageContext,
   TurnInput,
+  WorkstreamRecord,
   WorkerRecord,
   WorklogItem,
 } from "../types.js";
@@ -58,6 +60,7 @@ export class SlackCodexWorkersService extends EventEmitter {
   private readonly store: Store;
   private readonly codex: CodexClient;
   private readonly slack: SlackGateway;
+  private readonly workstreams: WorkstreamManager;
   private readonly renderState = new Map<string, RenderSessionState>();
   private readonly slackWriteQueues = new Map<string, Promise<unknown>>();
   private readonly pendingInteractiveRequests = new Map<string, InteractiveRequest>();
@@ -72,6 +75,7 @@ export class SlackCodexWorkersService extends EventEmitter {
     this.store = new Store(config.databasePath);
     this.codex = new CodexClient(config.codexBin, config.workspaceRoot);
     this.slack = new SlackGateway(config);
+    this.workstreams = new WorkstreamManager(config, this.store);
     this.codex.registerDynamicToolHandlers({
       listChannels: async (args, ctx) => this.handleListChannelsTool(args.query ?? "", ctx),
       spawnWorker: async (args, ctx) => this.handleSpawnWorkerTool(args, ctx),
@@ -84,11 +88,18 @@ export class SlackCodexWorkersService extends EventEmitter {
     await this.codex.start();
     this.registerSlackHandlers();
     await this.slack.start();
+    await this.bootstrapWorkstreams();
     await this.postPendingRestartNotice();
     this.store.resetInterruptedInboundMessages();
     await this.reconcilePersistedRuntimeState();
     await this.replayPendingInboundMessages();
     logInfo("Slack Codex Workers ready");
+  }
+
+  private async bootstrapWorkstreams(): Promise<void> {
+    const teamId = this.slack.getTeamId() ?? this.config.allowedTeamId ?? "single-workspace";
+    const rootChannel = await this.slack.ensurePublicChannel(teamId, "general");
+    await this.workstreams.bootstrapRootWorkstream(teamId, rootChannel);
   }
 
   async stop(): Promise<void> {
@@ -310,67 +321,61 @@ export class SlackCodexWorkersService extends EventEmitter {
   }
 
   private async handleTopLevelChannelMessage(context: SlackMessageContext, record: InboundMessageRecord): Promise<InboundHandlingResult> {
-    let worker = this.store.getWorker(context.teamId, context.channelId, context.ts);
-    if (!worker) {
-      const defaults = this.store.getTeamDefaults(context.teamId);
-      const started = await this.codex.createWorkerThread(defaults);
-      worker = this.store.upsertWorker({
-        key: `${context.teamId}:${context.channelId}:${context.ts}`,
-        teamId: context.teamId,
-        channelId: context.channelId,
-        rootTs: context.ts,
-        appThreadId: started.threadId,
-        activeTurnId: null,
-        ownerUserId: context.userId,
-        rootOwnerUserId: context.userId,
-        status: "idle",
-        currentAgentSlackTs: null,
-        currentAgentItemId: null,
-        currentWorklogSlackTs: null,
-        settings: { model: null, effort: null },
-        identity: assignWorkerIdentity(this.store.listWorkers()),
-        parentWorkerKey: null,
-        lastError: null,
-        lastInboundMessageTs: context.ts,
-        pendingRequest: null,
+    const workstream = this.workstreams.resolveWorkstreamForChannel(context.teamId, context.channelId);
+    if (!workstream) {
+      const reason = "No workstream is registered for this channel. Use the admin DM /workstream-create command or move the request to #general.";
+      await this.enqueueSlackWrite(`unmapped:${context.channelId}:${context.ts}`, async () => {
+        await this.slack.postThreadReply(context.channelId, context.ts, renderSystemMessage(reason));
       });
-      await this.setWorkerIdentityReaction(worker);
-    } else {
-      worker = this.ensureWorkerIdentity(worker);
-      await this.setWorkerIdentityReaction(worker);
-      this.store.updateWorkerState(worker.key, {
-        lastInboundMessageTs: context.ts,
-      });
-      worker = this.requireWorker(worker.key);
-      if (worker.activeTurnId || worker.status === "completed" || worker.status === "failed") {
-        this.store.updateInboundMessageProgress(record.key, {
-          workerKey: worker.key,
-          appThreadId: worker.appThreadId,
-          turnId: worker.activeTurnId,
-        });
-        return { status: "processed" };
-      }
+      return { status: "manual_retry", reason };
     }
 
-    await this.setThreadStatusReaction(context.channelId, context.ts, STATUS_REACTIONS.seen);
+    const existing = this.store.getWorker(context.teamId, context.channelId, context.ts);
+    if (existing) {
+      this.store.updateInboundMessageProgress(record.key, {
+        workerKey: existing.key,
+        appThreadId: existing.appThreadId,
+        turnId: existing.activeTurnId,
+      });
+      return { status: "processed" };
+    }
 
-    this.store.updateInboundMessageProgress(record.key, {
-      workerKey: worker.key,
-      appThreadId: worker.appThreadId,
+    const turnInput = await this.toTurnInput(context, record.key, true);
+    const turnId = await this.spawnWorkerIntoWorkstream({
+      workstream,
+      channelId: context.channelId,
+      existingRootTs: context.ts,
+      title: buildRequestTitle(context.text),
+      itemBody: context.text,
+      turnInput,
+      rootOwnerUserId: context.userId,
+      ownerUserId: context.userId,
+      runtimeSettings: { model: null, effort: null },
+      source: {
+        sourceKind: "slack-channel-root",
+        sourceSummary: `${context.username} started a new request in #${context.channelName ?? context.channelId}`,
+        sourceSlackChannelId: context.channelId,
+        sourceSlackMessageTs: context.ts,
+      },
+      identity: null,
+      parentWorkerKey: null,
+      useExistingRootMessage: true,
     });
-    const input = await this.toTurnInput(context, record.key, true);
-    const turnId = await this.startWorkerTurn(worker, input);
-    this.store.updateInboundMessageProgress(record.key, {
-      workerKey: worker.key,
-      appThreadId: worker.appThreadId,
-      turnId,
-    });
+    const created = this.store.getWorker(context.teamId, context.channelId, context.ts);
+    if (created) {
+      this.store.updateInboundMessageProgress(record.key, {
+        workerKey: created.key,
+        appThreadId: created.appThreadId,
+        turnId,
+      });
+    }
     return { status: "processed" };
   }
 
   private async handleChannelThreadReply(context: SlackMessageContext, record: InboundMessageRecord): Promise<InboundHandlingResult> {
     let worker = this.store.getWorker(context.teamId, context.channelId, context.threadTs!);
     if (!worker) return { status: "processed" };
+    worker = this.ensureWorkerWorkstream(worker);
 
     const command = parseSlashCommand(context.text);
     if (command) {
@@ -614,6 +619,101 @@ export class SlackCodexWorkersService extends EventEmitter {
     return this.requireDmSession(session.teamId, session.userId);
   }
 
+  private async spawnWorkerIntoWorkstream(input: {
+    workstream: WorkstreamRecord;
+    channelId: string;
+    title: string;
+    itemBody: string;
+    turnInput: TurnInput;
+    rootOwnerUserId: string;
+    ownerUserId: string;
+    runtimeSettings: RuntimeSettings;
+    source: {
+      sourceKind: string;
+      sourceSummary: string;
+      sourceSlackChannelId?: string | null;
+      sourceSlackMessageTs?: string | null;
+    };
+    identity: WorkerRecord["identity"] | null;
+    parentWorkerKey: string | null;
+    existingRootTs?: string;
+    useExistingRootMessage?: boolean;
+    mode?: "fresh" | "fork";
+    surfaceFailuresInThread?: boolean;
+  }): Promise<string> {
+    const requestItem = await this.workstreams.createRequestItem(input.workstream, {
+      title: input.title,
+      body: input.itemBody,
+      source: input.source,
+    });
+
+    const identity = input.identity ?? assignWorkerIdentity(this.store.listWorkers());
+    const rootTs = input.existingRootTs
+      ?? await this.enqueueSlackWrite(`spawn:${input.workstream.id}:${input.channelId}`, async () =>
+        this.slack.postTopLevelMessage(input.channelId, input.title, identity),
+      );
+
+    let threadId: string;
+    try {
+      if (input.mode === "fork" && input.parentWorkerKey) {
+        const parent = this.requireWorker(input.parentWorkerKey);
+        threadId = (await this.codex.forkWorkerThread(parent.appThreadId, input.runtimeSettings)).threadId;
+      } else {
+        threadId = (await this.codex.createWorkerThread(input.runtimeSettings)).threadId;
+      }
+    } catch (error) {
+      if (input.surfaceFailuresInThread) {
+        const message = error instanceof Error ? error.message : String(error);
+        await this.enqueueSlackWrite(`spawn-failed:${input.channelId}:${rootTs}`, async () => {
+          await this.slack.postThreadReply(input.channelId, rootTs, renderSystemMessage(`Worker creation failed: ${message}`));
+        });
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(input.surfaceFailuresInThread ? `failed to create the backing worker: ${message}` : message);
+    }
+
+    const worker = this.store.upsertWorker({
+      key: `${input.workstream.teamId}:${input.channelId}:${rootTs}`,
+      teamId: input.workstream.teamId,
+      channelId: input.channelId,
+      rootTs,
+      workstreamId: input.workstream.id,
+      appThreadId: threadId,
+      activeTurnId: null,
+      ownerUserId: input.ownerUserId,
+      rootOwnerUserId: input.rootOwnerUserId,
+      status: "idle",
+      currentAgentSlackTs: null,
+      currentAgentItemId: null,
+      currentWorklogSlackTs: null,
+      settings: input.runtimeSettings,
+      identity,
+      parentWorkerKey: input.parentWorkerKey,
+      requestItemId: requestItem.id,
+      requestItemPath: requestItem.filePath,
+      lastError: null,
+      lastInboundMessageTs: rootTs,
+      pendingRequest: null,
+    });
+    await this.workstreams.bindRequestItemToWorker(input.workstream, requestItem, worker);
+    await this.setWorkerIdentityReaction(worker);
+    await this.setThreadStatusReaction(input.channelId, rootTs, STATUS_REACTIONS.seen);
+
+    try {
+      return await this.startWorkerTurn(worker, input.turnInput);
+    } catch (error) {
+      if (input.surfaceFailuresInThread) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.store.updateWorkerState(worker.key, {
+          status: "failed",
+          lastError: message,
+        });
+        await this.postWorkerSystemMessage(worker, `Worker startup failed: ${message}`);
+      }
+      throw error;
+    }
+  }
+
   private async startWorkerTurn(worker: WorkerRecord, input: TurnInput): Promise<string> {
     const existing = this.startingWorkerTurns.get(worker.key);
     if (existing) return existing;
@@ -761,7 +861,7 @@ export class SlackCodexWorkersService extends EventEmitter {
   }
 
   private async onWorkerCompleted(workerKey: string, assistantText: string, status: string, error?: string | null): Promise<void> {
-    const worker = this.ensureWorkerIdentity(this.requireWorker(workerKey));
+    const worker = this.ensureWorkerWorkstream(this.ensureWorkerIdentity(this.requireWorker(workerKey)));
     const state = this.getRenderState(`worker:${workerKey}`);
     const finalAssistantText = state.pendingAssistant?.text ?? assistantText;
     if (status === "interrupted" && state.pendingAssistant) {
@@ -783,6 +883,20 @@ export class SlackCodexWorkersService extends EventEmitter {
       await this.enqueueSlackWrite(this.getWorkerQueueKey(worker), async () => {
         await this.slack.postThreadReply(worker.channelId, worker.rootTs, finalText, worker.identity);
       });
+    }
+
+    if (worker.workstreamId) {
+      const workstream = this.store.getWorkstreamById(worker.workstreamId);
+      if (workstream) {
+        const responseBody = status === "completed"
+          ? finalAssistantText
+          : `Turn ${status}.${error ? ` ${error}` : ""}`;
+        await this.workstreams.appendResponseItem(workstream, worker, {
+          status,
+          body: responseBody,
+          requestItemId: worker.requestItemId,
+        });
+      }
     }
 
     this.store.updateWorkerState(workerKey, {
@@ -1116,17 +1230,49 @@ export class SlackCodexWorkersService extends EventEmitter {
       this.store.clearPendingRestart();
       return { response: `Canceled queued restart: ${queued.target}` };
     }
+    if (name === "workstream-create") {
+      const parsed = parseWorkstreamCreateArgs(args);
+      if (!parsed) {
+        return { response: "Usage: /workstream-create <slug> [parent=<path>] [description...]" };
+      }
+      const existingChannel = await this.slack.findPublicChannelByName(session.teamId, parsed.slug);
+      if (existingChannel) {
+        return { response: `Slack channel #${existingChannel.name} already exists. Workstream creation refuses to auto-link existing channels in this version.` };
+      }
+      try {
+        const workstream = await this.workstreams.createWorkstream(
+          session.teamId,
+          {
+            slug: parsed.slug,
+            parentRelativePath: parsed.parentRelativePath,
+            description: parsed.description,
+          },
+          async () => this.slack.createPublicChannel(session.teamId, parsed.slug),
+        );
+        return {
+          response: [
+            `Created workstream ${formatWorkstreamAddress(workstream)}.`,
+            `channel: #${workstream.channelName}`,
+            `path: ${workstream.relativePath || "."}`,
+          ].join("\n"),
+        };
+      } catch (error) {
+        return { response: `Workstream creation failed: ${error instanceof Error ? error.message : String(error)}` };
+      }
+    }
     return { response: "Unknown command. Use /help" };
   }
 
   private async buildThreadStatusMessage(worker: WorkerRecord, includeHealth: boolean): Promise<string> {
-    const current = this.requireWorker(worker.key);
+    const current = this.ensureWorkerWorkstream(this.requireWorker(worker.key));
     const defaults = this.store.getTeamDefaults(current.teamId);
     const pendingRestart = this.store.getPendingRestart();
     const codexThreadState = await this.describeThreadState(current.appThreadId);
+    const workstream = current.workstreamId ? this.store.getWorkstreamById(current.workstreamId) : null;
     const lines = [
       includeHealth ? "Worker Health" : "Worker Status",
       `worker: ${current.identity?.username ?? "Codex Worker"}`,
+      `workstream: ${workstream ? formatWorkstreamAddress(workstream) : "(unassigned)"}`,
       `status: ${current.status}`,
       `app_thread: ${current.appThreadId}`,
       `active_turn: ${current.activeTurnId ?? "(none)"}`,
@@ -1284,72 +1430,68 @@ export class SlackCodexWorkersService extends EventEmitter {
     if (!worker) return "No Slack worker context found.";
     const channels = await this.slack.listChannels(worker.teamId, query);
     this.store.upsertChannels(channels);
-    if (channels.length === 0) return "No matching channels.";
-    return channels.slice(0, 50).map((channel) => `${channel.name} (${channel.channelId})`).join("\n");
+    const workstreams = this.store.listWorkstreams(worker.teamId);
+    const allowed = channels.filter((channel) => workstreams.some((workstream) => workstream.channelId === channel.channelId));
+    if (allowed.length === 0) return "No matching registered workstream channels.";
+    return allowed.slice(0, 50).map((channel) => `${channel.name} (${channel.channelId})`).join("\n");
   }
 
   private async handleSpawnWorkerTool(
     args: { channel?: string | undefined; title: string; initialUserMessage: string; mode: "fresh" | "fork" },
     ctx: DynamicToolHandlerContext,
   ): Promise<string> {
-    const parent = this.store.getWorkerByAppThreadId(ctx.threadId);
+    const parentRecord = this.store.getWorkerByAppThreadId(ctx.threadId);
+    const parent = parentRecord ? this.ensureWorkerWorkstream(parentRecord) : null;
     if (!parent) return "No Slack worker context found.";
+
+    const parentWorkstream = parent.workstreamId ? this.store.getWorkstreamById(parent.workstreamId) : null;
+    if (!parentWorkstream) return "No workstream is attached to this Slack worker.";
 
     const targetChannel = args.channel
       ? await this.slack.resolveChannel(parent.teamId, args.channel, parent.channelId)
-      : { teamId: parent.teamId, channelId: parent.channelId, name: "", isPrivate: false, isMember: true, updatedAt: new Date().toISOString() };
+      : {
+          teamId: parent.teamId,
+          channelId: parent.channelId,
+          name: parentWorkstream.channelName,
+          isPrivate: false,
+          isMember: true,
+          updatedAt: new Date().toISOString(),
+        };
 
-    const childIdentity = assignWorkerIdentity(this.store.listWorkers());
-    const rootTs = await this.enqueueSlackWrite(`spawn:${parent.key}:${targetChannel.channelId}`, async () =>
-      this.slack.postTopLevelMessage(targetChannel.channelId, args.title, childIdentity),
-    );
-
-    let childThread;
-    try {
-      childThread = args.mode === "fork"
-        ? await this.codex.forkWorkerThread(parent.appThreadId, parent.settings)
-        : await this.codex.createWorkerThread(parent.settings);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      await this.enqueueSlackWrite(
-        `spawn:${parent.key}:${targetChannel.channelId}:${rootTs}`,
-        async () => this.slack.postThreadReply(targetChannel.channelId, rootTs, renderSystemMessage(`Child worker creation failed: ${message}`)),
-      );
-      return `Created child Slack thread in ${targetChannel.channelId}, but failed to create the backing worker: ${message}`;
+    const targetWorkstream = this.workstreams.resolveWorkstreamForChannel(parent.teamId, targetChannel.channelId);
+    if (!targetWorkstream) {
+      return "That Slack channel is not registered as a workstream home.";
     }
 
-    const child = this.store.upsertWorker({
-      key: `${parent.teamId}:${targetChannel.channelId}:${rootTs}`,
-      teamId: parent.teamId,
-      channelId: targetChannel.channelId,
-      rootTs,
-      appThreadId: childThread.threadId,
-      activeTurnId: null,
-      ownerUserId: parent.rootOwnerUserId,
-      rootOwnerUserId: parent.rootOwnerUserId,
-      status: "idle",
-      currentAgentSlackTs: null,
-      currentAgentItemId: null,
-      currentWorklogSlackTs: null,
-      settings: parent.settings,
-      identity: childIdentity,
-      parentWorkerKey: parent.key,
-      lastError: null,
-      lastInboundMessageTs: null,
-      pendingRequest: null,
-    });
-
+    const childIdentity = assignWorkerIdentity(this.store.listWorkers());
     try {
-      await this.startWorkerTurn(child, { text: args.initialUserMessage, imagePaths: [] });
+      await this.spawnWorkerIntoWorkstream({
+        workstream: targetWorkstream,
+        channelId: targetChannel.channelId,
+        title: args.title,
+        itemBody: args.initialUserMessage,
+        turnInput: { text: args.initialUserMessage, imagePaths: [] },
+        rootOwnerUserId: parent.rootOwnerUserId,
+        ownerUserId: parent.ownerUserId,
+        runtimeSettings: parent.settings,
+        source: {
+          sourceKind: args.mode === "fork" ? "slack-spawn-worker-fork" : "slack-spawn-worker-fresh",
+          sourceSummary: `spawned from ${parent.key}`,
+          sourceSlackChannelId: parent.channelId,
+          sourceSlackMessageTs: parent.rootTs,
+        },
+        identity: childIdentity,
+        parentWorkerKey: parent.key,
+        mode: args.mode,
+        surfaceFailuresInThread: true,
+      });
       return `Spawned child worker in ${targetChannel.channelId} with title "${args.title}".`;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.store.updateWorkerState(child.key, {
-        status: "failed",
-        lastError: message,
-      });
-      await this.postWorkerSystemMessage(child, `Child worker startup failed: ${message}`);
-      return `Child worker thread was created in ${targetChannel.channelId}, but startup failed: ${message}`;
+      if (message.includes("failed to create the backing worker")) {
+        return `Created child Slack thread in ${targetChannel.channelId}, but ${message}`;
+      }
+      return `Child worker startup failed: ${message}`;
     }
   }
 
@@ -1849,6 +1991,14 @@ export class SlackCodexWorkersService extends EventEmitter {
     return worker;
   }
 
+  private ensureWorkerWorkstream(worker: WorkerRecord): WorkerRecord {
+    if (worker.workstreamId) return worker;
+    const workstream = this.store.getWorkstreamByChannel(worker.teamId, worker.channelId);
+    if (!workstream) return worker;
+    this.store.updateWorkerState(worker.key, { workstreamId: workstream.id });
+    return this.requireWorker(worker.key);
+  }
+
   private ensureWorkerIdentity(worker: WorkerRecord): WorkerRecord {
     if (worker.identity) return worker;
     return this.store.upsertWorker({
@@ -1970,6 +2120,25 @@ function describeEffectiveSetting(threadValue: string | null, defaultValue: stri
   if (threadValue) return `${threadValue} (thread override)`;
   if (defaultValue) return `${defaultValue} (global default)`;
   return "(using default: unset)";
+}
+
+function parseWorkstreamCreateArgs(args: string[]): { slug: string; parentRelativePath: string | null; description: string | null } | null {
+  const [slug, ...rest] = args;
+  if (!slug) return null;
+  let parentRelativePath: string | null = null;
+  const descriptionParts: string[] = [];
+  for (const token of rest) {
+    if (token.startsWith("parent=")) {
+      parentRelativePath = token.slice("parent=".length).trim() || null;
+      continue;
+    }
+    descriptionParts.push(token);
+  }
+  return {
+    slug,
+    parentRelativePath,
+    description: descriptionParts.length > 0 ? descriptionParts.join(" ") : null,
+  };
 }
 
 function resolveRuntimeSettings(

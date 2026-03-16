@@ -63,6 +63,7 @@ export interface WorkerRecord {
   teamId: string;
   channelId: string;
   rootTs: string;
+  workstreamId: string | null;
   appThreadId: string;
   activeTurnId: string | null;
   ownerUserId: string;
@@ -74,9 +75,24 @@ export interface WorkerRecord {
   settings: RuntimeSettings;
   identity: WorkerIdentity | null;
   parentWorkerKey: string | null;
+  requestItemId: string | null;
+  requestItemPath: string | null;
   lastError: string | null;
   lastInboundMessageTs: string | null;
   pendingRequest: PendingRequestState | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WorkstreamRecord {
+  id: string;
+  teamId: string;
+  parentId: string | null;
+  slug: string;
+  relativePath: string;
+  channelId: string;
+  channelName: string;
+  description: string | null;
   createdAt: string;
   updatedAt: string;
 }

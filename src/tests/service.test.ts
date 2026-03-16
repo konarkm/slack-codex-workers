@@ -60,6 +60,23 @@ async function createService() {
     getUserDisplayName: vi.fn().mockResolvedValue("alice"),
     extractFiles: vi.fn().mockReturnValue([]),
     resolveChannel: vi.fn(),
+    findPublicChannelByName: vi.fn().mockResolvedValue(null),
+    createPublicChannel: vi.fn().mockImplementation(async (_teamId: string, name: string) => ({
+      teamId: "T1",
+      channelId: `C-${name}`,
+      name,
+      isPrivate: false,
+      isMember: true,
+      updatedAt: new Date().toISOString(),
+    })),
+    ensurePublicChannel: vi.fn().mockImplementation(async (_teamId: string, name: string) => ({
+      teamId: "T1",
+      channelId: name === "general" ? "C1" : `C-${name}`,
+      name,
+      isPrivate: false,
+      isMember: true,
+      updatedAt: new Date().toISOString(),
+    })),
   };
   const codex = {
     isRunning: vi.fn().mockReturnValue(true),
@@ -79,7 +96,18 @@ async function createService() {
   };
   service.slack = slack;
   service.codex = codex;
-  return { dir, service, slack, codex, store: service.store };
+  const store = service.store;
+  store.upsertWorkstream({
+    id: "T1:root",
+    teamId: "T1",
+    parentId: null,
+    slug: "root",
+    relativePath: "",
+    channelId: "C1",
+    channelName: "general",
+    description: "root",
+  });
+  return { dir, service, slack, codex, store };
 }
 
 function createWorker(service: any, overrides: Partial<WorkerRecord> = {}): WorkerRecord {
@@ -88,6 +116,7 @@ function createWorker(service: any, overrides: Partial<WorkerRecord> = {}): Work
     teamId: "T1",
     channelId: "C1",
     rootTs: "1.000",
+    workstreamId: null,
     appThreadId: "thread-1",
     activeTurnId: null,
     ownerUserId: "U1",
@@ -99,6 +128,8 @@ function createWorker(service: any, overrides: Partial<WorkerRecord> = {}): Work
     settings: { model: "gpt-5.4", effort: "high" },
     identity: { username: "Gear", iconEmoji: "gear" },
     parentWorkerKey: null,
+    requestItemId: null,
+    requestItemPath: null,
     lastError: null,
     lastInboundMessageTs: null,
     pendingRequest: null,
@@ -610,6 +641,67 @@ describe("service lifecycle decisions", () => {
       undefined,
     );
     expect(result).toContain("Uploaded 1 file");
+    store.close();
+  });
+
+  it("creates a workstream from the admin DM command", async () => {
+    const { dir, service, slack, store } = await createService();
+    const session = createDmSession(service);
+
+    const result = await service.handleDmCommand(session, "workstream-create", ["ops", "parent=root", "Handles", "ops"]);
+
+    expect(result.response).toContain("Created workstream ops");
+    expect(slack.createPublicChannel).toHaveBeenCalledWith("T1", "ops");
+    expect(store.getWorkstreamByRelativePath("T1", "ops")).toMatchObject({
+      relativePath: "ops",
+      channelName: "ops",
+    });
+    await expect(fs.readFile(path.join(dir, "ops", "WORKSTREAM.md"), "utf8")).resolves.toContain("# ops Workstream");
+    await expect(fs.readFile(path.join(dir, "ops", "AGENTS.md"), "utf8")).resolves.toContain("Consult WORKSTREAM.md first");
+    store.close();
+  });
+
+  it("writes request and response items for a root workstream worker", async () => {
+    const { dir, service, codex, store } = await createService();
+    codex.createWorkerThread.mockResolvedValue({ threadId: "thread-2" });
+    codex.startTurnWithResumeFallback.mockResolvedValue("turn-2");
+
+    const context: SlackMessageContext = {
+      teamId: "T1",
+      channelId: "C1",
+      channelType: "channel",
+      userId: "U1",
+      username: "alice",
+      text: "Investigate the failing deploy",
+      ts: "7.000",
+      threadTs: null,
+      isDm: false,
+      files: [],
+    };
+    store.createOrGetInboundMessage({
+      key: "msg-workstream",
+      teamId: "T1",
+      channelId: "C1",
+      messageTs: "7.000",
+      rootTs: "7.000",
+      kind: "channel-root",
+      payloadJson: JSON.stringify(context),
+    });
+
+    await service.processInboundMessage("msg-workstream");
+
+    const worker = store.getWorker("T1", "C1", "7.000");
+    expect(worker?.requestItemPath).toBeTruthy();
+    const requestItem = await fs.readFile(worker!.requestItemPath!, "utf8");
+    expect(requestItem).toContain('"kind": "request"');
+    expect(requestItem).toContain(worker!.key);
+
+    await service.onWorkerCompleted(worker!.key, "Deploy issue is fixed.", "completed");
+
+    const itemFiles = await fs.readdir(path.join(dir, ".slack-workers", "root", "active"));
+    expect(itemFiles.some((file) => file.startsWith("res-"))).toBe(true);
+    const responseFile = itemFiles.find((file) => file.startsWith("res-"))!;
+    await expect(fs.readFile(path.join(dir, ".slack-workers", "root", "active", responseFile), "utf8")).resolves.toContain('"kind": "response"');
     store.close();
   });
 

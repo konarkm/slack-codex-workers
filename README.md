@@ -4,21 +4,27 @@ Slack-first bridge for running many Codex app-server workers behind one Slack bo
 
 ## What It Does
 
-- Every top-level Slack channel message creates a distinct Codex worker thread.
+- Registered Slack channels act as workstream homes.
+- `#general` is bootstrapped as the root workstream home on startup.
+- Every top-level Slack message in a registered workstream channel creates a distinct Codex worker thread.
 - Replies inside that Slack thread steer the active turn or start the next turn.
 - Interleaved Codex progress gets rendered back into the Slack thread as:
   - streamed assistant messages
   - a mutable worklog message for tool/command/MCP activity
 - The final completion message always mentions the root human owner.
 - Admin DMs provide a control surface for defaults and bridge operations.
+- Each spawned worker writes a durable local request item and later response items inside its workstream.
 
 ## Current Scope
 
 Implemented in this repo:
 
 - single-workspace Bolt Socket Mode bridge
-- SQLite persistence for worker mappings, DM sessions, defaults, cached channels, durable inbound message state, and attachment metadata
+- SQLite persistence for workstream registry, worker mappings, DM sessions, defaults, cached channels, durable inbound message state, and attachment metadata
 - one shared `codex app-server` subprocess
+- root workstream bootstrap under `WORKSPACE_ROOT`
+- explicit workstream scaffolding under nested directories with `WORKSTREAM.md`, `AGENTS.md`, and local `.slack-workers/`
+- canonical workstream item landing for new public work
 - dynamic tools:
   - `slack_list_channels`
   - `slack_spawn_worker`
@@ -44,10 +50,13 @@ Implemented in this repo:
   - `/restart <codex|bridge|both>`
   - `/restart-now`
   - `/restart-cancel`
+  - `/workstream-create <slug> [parent=<path>] [description...]`
 - image and file attachment ingestion
 
 Not implemented yet:
 
+- registrations (`heartbeat`, `cron`, `webhook`) and wake-self delivery
+- bridge-global fired-event storage and webhook ingress
 - parent worker wait/watch loop for child workers
 - multi-workspace OAuth install flow
 - HTTP health/readiness endpoints
@@ -62,6 +71,8 @@ Recommended Slack bot scopes:
 
 - `app_mentions:read`
 - `channels:history`
+- `channels:join`
+- `channels:manage`
 - `channels:read`
 - `chat:write`
 - `chat:write.customize`
@@ -87,11 +98,11 @@ Key variables:
 - `SLACK_APP_TOKEN`: Socket Mode app token
 - `SLACK_ADMIN_USER_IDS`: comma-separated Slack user IDs allowed to use DM admin controls
 - `SLACK_ALLOWED_TEAM_ID`: optional hard guard for one workspace
-- `WORKSPACE_ROOT`: canonical workspace root. Codex runs here, and bridge state defaults under `WORKSPACE_ROOT/.slack-codex-workers/`
+- `WORKSPACE_ROOT`: canonical workspace root. Codex runs here, and bridge state defaults under `WORKSPACE_ROOT/.slack-workers/`
 - `CODEX_CWD`: legacy alias for `WORKSPACE_ROOT`; still accepted for compatibility, but `WORKSPACE_ROOT` is the preferred env var
-- `DATABASE_PATH`: optional SQLite override. Default: `WORKSPACE_ROOT/.slack-codex-workers/bridge.sqlite`
+- `DATABASE_PATH`: optional SQLite override. Default: `WORKSPACE_ROOT/.slack-workers/bridge.sqlite`
 - `SUPERVISOR_RESTART_ENABLED`: set automatically by `./scripts/launch.sh`; only override it if you know what you are doing
-- `ATTACHMENT_STORAGE_DIR`: optional attachment storage override. Default: `WORKSPACE_ROOT/.slack-codex-workers/attachments`
+- `ATTACHMENT_STORAGE_DIR`: optional attachment storage override. Default: `WORKSPACE_ROOT/.slack-workers/attachments`
 - `ATTACHMENT_MAX_BYTES`: per-file cap in bytes
 - `ATTACHMENT_TOTAL_MAX_BYTES`: total cap per Slack message in bytes; set to `off` for no total cap
 - `ATTACHMENT_DOWNLOAD_TIMEOUT_MS`: timeout per file download
@@ -128,11 +139,17 @@ For a supervised production build:
 ## Behavior Notes
 
 - The server repo is just the bridge code. Runtime state lives under the configured workspace root:
-  - SQLite: `WORKSPACE_ROOT/.slack-codex-workers/bridge.sqlite`
-  - downloaded Slack files: `WORKSPACE_ROOT/.slack-codex-workers/attachments/`
+  - SQLite: `WORKSPACE_ROOT/.slack-workers/bridge.sqlite`
+  - downloaded Slack files: `WORKSPACE_ROOT/.slack-workers/attachments/`
+  - root workstream request/response items: `WORKSPACE_ROOT/.slack-workers/root/active/`
 - You can override those paths explicitly, but the default mental model is “all session state belongs to the workspace.”
 
+- Root `WORKSTREAM.md` and `AGENTS.md` are scaffolded at startup if missing.
+- If legacy default state still lives under `WORKSPACE_ROOT/.slack-codex-workers/` and no explicit path overrides are set, startup migrates it once to `WORKSPACE_ROOT/.slack-workers/`.
+- Child workstreams are created explicitly from the admin DM command and get their own visible directory plus local `.slack-workers/active` and `.slack-workers/archive`.
+- Channel roots only create workers in registered workstream-home channels.
 - Channel roots create workers keyed by `(teamId, channelId, rootTs)`.
+- Each worker keeps a durable workstream request item; completion appends a response item instead of depending only on Slack thread history.
 - Thread replies from humans become `username: message` turn input.
 - If a worker turn is active, replies go through `turn/steer`.
 - If no turn is active, replies start a fresh turn on the same worker.
@@ -145,7 +162,8 @@ For a supervised production build:
 - Normal user messages sent while a thread is blocked or recovery-required are rejected and must be resent after the thread becomes usable again.
 - Attachment-only messages are supported; images are passed as images and other files are stored locally with file-path notes.
 - `slack_upload_files` uploads one or more local files from allowed roots into the current Slack conversation; worker threads upload into the active thread, and admin DMs upload into the DM conversation.
-- `slack_list_channels` and child-worker posting only use channels the bot is already a member of.
+- `slack_list_channels` only returns registered workstream channels.
+- `slack_spawn_worker` only targets registered workstream channels.
 - `/status` and `/health` are available in worker threads and admin DMs. Thread commands report thread-specific state; DM commands report bridge-wide state.
 - Thread `/model` and `/effort` set thread-local overrides. DM `/model` and `/effort` set the global defaults used by any thread that does not have an override.
 - `/restart <codex|bridge|both>` queues a restart request and waits for the runtime to become idle.

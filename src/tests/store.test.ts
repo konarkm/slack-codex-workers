@@ -66,6 +66,7 @@ describe("store", () => {
       teamId: "T1",
       channelId: "C1",
       rootTs: "1.000",
+      workstreamId: null,
       appThreadId: "thread-1",
       activeTurnId: "turn-1",
       ownerUserId: "U1",
@@ -77,6 +78,8 @@ describe("store", () => {
       settings: { model: "gpt-5.4", effort: "high" },
       identity: { username: "Gear", iconEmoji: "gear" },
       parentWorkerKey: null,
+      requestItemId: null,
+      requestItemPath: null,
       lastError: "oops",
       lastInboundMessageTs: "4.000",
       pendingRequest: {

@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { config as loadDotEnv } from "dotenv";
@@ -7,7 +8,7 @@ import type { ReasoningEffort, RuntimeSettings } from "./types.js";
 loadDotEnv();
 
 const fallbackWorkspaceRoot = process.cwd();
-const defaultStateDir = path.join(fallbackWorkspaceRoot, ".slack-codex-workers");
+const defaultStateDir = path.join(fallbackWorkspaceRoot, ".slack-workers");
 
 const configSchema = z.object({
   slackBotToken: z.string().min(1),
@@ -35,7 +36,10 @@ export type AppConfig = z.infer<typeof configSchema>;
 
 export function loadConfig(): AppConfig {
   const workspaceRoot = process.env.WORKSPACE_ROOT ?? process.env.CODEX_CWD ?? process.cwd();
-  const stateDir = path.join(workspaceRoot, ".slack-codex-workers");
+  const stateDir = prepareDefaultStateDir(
+    workspaceRoot,
+    !process.env.DATABASE_PATH && !process.env.ATTACHMENT_STORAGE_DIR,
+  );
   const raw = {
     slackBotToken: process.env.SLACK_BOT_TOKEN,
     slackAppToken: process.env.SLACK_APP_TOKEN,
@@ -59,6 +63,22 @@ export function loadConfig(): AppConfig {
   };
 
   return configSchema.parse(raw);
+}
+
+function prepareDefaultStateDir(workspaceRoot: string, allowLegacyMigration: boolean): string {
+  const preferred = path.join(workspaceRoot, ".slack-workers");
+  const legacy = path.join(workspaceRoot, ".slack-codex-workers");
+  if (
+    allowLegacyMigration
+    && !fs.existsSync(preferred)
+    && fs.existsSync(legacy)
+  ) {
+    fs.renameSync(legacy, preferred);
+  }
+  if (!fs.existsSync(preferred)) {
+    fs.mkdirSync(preferred, { recursive: true });
+  }
+  return preferred;
 }
 
 function splitCsv(value: string | undefined): string[] {

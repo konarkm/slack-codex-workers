@@ -10,6 +10,10 @@ interface ConversationsListResponse {
   response_metadata?: { next_cursor?: string };
 }
 
+interface ConversationsCreateResponse {
+  channel?: { id?: string; name?: string; is_private?: boolean; is_member?: boolean };
+}
+
 interface PostMessageResponse {
   ok?: boolean;
   ts?: string;
@@ -190,6 +194,59 @@ export class SlackGateway {
   }
 
   async listChannels(teamId: string, query?: string): Promise<ChannelRecord[]> {
+    return this.listPublicChannels(teamId, { query, includeNonMembers: false });
+  }
+
+  async findPublicChannelByName(teamId: string, name: string): Promise<ChannelRecord | null> {
+    const matches = await this.listPublicChannels(teamId, { query: name, includeNonMembers: true });
+    return matches.find((channel) => channel.name.toLowerCase() === name.trim().toLowerCase()) ?? null;
+  }
+
+  async ensurePublicChannel(teamId: string, name: string): Promise<ChannelRecord> {
+    const normalized = name.trim().toLowerCase();
+    const existing = await this.findPublicChannelByName(teamId, normalized);
+    if (existing) {
+      if (!existing.isMember) {
+        await this.app.client.conversations.join({
+          token: this.config.slackBotToken,
+          channel: existing.channelId,
+        });
+        return {
+          ...existing,
+          isMember: true,
+          updatedAt: new Date().toISOString(),
+        };
+      }
+      return existing;
+    }
+    return this.createPublicChannel(teamId, normalized);
+  }
+
+  async createPublicChannel(teamId: string, name: string): Promise<ChannelRecord> {
+    const response = await this.app.client.conversations.create({
+      token: this.config.slackBotToken,
+      name: name.trim().toLowerCase(),
+      is_private: false,
+    }) as ConversationsCreateResponse;
+    const channelId = response.channel?.id?.trim();
+    const channelName = response.channel?.name?.trim() ?? name.trim().toLowerCase();
+    if (!channelId) {
+      throw new Error(`Slack did not return a channel id for ${name}`);
+    }
+    return {
+      teamId,
+      channelId,
+      name: channelName,
+      isPrivate: Boolean(response.channel?.is_private),
+      isMember: true,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  private async listPublicChannels(
+    teamId: string,
+    options: { query?: string; includeNonMembers: boolean },
+  ): Promise<ChannelRecord[]> {
     const channels: ChannelRecord[] = [];
     let cursor: string | undefined;
 
@@ -206,8 +263,8 @@ export class SlackGateway {
         const name = channel.name?.trim();
         const channelId = channel.id?.trim();
         if (!name || !channelId) continue;
-        if (!channel.is_member) continue;
-        if (query && !name.toLowerCase().includes(query.toLowerCase())) continue;
+        if (!options.includeNonMembers && !channel.is_member) continue;
+        if (options.query && !name.toLowerCase().includes(options.query.toLowerCase())) continue;
         channels.push({
           teamId,
           channelId,
