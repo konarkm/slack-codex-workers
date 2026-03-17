@@ -14,6 +14,10 @@ interface ConversationsCreateResponse {
   channel?: { id?: string; name?: string; is_private?: boolean; is_member?: boolean };
 }
 
+interface ConversationsOpenResponse {
+  channel?: { id?: string };
+}
+
 interface PostMessageResponse {
   ok?: boolean;
   ts?: string;
@@ -241,6 +245,19 @@ export class SlackGateway {
       isMember: true,
       updatedAt: new Date().toISOString(),
     };
+  }
+
+  async openDmChannel(userId: string): Promise<string> {
+    const response = await this.app.client.conversations.open({
+      token: this.config.slackBotToken,
+      users: userId,
+      return_im: true,
+    }) as ConversationsOpenResponse;
+    const channelId = response.channel?.id?.trim();
+    if (!channelId) {
+      throw new Error(`Slack did not return a DM channel id for ${userId}`);
+    }
+    return channelId;
   }
 
   private async listPublicChannels(

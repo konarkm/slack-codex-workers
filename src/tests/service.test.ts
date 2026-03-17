@@ -26,6 +26,7 @@ vi.mock("@slack/bolt", () => ({
       conversations: {
         join: vi.fn().mockResolvedValue({ ok: true }),
         create: vi.fn().mockResolvedValue({ channel: { id: "C-created", name: "created", is_private: false, is_member: true } }),
+        open: vi.fn().mockResolvedValue({ channel: { id: "D-opened" } }),
         list: vi.fn().mockResolvedValue({ channels: [], response_metadata: {} }),
       },
     };
@@ -37,6 +38,7 @@ vi.mock("@slack/bolt", () => ({
 
 const tempDirs: string[] = [];
 const activeServices: any[] = [];
+let nextWebhookPort = 38000;
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void } {
   let resolve!: (value: T) => void;
@@ -70,7 +72,7 @@ function makeConfig(dir: string): AppConfig {
     slackUploadTimeoutMs: 600_000,
     slackUploadMaxFiles: 10,
     workspaceTimezone: "America/Los_Angeles",
-    webhookPort: 3014,
+    webhookPort: nextWebhookPort++,
     webhookPath: "/webhooks",
     webhookBodyMaxBytes: 256 * 1024,
     webhookPayloadStorageDir: path.join(dir, "webhooks"),
@@ -114,6 +116,7 @@ async function createService() {
       isMember: true,
       updatedAt: new Date().toISOString(),
     })),
+    openDmChannel: vi.fn().mockResolvedValue("D-opened"),
   };
   const codex = {
     isRunning: vi.fn().mockReturnValue(true),
@@ -1783,10 +1786,36 @@ describe("service lifecycle decisions", () => {
     await service.bootstrapWorkstreams();
 
     expect(slack.ensurePublicChannel).toHaveBeenCalledWith("T1", "general");
+    expect(slack.openDmChannel).toHaveBeenCalledWith("U-admin");
+    expect(slack.postTopLevelMessage).toHaveBeenCalledWith(
+      "D-opened",
+      expect.stringContaining("Root workstream created: <slack://channel?team=T1&id=C1|Open #general in Slack app>"),
+    );
+    expect(slack.postTopLevelMessage).toHaveBeenCalledWith(
+      "D-opened",
+      expect.stringContaining("<https://app.slack.com/client/T1/C1|this browser fallback>"),
+    );
+    expect(slack.postTopLevelMessage).toHaveBeenCalledWith(
+      "D-opened",
+      expect.stringContaining("Join Channel"),
+    );
     await expect(fs.access(path.join(dir, "WORKSTREAM.md"))).resolves.toBeUndefined();
     await expect(fs.readFile(path.join(dir, "AGENTS.md"), "utf8")).resolves.toContain("WORKSTREAM.md");
     await expect(fs.readFile(path.join(dir, ".slack-workers", "registrations.json"), "utf8")).resolves.toContain("[]");
     await expect(fs.access(path.join(dir, ".slack-workers", "bridge"))).resolves.toBeUndefined();
+  });
+
+  it("does not resend the root workstream onboarding DM after the root already exists", async () => {
+    const { service, slack } = await createService();
+
+    await service.bootstrapWorkstreams();
+    slack.openDmChannel.mockClear();
+    slack.postTopLevelMessage.mockClear();
+
+    await service.bootstrapWorkstreams();
+
+    expect(slack.openDmChannel).not.toHaveBeenCalled();
+    expect(slack.postTopLevelMessage).not.toHaveBeenCalled();
   });
 
   it("ignores started work events and posts DM assistant messages without edits", async () => {

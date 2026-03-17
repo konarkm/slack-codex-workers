@@ -16,8 +16,8 @@ fi
 
 WORKSPACE_ROOT="${WORKSPACE_ROOT:-${CODEX_CWD:-${ROOT_DIR}}}"
 CODEX_BIN="${CODEX_BIN:-codex}"
-STATE_DIR="${WORKSPACE_ROOT}/.slack-codex-workers"
-LOCK_DIR="${STATE_DIR}"
+STATE_DIR="${WORKSPACE_ROOT}/.slack-workers"
+LOCK_DIR="${STATE_DIR}/launcher"
 LOCK_FILE="${LOCK_DIR}/launcher.lock"
 RESTART_EXIT_CODE=42
 
@@ -29,7 +29,7 @@ for name in "${required_vars[@]}"; do
   fi
 done
 
-mkdir -p "${STATE_DIR}" "${STATE_DIR}/attachments"
+mkdir -p "${LOCK_DIR}"
 
 if ! command -v "${CODEX_BIN}" >/dev/null 2>&1; then
   echo "codex binary not found: ${CODEX_BIN}" >&2

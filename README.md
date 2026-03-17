@@ -168,6 +168,7 @@ For a supervised production build:
 - You can override those paths explicitly, but the default mental model is “all session state belongs to the workspace.”
 
 - Root `WORKSTREAM.md` and `AGENTS.md` are scaffolded at startup if missing.
+- On first bootstrap, the bridge sends each configured admin DM a direct link to the root `#general` workstream so they can join it and start the first top-level thread.
 - If legacy default state still lives under `WORKSPACE_ROOT/.slack-codex-workers/` and no explicit path overrides are set, startup migrates it once to `WORKSPACE_ROOT/.slack-workers/`.
 - Child workstreams are created explicitly via bridge-owned creation paths and get their own visible directory plus local `.slack-workers/active`, `.slack-workers/archive`, and `registrations.json`.
 - Channel roots only create workers in registered workstream-home channels.

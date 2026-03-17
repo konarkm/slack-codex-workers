@@ -20,7 +20,7 @@ import { appendFileNotes, renderEventMessage, renderFinalMessage, renderSystemMe
 import { SlackGateway, type SlackUploadedFile } from "../slack/slackGateway.js";
 import { validateSlackUploadFiles } from "../slack/uploads.js";
 import { assignWorkerIdentity } from "../slack/workerIdentity.js";
-import { WorkstreamManager, buildRequestTitle, formatWorkstreamAddress } from "../workstreams/manager.js";
+import { WorkstreamManager, buildRequestTitle, buildWorkstreamId, formatWorkstreamAddress } from "../workstreams/manager.js";
 import { WebhookIngressServer, type NormalizedWebhookIngress } from "../webhooks/server.js";
 import type {
   DmSessionRecord,
@@ -150,8 +150,13 @@ export class SlackCodexWorkersService extends EventEmitter {
 
   private async bootstrapWorkstreams(): Promise<void> {
     const teamId = this.slack.getTeamId() ?? this.config.allowedTeamId ?? "single-workspace";
+    const rootWorkstreamId = buildWorkstreamId(teamId, "");
+    const hadRootWorkstream = this.store.getWorkstreamById(rootWorkstreamId) !== null;
     const rootChannel = await this.slack.ensurePublicChannel(teamId, "general");
-    await this.workstreams.bootstrapRootWorkstream(teamId, rootChannel);
+    const rootWorkstream = await this.workstreams.bootstrapRootWorkstream(teamId, rootChannel);
+    if (!hadRootWorkstream) {
+      await this.notifyAdminsAboutRootWorkstream(rootWorkstream);
+    }
   }
 
   async stop(): Promise<void> {
@@ -2525,6 +2530,54 @@ export class SlackCodexWorkersService extends EventEmitter {
   private async postDmSystemMessage(session: DmSessionRecord, message: string): Promise<void> {
     await this.enqueueSlackWrite(this.getDmQueueKey(session.teamId, session.userId), async () => {
       await this.slack.postTopLevelMessage(session.channelId, renderSystemMessage(message));
+    });
+  }
+
+  private async notifyAdminsAboutRootWorkstream(workstream: WorkstreamRecord): Promise<void> {
+    if (this.config.adminUserIds.length === 0) {
+      return;
+    }
+    const appLink = `slack://channel?team=${workstream.teamId}&id=${workstream.channelId}`;
+    const browserLink = `https://app.slack.com/client/${workstream.teamId}/${workstream.channelId}`;
+    const message = [
+      `Root workstream created: <${appLink}|Open #${workstream.channelName} in Slack app>.`,
+      `If that does not open the app, use <${browserLink}|this browser fallback>.`,
+      "Then click Join Channel and send your first top-level message there.",
+    ].join(" ");
+    for (const userId of this.config.adminUserIds) {
+      try {
+        const session = await this.ensureAdminDmSession(workstream.teamId, userId);
+        await this.postDmSystemMessage(session, message);
+      } catch (error) {
+        logWarn("failed to send root workstream onboarding DM", {
+          teamId: workstream.teamId,
+          userId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+
+  private async ensureAdminDmSession(teamId: string, userId: string): Promise<DmSessionRecord> {
+    const existing = this.store.getDmSession(teamId, userId);
+    if (existing) {
+      return existing;
+    }
+    const channelId = await this.slack.openDmChannel(userId);
+    return this.store.upsertDmSession({
+      teamId,
+      userId,
+      channelId,
+      appThreadId: null,
+      activeTurnId: null,
+      status: "idle",
+      currentAgentSlackTs: null,
+      currentAgentItemId: null,
+      currentWorklogSlackTs: null,
+      settings: { model: null, effort: null },
+      lastError: null,
+      lastInboundMessageTs: null,
+      pendingRequest: null,
     });
   }
 
