@@ -491,6 +491,12 @@ It applies to the current turn only.
 
 It does not become sticky across workers or workstreams.
 
+Current implementation note:
+
+- during dogfooding, scheduled cron/webhook-driven work still inherits the creating worker's owner/root-owner notification identity by default
+- this is an intentional temporary divergence from the stricter turn-scoped notification model above
+- future reviews should treat the explicit turn-scoped model as the target design and the inherited-owner behavior as current implementation debt, not an accidental regression
+
 ## Spawn / Wake Runtime Model
 
 ### Canonical Spawn Path
@@ -688,6 +694,12 @@ During shutdown, ingress should remain fail-closed:
 ### Payload Handling
 
 Normalize only the outer event envelope, not arbitrary provider payloads.
+
+Current implementation note:
+
+- when a request does not provide an explicit `id`, the fallback dedupe hash currently derives from the fully canonicalized parsed JSON body
+- that means nested provider payload objects are recursively key-sorted as part of the fallback hash
+- this is slightly broader than the idealized "outer envelope only" wording above and should be treated as the current contract unless/until the runtime changes
 
 Raw payloads should be stored durably.
 

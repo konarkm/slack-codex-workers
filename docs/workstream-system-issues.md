@@ -181,8 +181,13 @@ Current implementation contract:
 - auth uses one configured secret per webhook `source`
 - unknown and mis-authenticated sources both return the same generic unauthorized response
 - idempotency uses `(team, source, event, dedupe_key)`
-- requests may provide an explicit `id`; otherwise the bridge derives a stable hash from the normalized outer JSON envelope
+- requests may provide an explicit `id`; otherwise the bridge derives a stable hash from the fully canonicalized parsed JSON body, including recursively sorted nested objects
 - raw payload envelopes are stored under the bridge-owned webhook payload directory grouped by `source` and UTC date
+
+Temporary product divergence:
+
+- scheduled cron/webhook-driven work still inherits the creating worker's owner/root-owner notification identity by default
+- this is intentional during dogfooding even though the long-term target model is explicit turn-scoped notification control
 
 Still open:
 
