@@ -115,6 +115,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       spawnWorker: async (args, ctx) => this.handleSpawnWorkerTool(args, ctx),
       createWorkstream: async (args, ctx) => this.handleCreateWorkstreamTool(args, ctx),
       uploadFiles: async (args, ctx) => this.handleUploadFilesTool(args, ctx),
+      getCurrentTime: async (ctx) => this.handleGetCurrentTimeTool(ctx),
       setHeartbeat: async (args, ctx) => this.handleSetHeartbeatTool(args, ctx),
       setCron: async (args, ctx) => this.handleSetCronTool(args, ctx),
       setWebhook: async (args, ctx) => this.handleSetWebhookTool(args, ctx),
@@ -1687,6 +1688,10 @@ export class SlackCodexWorkersService extends EventEmitter {
     return "No Slack upload context found.";
   }
 
+  private async handleGetCurrentTimeTool(_ctx: DynamicToolHandlerContext): Promise<string> {
+    return formatCurrentTimeInfo(this.config.workspaceTimezone, new Date());
+  }
+
   private async handleSetHeartbeatTool(
     args: { registrationId?: string | undefined; intervalMinutes: number; description?: string | undefined },
     ctx: DynamicToolHandlerContext,
@@ -2863,6 +2868,25 @@ function formatRegistrationSummary(registration: RegistrationRecord): string {
   return [
     `Saved registration ${registration.id}.`,
     formatRegistrationLine(registration),
+  ].join("\n");
+}
+
+function formatCurrentTimeInfo(timeZone: string, now: Date): string {
+  const local = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+    timeZoneName: "short",
+  }).format(now);
+  return [
+    `current_time_utc: ${now.toISOString()}`,
+    `workspace_timezone: ${timeZone}`,
+    `current_time_local: ${local}`,
   ].join("\n");
 }
 

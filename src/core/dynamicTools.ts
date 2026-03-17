@@ -6,6 +6,7 @@ export const slackListChannelsToolName = "slack_list_channels";
 export const slackSpawnWorkerToolName = "slack_spawn_worker";
 export const slackCreateWorkstreamToolName = "slack_create_workstream";
 export const slackUploadFilesToolName = "slack_upload_files";
+export const slackGetCurrentTimeToolName = "get_current_time";
 export const slackSetHeartbeatToolName = "set_heartbeat";
 export const slackSetCronToolName = "set_cron";
 export const slackSetWebhookToolName = "set_webhook";
@@ -85,6 +86,16 @@ export const workerDynamicTools = [
     },
   },
   {
+    name: slackGetCurrentTimeToolName,
+    description:
+      "Get the current time along with the configured workspace timezone. Use this when you need the current local time or timezone before choosing a schedule.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {},
+    },
+  },
+  {
     name: slackSetHeartbeatToolName,
     description:
       "Create or update a durable worker heartbeat registration for the current public worker thread. This always targets wake_self on the current worker.",
@@ -102,7 +113,7 @@ export const workerDynamicTools = [
   {
     name: slackSetCronToolName,
     description:
-      "Create or update a durable cron registration. If target is omitted it defaults to 'self'. target='self' wakes the current worker; target='workstream' creates new public work in the current workstream. Cron schedules are interpreted in the configured workspace timezone.",
+      "Create or update a durable cron registration. If target is omitted it defaults to 'self'. target='self' wakes the current worker; target='workstream' creates new public work in the current workstream. schedule must be a 5-field cron string using numeric fields, ranges, lists, and steps. Cron schedules are interpreted in the configured workspace timezone. Use get_current_time when you need the current local time or timezone before choosing a schedule.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -189,6 +200,7 @@ export const workerDynamicTools = [
 ] as const;
 
 export const adminDynamicTools = [
+  workerDynamicTools[4],
   workerDynamicTools[2],
   workerDynamicTools[3],
 ] as const;
@@ -262,6 +274,7 @@ export const workerDeveloperInstructions = [
   "Use normal assistant messages to communicate substantive progress. Raw reasoning is not shown to the human.",
   "Use slack_spawn_worker only for distinct user-facing child tasks that should live as their own top-level Slack thread. Do not use it for internal subagents or minor follow-ups.",
   "Use slack_create_workstream only after the human has explicitly approved creating a new workstream in the current conversation. This is conversational/tool guidance, not a separate permission layer.",
+  "Use get_current_time when you need the current local time or configured workspace timezone for time-aware reasoning or scheduling.",
   "Use set_heartbeat, set_cron, set_webhook, disable_registration, list_registrations, get_registration, and list_wake_deliveries to manage durable wakeup registrations and inspect wake execution history for the current worker/workstream when you need ongoing automation.",
   "Use slack_upload_files when you need to share one or more existing local files into the current Slack thread. Only upload files that materially help the user.",
   "If you create a child worker, it is fire-and-forget. Do not wait on the child unless the human explicitly asks you to.",
@@ -272,6 +285,7 @@ export const adminDeveloperInstructions = [
   "You are operating in the Slack DM admin surface for a trusted local Codex bridge.",
   "Bridge slash commands are intercepted before they reach you.",
   "Use slack_create_workstream only after the human has explicitly approved creating a new workstream in the conversation.",
+  "Use get_current_time when you need the current local time or configured workspace timezone.",
   "Use slack_upload_files when you need to share one or more existing local files into this admin DM conversation.",
   "Use concise operational language suitable for an admin/operator chat.",
 ].join("\n");

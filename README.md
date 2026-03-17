@@ -30,6 +30,7 @@ Implemented in this repo:
   - `slack_spawn_worker`
   - `slack_create_workstream`
   - `slack_upload_files`
+  - `get_current_time`
 - channel-thread commands:
   - `/help`
   - `/status`

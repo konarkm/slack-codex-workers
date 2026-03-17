@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  adminDynamicTools,
+  slackGetCurrentTimeToolName,
   slackCreateWorkstreamArgsSchema,
   slackSetCronArgsSchema,
   slackSetWebhookArgsSchema,
   slackSpawnWorkerArgsSchema,
+  workerDynamicTools,
 } from "../core/dynamicTools.js";
 
 describe("dynamic tools", () => {
@@ -50,5 +53,21 @@ describe("dynamic tools", () => {
       events: ["push"],
       target: "self",
     });
+  });
+
+  it("describes cron registrations as using the time tool for local time", () => {
+    const tool = workerDynamicTools.find((entry) => entry.name === "set_cron");
+    expect(tool?.description).toContain("Use get_current_time");
+    expect(tool?.description).toContain("5-field cron string");
+  });
+
+  it("exposes a current time tool", () => {
+    const tool = workerDynamicTools.find((entry) => entry.name === slackGetCurrentTimeToolName);
+    expect(tool?.description).toContain("current local time or timezone");
+  });
+
+  it("exposes the current time tool to the admin surface", () => {
+    const tool = adminDynamicTools.find((entry) => entry.name === slackGetCurrentTimeToolName);
+    expect(tool?.description).toContain("current local time or timezone");
   });
 });

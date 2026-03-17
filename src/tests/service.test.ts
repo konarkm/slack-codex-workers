@@ -758,6 +758,27 @@ describe("service lifecycle decisions", () => {
     store.close();
   });
 
+  it("reports current UTC time and workspace timezone through the time tool", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-16T22:45:30.000Z"));
+    try {
+      const { service, store } = await createService();
+
+      const result = await (service as any).handleGetCurrentTimeTool({
+        threadId: "thread-1",
+        turnId: "turn-1",
+        callId: "call-1",
+      });
+
+      expect(result).toContain("current_time_utc: 2026-03-16T22:45:30.000Z");
+      expect(result).toContain("workspace_timezone: America/Los_Angeles");
+      expect(result).toContain("current_time_local: 03/16/2026, 15:45:30 PDT");
+      store.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("creates a heartbeat registration and updates the local projection", async () => {
     const { dir, service, store } = await createService();
     createWorker(service, { workstreamId: "T1:root" });
