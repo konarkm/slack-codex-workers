@@ -762,6 +762,77 @@ export class Store {
     return rows.map((row) => this.toPendingWake(row));
   }
 
+  getPendingWake(id: string): PendingWakeRecord | null {
+    const row = this.db.prepare("SELECT * FROM pending_wakes WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+    return row ? this.toPendingWake(row) : null;
+  }
+
+  getLatestPendingWakeForRegistration(registrationId: string): PendingWakeRecord | null {
+    const row = this.db.prepare(`
+      SELECT * FROM pending_wakes
+      WHERE registration_id = ?
+      ORDER BY created_at DESC, id DESC
+      LIMIT 1
+    `).get(registrationId) as Record<string, unknown> | undefined;
+    return row ? this.toPendingWake(row) : null;
+  }
+
+  listQueuedPendingWakes(): PendingWakeRecord[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM pending_wakes
+      WHERE status = 'queued'
+      ORDER BY created_at ASC, id ASC
+    `).all() as Record<string, unknown>[];
+    return rows.map((row) => this.toPendingWake(row));
+  }
+
+  createPendingWake(
+    input: Omit<PendingWakeRecord, "createdAt" | "updatedAt"> & { createdAt?: string; updatedAt?: string },
+  ): PendingWakeRecord {
+    const createdAt = input.createdAt ?? nowIso();
+    const updatedAt = input.updatedAt ?? createdAt;
+    this.db.prepare(`
+      INSERT INTO pending_wakes (
+        id, team_id, registration_id, workstream_id, worker_key, status, summary, payload_path, due_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      input.id,
+      input.teamId,
+      input.registrationId,
+      input.workstreamId,
+      input.workerKey,
+      input.status,
+      input.summary,
+      input.payloadPath,
+      input.dueAt,
+      createdAt,
+      updatedAt,
+    );
+    return this.getPendingWake(input.id)!;
+  }
+
+  updatePendingWake(id: string, patch: Partial<Pick<PendingWakeRecord, "status" | "summary" | "payloadPath" | "dueAt">>): PendingWakeRecord | null {
+    const current = this.getPendingWake(id);
+    if (!current) return null;
+    this.db.prepare(`
+      UPDATE pending_wakes SET
+        status = ?,
+        summary = ?,
+        payload_path = ?,
+        due_at = ?,
+        updated_at = ?
+      WHERE id = ?
+    `).run(
+      Object.hasOwn(patch, "status") ? patch.status : current.status,
+      Object.hasOwn(patch, "summary") ? patch.summary : current.summary,
+      Object.hasOwn(patch, "payloadPath") ? patch.payloadPath : current.payloadPath,
+      Object.hasOwn(patch, "dueAt") ? patch.dueAt : current.dueAt,
+      nowIso(),
+      id,
+    );
+    return this.getPendingWake(id);
+  }
+
   getPendingWorkerShell(id: string): PendingWorkerShellRecord | null {
     const row = this.db.prepare("SELECT * FROM pending_worker_shells WHERE id = ?").get(id) as Record<string, unknown> | undefined;
     return row ? this.toPendingWorkerShell(row) : null;

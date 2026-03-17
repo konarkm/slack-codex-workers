@@ -747,6 +747,95 @@ describe("service lifecycle decisions", () => {
     store.close();
   });
 
+  it("queues and delivers heartbeat wakes into an idle worker", async () => {
+    const { service, codex, store } = await createService();
+    createWorker(service, { workstreamId: "T1:root" });
+    codex.reconcileThreadForSend.mockResolvedValue("idle");
+    codex.startTurnWithResumeFallback.mockResolvedValue("turn-heartbeat");
+
+    store.upsertRegistration({
+      id: "reg-heartbeat",
+      teamId: "T1",
+      workstreamId: "T1:root",
+      workerKey: "T1:C1:1.000",
+      description: "Check for follow-ups",
+      enabled: true,
+      target: {
+        kind: "worker",
+        workstreamId: "T1:root",
+        workerKey: "T1:C1:1.000",
+      },
+      action: { kind: "wake_self" },
+      trigger: { kind: "heartbeat", intervalMinutes: 1 },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    await service.enqueueDueHeartbeatWakes();
+    await service.deliverQueuedWakes();
+
+    const wakes = store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000");
+    expect(wakes).toHaveLength(1);
+    expect(wakes[0]).toMatchObject({ status: "delivered" });
+    expect(codex.startTurnWithResumeFallback).toHaveBeenCalledWith(
+      "thread-1",
+      expect.objectContaining({
+        text: expect.stringContaining("[system wake event]"),
+      }),
+      expect.any(Object),
+      expect.any(Object),
+    );
+    const worker = store.getWorkerByKey("T1:C1:1.000");
+    expect(worker).toMatchObject({ activeTurnId: "turn-heartbeat", status: "running" });
+    store.close();
+  });
+
+  it("leaves heartbeat wakes queued while the worker is running and delivers them once idle", async () => {
+    const { service, codex, store } = await createService();
+    createWorker(service, {
+      workstreamId: "T1:root",
+      activeTurnId: "turn-1",
+      status: "running",
+    });
+    codex.startTurnWithResumeFallback.mockResolvedValue("turn-heartbeat");
+
+    store.upsertRegistration({
+      id: "reg-heartbeat",
+      teamId: "T1",
+      workstreamId: "T1:root",
+      workerKey: "T1:C1:1.000",
+      description: null,
+      enabled: true,
+      target: {
+        kind: "worker",
+        workstreamId: "T1:root",
+        workerKey: "T1:C1:1.000",
+      },
+      action: { kind: "wake_self" },
+      trigger: { kind: "heartbeat", intervalMinutes: 1 },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    await service.enqueueDueHeartbeatWakes();
+    await service.deliverQueuedWakes();
+
+    expect(codex.startTurnWithResumeFallback).not.toHaveBeenCalled();
+    expect(store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000")[0]).toMatchObject({ status: "queued" });
+
+    store.updateWorkerState("T1:C1:1.000", {
+      activeTurnId: null,
+      status: "idle",
+    });
+    codex.reconcileThreadForSend.mockResolvedValue("idle");
+
+    await service.deliverQueuedWakes();
+
+    expect(codex.startTurnWithResumeFallback).toHaveBeenCalledTimes(1);
+    expect(store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000")[0]).toMatchObject({ status: "delivered" });
+    store.close();
+  });
+
   it("writes request and response items for a root workstream worker", async () => {
     const { dir, service, codex, store } = await createService();
     codex.createWorkerThread.mockResolvedValue({ threadId: "thread-2" });

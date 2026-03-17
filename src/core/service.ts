@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { randomUUID } from "node:crypto";
 import { DEFAULT_EFFORTS, type AppConfig } from "../config.js";
 import { parseSlashCommand, helpText, normalizeEffort } from "./commands.js";
 import {
@@ -60,6 +61,7 @@ interface DmCommandResult {
 
 const BLOCKED_RUNNING_TURN_POLL_INTERVAL_MS = 2_000;
 const BLOCKED_RUNNING_TURN_POLL_WINDOW_MS = 30_000;
+const HEARTBEAT_POLL_INTERVAL_MS = 5_000;
 const STATUS_REACTIONS = {
   seen: "eyes",
   running: "hourglass_flowing_sand",
@@ -81,6 +83,8 @@ export class SlackCodexWorkersService extends EventEmitter {
   private readonly blockedTurnDeadlines = new Map<string, number>();
   private readonly startingWorkerTurns = new Map<string, Promise<string>>();
   private readonly startingDmTurns = new Map<string, Promise<string>>();
+  private heartbeatPollTimer: NodeJS.Timeout | null = null;
+  private processingHeartbeatLoop = false;
   private executingQueuedRestart = false;
 
   constructor(private readonly config: AppConfig) {
@@ -115,6 +119,7 @@ export class SlackCodexWorkersService extends EventEmitter {
     this.store.resetInterruptedInboundMessages();
     await this.reconcilePersistedRuntimeState();
     await this.replayPendingInboundMessages();
+    this.scheduleHeartbeatLoop(0);
     logInfo("Slack Codex Workers ready");
   }
 
@@ -130,6 +135,10 @@ export class SlackCodexWorkersService extends EventEmitter {
     }
     this.blockedTurnPolls.clear();
     this.blockedTurnDeadlines.clear();
+    if (this.heartbeatPollTimer) {
+      clearTimeout(this.heartbeatPollTimer);
+      this.heartbeatPollTimer = null;
+    }
     await this.slack.stop();
     await this.codex.stop();
     this.store.close();
@@ -1018,6 +1027,7 @@ export class SlackCodexWorkersService extends EventEmitter {
           ? STATUS_REACTIONS.interrupted
           : STATUS_REACTIONS.failed,
     );
+    await this.processHeartbeatLoop();
     await this.maybeExecuteQueuedRestart();
   }
 
@@ -1098,6 +1108,7 @@ export class SlackCodexWorkersService extends EventEmitter {
         );
       });
     }
+    await this.processHeartbeatLoop();
     await this.maybeExecuteQueuedRestart();
   }
 
@@ -1732,6 +1743,96 @@ export class SlackCodexWorkersService extends EventEmitter {
       workstream,
       worker,
     };
+  }
+
+  private scheduleHeartbeatLoop(delayMs = HEARTBEAT_POLL_INTERVAL_MS): void {
+    if (this.heartbeatPollTimer) {
+      clearTimeout(this.heartbeatPollTimer);
+    }
+    this.heartbeatPollTimer = setTimeout(() => {
+      void this.processHeartbeatLoop();
+    }, Math.max(0, delayMs));
+  }
+
+  private async processHeartbeatLoop(): Promise<void> {
+    if (this.processingHeartbeatLoop) return;
+    this.processingHeartbeatLoop = true;
+    try {
+      await this.enqueueDueHeartbeatWakes();
+      await this.deliverQueuedWakes();
+    } finally {
+      this.processingHeartbeatLoop = false;
+      this.scheduleHeartbeatLoop();
+    }
+  }
+
+  private async enqueueDueHeartbeatWakes(): Promise<void> {
+    const registrations = this.store.listRegistrationsForTeam(this.slack.getTeamId() ?? this.config.allowedTeamId ?? "single-workspace");
+    const now = Date.now();
+    for (const registration of registrations) {
+      if (!registration.enabled || registration.trigger.kind !== "heartbeat") continue;
+      const latestWake = this.store.getLatestPendingWakeForRegistration(registration.id);
+      if (latestWake?.status === "queued") continue;
+      const baseline = latestWake?.createdAt ?? registration.createdAt;
+      const dueAtMs = Date.parse(baseline) + registration.trigger.intervalMinutes * 60_000;
+      if (Number.isNaN(dueAtMs) || dueAtMs > now) continue;
+      this.store.createPendingWake({
+        id: `wake-${randomUUID().slice(0, 8)}`,
+        teamId: registration.teamId,
+        registrationId: registration.id,
+        workstreamId: registration.workstreamId,
+        workerKey: registration.workerKey,
+        status: "queued",
+        summary: `heartbeat fired for ${registration.id}`,
+        payloadPath: null,
+        dueAt: new Date(dueAtMs).toISOString(),
+      });
+    }
+  }
+
+  private async deliverQueuedWakes(): Promise<void> {
+    const wakes = this.store.listQueuedPendingWakes();
+    for (const wake of wakes) {
+      const registration = this.store.getRegistration(wake.registrationId);
+      if (!registration || !registration.enabled) {
+        this.store.updatePendingWake(wake.id, {
+          status: "failed",
+          summary: `${wake.summary} (registration unavailable)`,
+        });
+        continue;
+      }
+      if (registration.action.kind !== "wake_self" || !registration.workerKey) {
+        continue;
+      }
+      let worker = this.store.getWorkerByKey(registration.workerKey);
+      if (!worker) {
+        this.store.updatePendingWake(wake.id, {
+          status: "failed",
+          summary: `${wake.summary} (worker missing)`,
+        });
+        continue;
+      }
+      if (this.startingWorkerTurns.has(worker.key) || worker.pendingRequest || worker.activeTurnId || worker.status === "running") {
+        continue;
+      }
+      worker = await this.prepareWorkerForSend(worker);
+      if (worker.pendingRequest || worker.activeTurnId || worker.status === "running" || isManuallyBlockedStatus(worker.status)) {
+        continue;
+      }
+      try {
+        await this.startWorkerTurn(worker, buildWakeTurnInput(registration, wake));
+        this.store.updatePendingWake(wake.id, {
+          status: "delivered",
+          summary: `${wake.summary} (delivered)`,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.store.updatePendingWake(wake.id, {
+          status: "failed",
+          summary: `${wake.summary} (failed: ${message})`,
+        });
+      }
+    }
   }
 
   private async createWorkstreamFromThreadArgs(worker: WorkerRecord, args: string[]): Promise<string> {
@@ -2434,6 +2535,31 @@ function formatRegistrationSummary(registration: RegistrationRecord): string {
 function formatRegistrationLine(registration: RegistrationRecord): string {
   const target = registration.target.kind === "worker" ? "worker:self" : "workstream:self";
   return `${registration.id} [${registration.enabled ? "enabled" : "disabled"}] ${registration.trigger.kind} -> ${registration.action.kind} (${target})`;
+}
+
+function buildWakeTurnInput(registration: RegistrationRecord, wake: { id: string; createdAt: string; dueAt: string | null; summary: string }): TurnInput {
+  const details: string[] = [
+    "[system wake event]",
+    `registration_id: ${registration.id}`,
+    `wake_id: ${wake.id}`,
+    `trigger: ${registration.trigger.kind}`,
+    `action: ${registration.action.kind}`,
+    `fired_at: ${wake.createdAt}`,
+  ];
+  if (registration.trigger.kind === "heartbeat") {
+    details.push(`interval_minutes: ${registration.trigger.intervalMinutes}`);
+  }
+  if (wake.dueAt) {
+    details.push(`due_at: ${wake.dueAt}`);
+  }
+  if (registration.description) {
+    details.push(`description: ${registration.description}`);
+  }
+  details.push(`summary: ${wake.summary}`);
+  return {
+    text: details.join("\n"),
+    imagePaths: [],
+  };
 }
 
 function describeEffectiveSetting(threadValue: string | null, defaultValue: string | null): string {
