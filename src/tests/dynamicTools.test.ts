@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { slackCreateWorkstreamArgsSchema, slackSpawnWorkerArgsSchema } from "../core/dynamicTools.js";
+import {
+  slackCreateWorkstreamArgsSchema,
+  slackSetCronArgsSchema,
+  slackSetWebhookArgsSchema,
+  slackSpawnWorkerArgsSchema,
+} from "../core/dynamicTools.js";
 
 describe("dynamic tools", () => {
   it("defaults spawn mode to fresh", () => {
@@ -24,6 +29,26 @@ describe("dynamic tools", () => {
       slug: "ops",
       parent: "root",
       description: "Operational work",
+    });
+  });
+
+  it("defaults cron target to self", () => {
+    expect(slackSetCronArgsSchema.parse({
+      schedule: "0 * * * *",
+    })).toEqual({
+      schedule: "0 * * * *",
+      target: "self",
+    });
+  });
+
+  it("defaults webhook target to self", () => {
+    expect(slackSetWebhookArgsSchema.parse({
+      source: "github",
+      events: ["push"],
+    })).toEqual({
+      source: "github",
+      events: ["push"],
+      target: "self",
     });
   });
 });

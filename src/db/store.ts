@@ -7,10 +7,15 @@ import type {
   InboundMessageRecord,
   InboundMessageStatus,
   MessageAttachmentRecord,
+  PendingWakeRecord,
   PendingWorkerShellRecord,
   PendingRestartRecord,
   PendingRequestState,
   PendingWorkerShellSource,
+  RegistrationAction,
+  RegistrationRecord,
+  RegistrationTarget,
+  RegistrationTrigger,
   RuntimeSettings,
   SessionStatus,
   TeamDefaults,
@@ -79,6 +84,77 @@ function parsePendingWorkerShellSource(value: string | null | undefined): Pendin
   }
 }
 
+function parseRegistrationTarget(value: string | null | undefined): RegistrationTarget {
+  if (!value) {
+    return {
+      kind: "workstream",
+      workstreamId: "",
+      workerKey: null,
+    };
+  }
+  try {
+    const parsed = JSON.parse(value) as Partial<RegistrationTarget>;
+    return {
+      kind: parsed.kind === "worker" ? "worker" : "workstream",
+      workstreamId: typeof parsed.workstreamId === "string" ? parsed.workstreamId : "",
+      workerKey: typeof parsed.workerKey === "string" ? parsed.workerKey : null,
+    };
+  } catch {
+    return {
+      kind: "workstream",
+      workstreamId: "",
+      workerKey: null,
+    };
+  }
+}
+
+function parseRegistrationAction(value: string | null | undefined): RegistrationAction {
+  if (!value) {
+    return { kind: "spawn" };
+  }
+  try {
+    const parsed = JSON.parse(value) as Partial<RegistrationAction>;
+    return { kind: parsed.kind === "wake_self" ? "wake_self" : "spawn" };
+  } catch {
+    return { kind: "spawn" };
+  }
+}
+
+function parseRegistrationTrigger(value: string | null | undefined): RegistrationTrigger {
+  if (!value) {
+    return { kind: "cron", schedule: "" };
+  }
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    const kind = parsed.kind;
+    if (kind === "heartbeat") {
+      return {
+        kind: "heartbeat",
+        intervalMinutes: Number(parsed.intervalMinutes ?? 0),
+      };
+    }
+    if (kind === "webhook") {
+      const match = parsed.match && typeof parsed.match === "object" && !Array.isArray(parsed.match)
+        ? Object.fromEntries(
+            Object.entries(parsed.match).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+          )
+        : null;
+      return {
+        kind: "webhook",
+        source: typeof parsed.source === "string" ? parsed.source : "",
+        events: Array.isArray(parsed.events) ? parsed.events.filter((entry): entry is string => typeof entry === "string") : [],
+        match,
+      };
+    }
+    return {
+      kind: "cron",
+      schedule: typeof parsed.schedule === "string" ? parsed.schedule : "",
+    };
+  } catch {
+    return { kind: "cron", schedule: "" };
+  }
+}
+
 export class Store {
   private readonly db: Database.Database;
 
@@ -139,6 +215,34 @@ export class Store {
         updated_at TEXT NOT NULL,
         UNIQUE(team_id, relative_path),
         UNIQUE(team_id, channel_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS registrations (
+        id TEXT PRIMARY KEY,
+        team_id TEXT NOT NULL,
+        workstream_id TEXT NOT NULL,
+        worker_key TEXT,
+        description TEXT,
+        enabled INTEGER NOT NULL,
+        target_json TEXT NOT NULL,
+        action_json TEXT NOT NULL,
+        trigger_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS pending_wakes (
+        id TEXT PRIMARY KEY,
+        team_id TEXT NOT NULL,
+        registration_id TEXT NOT NULL,
+        workstream_id TEXT NOT NULL,
+        worker_key TEXT,
+        status TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        payload_path TEXT,
+        due_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS pending_worker_shells (
@@ -563,6 +667,101 @@ export class Store {
     return this.getWorkstreamById(input.id)!;
   }
 
+  getRegistration(id: string): RegistrationRecord | null {
+    const row = this.db.prepare("SELECT * FROM registrations WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+    return row ? this.toRegistration(row) : null;
+  }
+
+  listRegistrationsForTeam(teamId: string): RegistrationRecord[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM registrations
+      WHERE team_id = ?
+      ORDER BY created_at ASC, id ASC
+    `).all(teamId) as Record<string, unknown>[];
+    return rows.map((row) => this.toRegistration(row));
+  }
+
+  listRegistrationsForWorkstream(workstreamId: string): RegistrationRecord[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM registrations
+      WHERE workstream_id = ?
+      ORDER BY created_at ASC, id ASC
+    `).all(workstreamId) as Record<string, unknown>[];
+    return rows.map((row) => this.toRegistration(row));
+  }
+
+  listRegistrationsForScope(teamId: string, workstreamId: string, workerKey: string | null = null): RegistrationRecord[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM registrations
+      WHERE team_id = ?
+        AND (
+          (workstream_id = ? AND worker_key IS NULL)
+          OR worker_key = ?
+        )
+      ORDER BY created_at ASC, id ASC
+    `).all(teamId, workstreamId, workerKey) as Record<string, unknown>[];
+    return rows.map((row) => this.toRegistration(row));
+  }
+
+  upsertRegistration(
+    input: Omit<RegistrationRecord, "createdAt" | "updatedAt"> & { createdAt?: string; updatedAt?: string },
+  ): RegistrationRecord {
+    const current = this.getRegistration(input.id);
+    const createdAt = current?.createdAt ?? input.createdAt ?? nowIso();
+    const updatedAt = input.updatedAt ?? nowIso();
+    this.db.prepare(`
+      INSERT INTO registrations (
+        id, team_id, workstream_id, worker_key, description, enabled, target_json, action_json, trigger_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        workstream_id=excluded.workstream_id,
+        worker_key=excluded.worker_key,
+        description=excluded.description,
+        enabled=excluded.enabled,
+        target_json=excluded.target_json,
+        action_json=excluded.action_json,
+        trigger_json=excluded.trigger_json,
+        updated_at=excluded.updated_at
+    `).run(
+      input.id,
+      input.teamId,
+      input.workstreamId,
+      input.workerKey,
+      input.description,
+      input.enabled ? 1 : 0,
+      JSON.stringify(input.target),
+      JSON.stringify(input.action),
+      JSON.stringify(input.trigger),
+      createdAt,
+      updatedAt,
+    );
+    return this.getRegistration(input.id)!;
+  }
+
+  disableRegistration(id: string): RegistrationRecord | null {
+    const current = this.getRegistration(id);
+    if (!current) return null;
+    this.db.prepare(`
+      UPDATE registrations
+      SET enabled = 0, updated_at = ?
+      WHERE id = ?
+    `).run(nowIso(), id);
+    return this.getRegistration(id);
+  }
+
+  listPendingWakesForScope(teamId: string, workstreamId: string, workerKey: string | null = null): PendingWakeRecord[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM pending_wakes
+      WHERE team_id = ?
+        AND (
+          (workstream_id = ? AND worker_key IS NULL)
+          OR worker_key = ?
+        )
+      ORDER BY created_at ASC, id ASC
+    `).all(teamId, workstreamId, workerKey) as Record<string, unknown>[];
+    return rows.map((row) => this.toPendingWake(row));
+  }
+
   getPendingWorkerShell(id: string): PendingWorkerShellRecord | null {
     const row = this.db.prepare("SELECT * FROM pending_worker_shells WHERE id = ?").get(id) as Record<string, unknown> | undefined;
     return row ? this.toPendingWorkerShell(row) : null;
@@ -834,6 +1033,38 @@ export class Store {
       channelId: String(row.channel_id),
       channelName: String(row.channel_name),
       description: row.description ? String(row.description) : null,
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+    };
+  }
+
+  private toRegistration(row: Record<string, unknown>): RegistrationRecord {
+    return {
+      id: String(row.id),
+      teamId: String(row.team_id),
+      workstreamId: String(row.workstream_id),
+      workerKey: row.worker_key ? String(row.worker_key) : null,
+      description: row.description ? String(row.description) : null,
+      enabled: Boolean(row.enabled),
+      target: parseRegistrationTarget(typeof row.target_json === "string" ? row.target_json : null),
+      action: parseRegistrationAction(typeof row.action_json === "string" ? row.action_json : null),
+      trigger: parseRegistrationTrigger(typeof row.trigger_json === "string" ? row.trigger_json : null),
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+    };
+  }
+
+  private toPendingWake(row: Record<string, unknown>): PendingWakeRecord {
+    return {
+      id: String(row.id),
+      teamId: String(row.team_id),
+      registrationId: String(row.registration_id),
+      workstreamId: String(row.workstream_id),
+      workerKey: row.worker_key ? String(row.worker_key) : null,
+      status: String(row.status) as PendingWakeRecord["status"],
+      summary: String(row.summary),
+      payloadPath: row.payload_path ? String(row.payload_path) : null,
+      dueAt: row.due_at ? String(row.due_at) : null,
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
     };

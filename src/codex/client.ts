@@ -7,10 +7,22 @@ import {
   adminDynamicTools,
   adminDeveloperInstructions,
   dynamicToolCallParamsSchema,
+  slackDisableRegistrationArgsSchema,
+  slackDisableRegistrationToolName,
   slackCreateWorkstreamArgsSchema,
   slackCreateWorkstreamToolName,
+  slackGetRegistrationArgsSchema,
+  slackGetRegistrationToolName,
   slackListChannelsArgsSchema,
   slackListChannelsToolName,
+  slackListPendingWakesToolName,
+  slackListRegistrationsToolName,
+  slackSetCronArgsSchema,
+  slackSetCronToolName,
+  slackSetHeartbeatArgsSchema,
+  slackSetHeartbeatToolName,
+  slackSetWebhookArgsSchema,
+  slackSetWebhookToolName,
   slackSpawnWorkerArgsSchema,
   slackSpawnWorkerToolName,
   slackUploadFilesArgsSchema,
@@ -49,6 +61,13 @@ export interface DynamicToolHandlers {
   spawnWorker(args: z.infer<typeof slackSpawnWorkerArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
   createWorkstream(args: z.infer<typeof slackCreateWorkstreamArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
   uploadFiles(args: z.infer<typeof slackUploadFilesArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
+  setHeartbeat(args: z.infer<typeof slackSetHeartbeatArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
+  setCron(args: z.infer<typeof slackSetCronArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
+  setWebhook(args: z.infer<typeof slackSetWebhookArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
+  disableRegistration(args: z.infer<typeof slackDisableRegistrationArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
+  listRegistrations(ctx: DynamicToolHandlerContext): Promise<string>;
+  getRegistration(args: z.infer<typeof slackGetRegistrationArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
+  listPendingWakes(ctx: DynamicToolHandlerContext): Promise<string>;
 }
 
 export interface InteractiveRequest {
@@ -440,6 +459,53 @@ export class CodexClient {
     if (parsed.data.tool === slackUploadFilesToolName) {
       const args = slackUploadFilesArgsSchema.parse(parsed.data.arguments);
       const text = await this.dynamicToolHandlers.uploadFiles(args, ctx);
+      await this.rpc.respond(id, { contentItems: [{ type: "inputText", text }], success: true });
+      return;
+    }
+
+    if (parsed.data.tool === slackSetHeartbeatToolName) {
+      const args = slackSetHeartbeatArgsSchema.parse(parsed.data.arguments);
+      const text = await this.dynamicToolHandlers.setHeartbeat(args, ctx);
+      await this.rpc.respond(id, { contentItems: [{ type: "inputText", text }], success: true });
+      return;
+    }
+
+    if (parsed.data.tool === slackSetCronToolName) {
+      const args = slackSetCronArgsSchema.parse(parsed.data.arguments);
+      const text = await this.dynamicToolHandlers.setCron(args, ctx);
+      await this.rpc.respond(id, { contentItems: [{ type: "inputText", text }], success: true });
+      return;
+    }
+
+    if (parsed.data.tool === slackSetWebhookToolName) {
+      const args = slackSetWebhookArgsSchema.parse(parsed.data.arguments);
+      const text = await this.dynamicToolHandlers.setWebhook(args, ctx);
+      await this.rpc.respond(id, { contentItems: [{ type: "inputText", text }], success: true });
+      return;
+    }
+
+    if (parsed.data.tool === slackDisableRegistrationToolName) {
+      const args = slackDisableRegistrationArgsSchema.parse(parsed.data.arguments);
+      const text = await this.dynamicToolHandlers.disableRegistration(args, ctx);
+      await this.rpc.respond(id, { contentItems: [{ type: "inputText", text }], success: true });
+      return;
+    }
+
+    if (parsed.data.tool === slackListRegistrationsToolName) {
+      const text = await this.dynamicToolHandlers.listRegistrations(ctx);
+      await this.rpc.respond(id, { contentItems: [{ type: "inputText", text }], success: true });
+      return;
+    }
+
+    if (parsed.data.tool === slackGetRegistrationToolName) {
+      const args = slackGetRegistrationArgsSchema.parse(parsed.data.arguments);
+      const text = await this.dynamicToolHandlers.getRegistration(args, ctx);
+      await this.rpc.respond(id, { contentItems: [{ type: "inputText", text }], success: true });
+      return;
+    }
+
+    if (parsed.data.tool === slackListPendingWakesToolName) {
+      const text = await this.dynamicToolHandlers.listPendingWakes(ctx);
       await this.rpc.respond(id, { contentItems: [{ type: "inputText", text }], success: true });
       return;
     }

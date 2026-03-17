@@ -692,6 +692,61 @@ describe("service lifecycle decisions", () => {
     store.close();
   });
 
+  it("creates a heartbeat registration and updates the local projection", async () => {
+    const { dir, service, store } = await createService();
+    createWorker(service, { workstreamId: "T1:root" });
+
+    const result = await service.handleSetHeartbeatTool(
+      { intervalMinutes: 15, description: "Check for follow-ups" },
+      { threadId: "thread-1", turnId: "turn-1", callId: "call-1" },
+    );
+
+    expect(result).toContain("Saved registration");
+    expect(store.listRegistrationsForScope("T1", "T1:root", "T1:C1:1.000")).toHaveLength(1);
+    await expect(fs.readFile(path.join(dir, ".slack-workers", "registrations.json"), "utf8")).resolves.toContain('"kind": "heartbeat"');
+    store.close();
+  });
+
+  it("lists and disables registrations in the current worker scope", async () => {
+    const { service, store } = await createService();
+    createWorker(service, { workstreamId: "T1:root" });
+    store.upsertRegistration({
+      id: "reg-1",
+      teamId: "T1",
+      workstreamId: "T1:root",
+      workerKey: "T1:C1:1.000",
+      description: "Check for replies",
+      enabled: true,
+      target: {
+        kind: "worker",
+        workstreamId: "T1:root",
+        workerKey: "T1:C1:1.000",
+      },
+      action: { kind: "wake_self" },
+      trigger: {
+        kind: "heartbeat",
+        intervalMinutes: 30,
+      },
+    });
+
+    const listed = await service.handleListRegistrationsTool({ threadId: "thread-1", turnId: "turn-1", callId: "call-1" });
+    expect(listed).toContain("reg-1");
+
+    const detail = await service.handleGetRegistrationTool(
+      { registrationId: "reg-1" },
+      { threadId: "thread-1", turnId: "turn-1", callId: "call-1" },
+    );
+    expect(detail).toContain('"id": "reg-1"');
+
+    const disabled = await service.handleDisableRegistrationTool(
+      { registrationId: "reg-1" },
+      { threadId: "thread-1", turnId: "turn-1", callId: "call-1" },
+    );
+    expect(disabled).toContain("Disabled registration reg-1");
+    expect(store.getRegistration("reg-1")).toMatchObject({ enabled: false });
+    store.close();
+  });
+
   it("writes request and response items for a root workstream worker", async () => {
     const { dir, service, codex, store } = await createService();
     codex.createWorkerThread.mockResolvedValue({ threadId: "thread-2" });

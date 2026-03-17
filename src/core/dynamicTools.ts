@@ -4,6 +4,13 @@ export const slackListChannelsToolName = "slack_list_channels";
 export const slackSpawnWorkerToolName = "slack_spawn_worker";
 export const slackCreateWorkstreamToolName = "slack_create_workstream";
 export const slackUploadFilesToolName = "slack_upload_files";
+export const slackSetHeartbeatToolName = "set_heartbeat";
+export const slackSetCronToolName = "set_cron";
+export const slackSetWebhookToolName = "set_webhook";
+export const slackDisableRegistrationToolName = "disable_registration";
+export const slackListRegistrationsToolName = "list_registrations";
+export const slackGetRegistrationToolName = "get_registration";
+export const slackListPendingWakesToolName = "list_pending_wakes";
 
 export const workerDynamicTools = [
   {
@@ -75,6 +82,108 @@ export const workerDynamicTools = [
       },
     },
   },
+  {
+    name: slackSetHeartbeatToolName,
+    description:
+      "Create or update a durable worker heartbeat registration for the current public worker thread. This always targets wake_self on the current worker.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["intervalMinutes"],
+      properties: {
+        registrationId: { type: "string", minLength: 1 },
+        intervalMinutes: { type: "integer", minimum: 1 },
+        description: { type: "string", minLength: 1 },
+      },
+    },
+  },
+  {
+    name: slackSetCronToolName,
+    description:
+      "Create or update a durable cron registration. target='self' wakes the current worker; target='workstream' creates new public work in the current workstream.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["schedule"],
+      properties: {
+        registrationId: { type: "string", minLength: 1 },
+        schedule: { type: "string", minLength: 1 },
+        target: { enum: ["self", "workstream"] },
+        description: { type: "string", minLength: 1 },
+      },
+    },
+  },
+  {
+    name: slackSetWebhookToolName,
+    description:
+      "Create or update a durable webhook registration. target='self' wakes the current worker; target='workstream' creates new public work in the current workstream.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["source", "events"],
+      properties: {
+        registrationId: { type: "string", minLength: 1 },
+        source: { type: "string", minLength: 1 },
+        events: {
+          type: "array",
+          minItems: 1,
+          items: { type: "string", minLength: 1 },
+        },
+        target: { enum: ["self", "workstream"] },
+        description: { type: "string", minLength: 1 },
+        match: {
+          type: "object",
+          additionalProperties: { type: "string" },
+        },
+      },
+    },
+  },
+  {
+    name: slackDisableRegistrationToolName,
+    description:
+      "Disable a durable registration in the current worker/workstream scope without deleting it.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["registrationId"],
+      properties: {
+        registrationId: { type: "string", minLength: 1 },
+      },
+    },
+  },
+  {
+    name: slackListRegistrationsToolName,
+    description:
+      "List durable registrations in the current worker/workstream scope.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {},
+    },
+  },
+  {
+    name: slackGetRegistrationToolName,
+    description:
+      "Get the full details for one durable registration in the current worker/workstream scope.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["registrationId"],
+      properties: {
+        registrationId: { type: "string", minLength: 1 },
+      },
+    },
+  },
+  {
+    name: slackListPendingWakesToolName,
+    description:
+      "List queued wake deliveries in the current worker/workstream scope.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {},
+    },
+  },
 ] as const;
 
 export const adminDynamicTools = [
@@ -115,12 +224,43 @@ export const slackUploadFilesArgsSchema = z.object({
   })).min(1),
 });
 
+export const slackSetHeartbeatArgsSchema = z.object({
+  registrationId: z.string().min(1).optional(),
+  intervalMinutes: z.number().int().min(1),
+  description: z.string().min(1).optional(),
+});
+
+export const slackSetCronArgsSchema = z.object({
+  registrationId: z.string().min(1).optional(),
+  schedule: z.string().min(1),
+  target: z.enum(["self", "workstream"]).default("self"),
+  description: z.string().min(1).optional(),
+});
+
+export const slackSetWebhookArgsSchema = z.object({
+  registrationId: z.string().min(1).optional(),
+  source: z.string().min(1),
+  events: z.array(z.string().min(1)).min(1),
+  target: z.enum(["self", "workstream"]).default("self"),
+  description: z.string().min(1).optional(),
+  match: z.record(z.string(), z.string()).optional(),
+});
+
+export const slackDisableRegistrationArgsSchema = z.object({
+  registrationId: z.string().min(1),
+});
+
+export const slackGetRegistrationArgsSchema = z.object({
+  registrationId: z.string().min(1),
+});
+
 export const workerDeveloperInstructions = [
   "You are operating inside Slack as one worker in a shared-bot system.",
   "Incoming human messages are prefixed with the Slack speaker name, for example 'alice: can you check this'. Treat that prefix as authoritative speaker identity.",
   "Use normal assistant messages to communicate substantive progress. Raw reasoning is not shown to the human.",
   "Use slack_spawn_worker only for distinct user-facing child tasks that should live as their own top-level Slack thread. Do not use it for internal subagents or minor follow-ups.",
   "Use slack_create_workstream only after the human has explicitly approved creating a new workstream in the current conversation. This is conversational/tool guidance, not a separate permission layer.",
+  "Use set_heartbeat, set_cron, set_webhook, disable_registration, list_registrations, get_registration, and list_pending_wakes to manage durable wakeup registrations for the current worker/workstream when you need ongoing automation.",
   "Use slack_upload_files when you need to share one or more existing local files into the current Slack thread. Only upload files that materially help the user.",
   "If you create a child worker, it is fire-and-forget. Do not wait on the child unless the human explicitly asks you to.",
   "Keep progress clear and concise because the client streams your interleaved assistant messages into the Slack thread.",

@@ -97,6 +97,69 @@ export interface WorkstreamRecord {
   updatedAt: string;
 }
 
+export type RegistrationTargetKind = "worker" | "workstream";
+export type RegistrationActionKind = "wake_self" | "spawn";
+
+export interface RegistrationTarget {
+  kind: RegistrationTargetKind;
+  workstreamId: string;
+  workerKey: string | null;
+}
+
+export interface RegistrationAction {
+  kind: RegistrationActionKind;
+}
+
+export interface HeartbeatRegistrationTrigger {
+  kind: "heartbeat";
+  intervalMinutes: number;
+}
+
+export interface CronRegistrationTrigger {
+  kind: "cron";
+  schedule: string;
+}
+
+export interface WebhookRegistrationTrigger {
+  kind: "webhook";
+  source: string;
+  events: string[];
+  match: Record<string, string> | null;
+}
+
+export type RegistrationTrigger =
+  | HeartbeatRegistrationTrigger
+  | CronRegistrationTrigger
+  | WebhookRegistrationTrigger;
+
+export interface RegistrationRecord {
+  id: string;
+  teamId: string;
+  workstreamId: string;
+  workerKey: string | null;
+  description: string | null;
+  enabled: boolean;
+  target: RegistrationTarget;
+  action: RegistrationAction;
+  trigger: RegistrationTrigger;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PendingWakeRecord {
+  id: string;
+  teamId: string;
+  registrationId: string;
+  workstreamId: string;
+  workerKey: string | null;
+  status: "queued" | "delivered" | "failed";
+  summary: string;
+  payloadPath: string | null;
+  dueAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface PendingWorkerShellSource {
   sourceKind: string;
   sourceSummary: string;

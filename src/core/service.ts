@@ -10,6 +10,7 @@ import {
 } from "../codex/client.js";
 import { Store } from "../db/store.js";
 import { logInfo, logWarn } from "../logger.js";
+import { RegistrationManager, type RegistrationContext } from "../registrations/manager.js";
 import { prepareSlackAttachments } from "../slack/attachments.js";
 import { appendFileNotes, renderEventMessage, renderFinalMessage, renderSystemMessage } from "../slack/renderer.js";
 import { SlackGateway, type SlackUploadedFile } from "../slack/slackGateway.js";
@@ -24,6 +25,7 @@ import type {
   PendingWorkerShellRecord,
   PendingRestartRecord,
   PendingRequestState,
+  RegistrationRecord,
   RestartTarget,
   RuntimeSettings,
   SessionStatus,
@@ -71,6 +73,7 @@ export class SlackCodexWorkersService extends EventEmitter {
   private readonly codex: CodexClient;
   private readonly slack: SlackGateway;
   private readonly workstreams: WorkstreamManager;
+  private readonly registrations: RegistrationManager;
   private readonly renderState = new Map<string, RenderSessionState>();
   private readonly slackWriteQueues = new Map<string, Promise<unknown>>();
   private readonly pendingInteractiveRequests = new Map<string, InteractiveRequest>();
@@ -86,11 +89,19 @@ export class SlackCodexWorkersService extends EventEmitter {
     this.codex = new CodexClient(config.codexBin, config.workspaceRoot);
     this.slack = new SlackGateway(config);
     this.workstreams = new WorkstreamManager(config, this.store);
+    this.registrations = new RegistrationManager(this.store, this.workstreams);
     this.codex.registerDynamicToolHandlers({
       listChannels: async (args, ctx) => this.handleListChannelsTool(args.query ?? "", ctx),
       spawnWorker: async (args, ctx) => this.handleSpawnWorkerTool(args, ctx),
       createWorkstream: async (args, ctx) => this.handleCreateWorkstreamTool(args, ctx),
       uploadFiles: async (args, ctx) => this.handleUploadFilesTool(args, ctx),
+      setHeartbeat: async (args, ctx) => this.handleSetHeartbeatTool(args, ctx),
+      setCron: async (args, ctx) => this.handleSetCronTool(args, ctx),
+      setWebhook: async (args, ctx) => this.handleSetWebhookTool(args, ctx),
+      disableRegistration: async (args, ctx) => this.handleDisableRegistrationTool(args, ctx),
+      listRegistrations: async (ctx) => this.handleListRegistrationsTool(ctx),
+      getRegistration: async (args, ctx) => this.handleGetRegistrationTool(args, ctx),
+      listPendingWakes: async (ctx) => this.handleListPendingWakesTool(ctx),
     });
     this.codex.registerInteractiveRequestHandler(async (request) => this.handleInteractiveRequest(request));
   }
@@ -1620,6 +1631,109 @@ export class SlackCodexWorkersService extends EventEmitter {
     return "No Slack upload context found.";
   }
 
+  private async handleSetHeartbeatTool(
+    args: { registrationId?: string | undefined; intervalMinutes: number; description?: string | undefined },
+    ctx: DynamicToolHandlerContext,
+  ): Promise<string> {
+    const context = this.requireRegistrationContext(ctx);
+    const registration = await this.registrations.setHeartbeat(context, {
+      registrationId: args.registrationId,
+      intervalMinutes: args.intervalMinutes,
+      description: args.description,
+    });
+    return formatRegistrationSummary(registration);
+  }
+
+  private async handleSetCronTool(
+    args: { registrationId?: string | undefined; schedule: string; target: "self" | "workstream"; description?: string | undefined },
+    ctx: DynamicToolHandlerContext,
+  ): Promise<string> {
+    const context = this.requireRegistrationContext(ctx);
+    const registration = await this.registrations.setCron(context, {
+      registrationId: args.registrationId,
+      schedule: args.schedule,
+      target: args.target,
+      description: args.description,
+    });
+    return formatRegistrationSummary(registration);
+  }
+
+  private async handleSetWebhookTool(
+    args: {
+      registrationId?: string | undefined;
+      source: string;
+      events: string[];
+      target: "self" | "workstream";
+      description?: string | undefined;
+      match?: Record<string, string> | undefined;
+    },
+    ctx: DynamicToolHandlerContext,
+  ): Promise<string> {
+    const context = this.requireRegistrationContext(ctx);
+    const registration = await this.registrations.setWebhook(context, {
+      registrationId: args.registrationId,
+      source: args.source,
+      events: args.events,
+      target: args.target,
+      description: args.description,
+      match: args.match,
+    });
+    return formatRegistrationSummary(registration);
+  }
+
+  private async handleDisableRegistrationTool(
+    args: { registrationId: string },
+    ctx: DynamicToolHandlerContext,
+  ): Promise<string> {
+    const context = this.requireRegistrationContext(ctx);
+    const registration = await this.registrations.disableRegistration(context, args.registrationId);
+    return `Disabled registration ${registration.id}.`;
+  }
+
+  private async handleListRegistrationsTool(ctx: DynamicToolHandlerContext): Promise<string> {
+    const context = this.requireRegistrationContext(ctx);
+    const registrations = this.registrations.listRegistrations(context);
+    if (registrations.length === 0) {
+      return "No registrations in the current worker/workstream scope.";
+    }
+    return registrations.map((registration) => formatRegistrationLine(registration)).join("\n");
+  }
+
+  private async handleGetRegistrationTool(
+    args: { registrationId: string },
+    ctx: DynamicToolHandlerContext,
+  ): Promise<string> {
+    const context = this.requireRegistrationContext(ctx);
+    const registration = this.registrations.getRegistration(context, args.registrationId);
+    return JSON.stringify(registration, null, 2);
+  }
+
+  private async handleListPendingWakesTool(ctx: DynamicToolHandlerContext): Promise<string> {
+    const context = this.requireRegistrationContext(ctx);
+    const wakes = this.registrations.listPendingWakes(context);
+    if (wakes.length === 0) {
+      return "No pending wakes in the current worker/workstream scope.";
+    }
+    return wakes.map((wake) => `${wake.id} ${wake.status} ${wake.summary}`).join("\n");
+  }
+
+  private requireRegistrationContext(ctx: DynamicToolHandlerContext): RegistrationContext {
+    const workerRecord = this.store.getWorkerByAppThreadId(ctx.threadId);
+    const worker = workerRecord ? this.ensureWorkerWorkstream(workerRecord) : null;
+    if (!worker?.workstreamId) {
+      throw new Error("Registration tools require a worker thread with an attached workstream.");
+    }
+    const workstream = this.store.getWorkstreamById(worker.workstreamId);
+    if (!workstream) {
+      throw new Error("No workstream is attached to this Slack worker.");
+    }
+    return {
+      teamId: worker.teamId,
+      workstream,
+      worker,
+    };
+  }
+
   private async createWorkstreamFromThreadArgs(worker: WorkerRecord, args: string[]): Promise<string> {
     const parsed = parseWorkstreamCreateArgs(args);
     if (!parsed) {
@@ -2308,6 +2422,18 @@ function safeJson(value: string): unknown | null {
   } catch {
     return null;
   }
+}
+
+function formatRegistrationSummary(registration: RegistrationRecord): string {
+  return [
+    `Saved registration ${registration.id}.`,
+    formatRegistrationLine(registration),
+  ].join("\n");
+}
+
+function formatRegistrationLine(registration: RegistrationRecord): string {
+  const target = registration.target.kind === "worker" ? "worker:self" : "workstream:self";
+  return `${registration.id} [${registration.enabled ? "enabled" : "disabled"}] ${registration.trigger.kind} -> ${registration.action.kind} (${target})`;
 }
 
 function describeEffectiveSetting(threadValue: string | null, defaultValue: string | null): string {

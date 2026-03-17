@@ -155,4 +155,47 @@ describe("store", () => {
     expect(store.getInboundMessage("msg-1")?.payloadJson).toContain("new");
     store.close();
   });
+
+  it("stores registrations and disables them without deleting them", async () => {
+    const { store } = await createStore();
+    store.upsertWorkstream({
+      id: "T1:root",
+      teamId: "T1",
+      parentId: null,
+      slug: "root",
+      relativePath: "",
+      channelId: "C1",
+      channelName: "general",
+      description: "root",
+    });
+
+    store.upsertRegistration({
+      id: "reg-1",
+      teamId: "T1",
+      workstreamId: "T1:root",
+      workerKey: "worker-1",
+      description: "Check backlog",
+      enabled: true,
+      target: {
+        kind: "worker",
+        workstreamId: "T1:root",
+        workerKey: "worker-1",
+      },
+      action: { kind: "wake_self" },
+      trigger: {
+        kind: "heartbeat",
+        intervalMinutes: 30,
+      },
+    });
+
+    expect(store.listRegistrationsForScope("T1", "T1:root", "worker-1")).toHaveLength(1);
+    expect(store.getRegistration("reg-1")).toMatchObject({
+      enabled: true,
+      trigger: { kind: "heartbeat", intervalMinutes: 30 },
+    });
+
+    store.disableRegistration("reg-1");
+    expect(store.getRegistration("reg-1")).toMatchObject({ enabled: false });
+    store.close();
+  });
 });

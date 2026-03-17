@@ -258,6 +258,12 @@ export class WorkstreamManager {
     await this.archiveItem(workstream, responseFilePath, finalStatus);
   }
 
+  async writeRegistrationsProjection(workstream: WorkstreamRecord, registrations: unknown): Promise<void> {
+    const targetPath = this.getWorkstreamRegistrationsProjectionPath(workstream.relativePath);
+    await fs.mkdir(path.dirname(targetPath), { recursive: true });
+    await fs.writeFile(targetPath, `${JSON.stringify(registrations, null, 2)}\n`);
+  }
+
   getWorkstreamDir(relativePath: string): string {
     return relativePath ? path.join(this.config.workspaceRoot, ...relativePath.split("/")) : this.config.workspaceRoot;
   }
