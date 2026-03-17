@@ -382,7 +382,63 @@ describe("webhook ingress server", () => {
 
     expect(throttledStatus).toBe(429);
     expect(throttledBody).toContain("auth_rate_limited");
+    const throttled = JSON.parse(throttledBody) as { retryAfterSeconds?: number };
+    expect(throttled.retryAfterSeconds).toBeGreaterThan(0);
     expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("resets auth throttling after a successful authenticated request", async () => {
+    const handler = vi.fn().mockResolvedValue({
+      duplicate: false,
+      matchedRegistrations: 1,
+      eventId: "evt-reset",
+    });
+    const server = new WebhookIngressServer(makeConfig({ webhookBodyMaxBytes: 1024 }), handler, () => makeMailboxState());
+    activeServers.push(server);
+    await server.start();
+
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const response = await fetch(`http://127.0.0.1:${server.getListeningPort()}/webhooks`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: "Bearer wrong-secret",
+        },
+        body: JSON.stringify({ source: "github", event: "push" }),
+      });
+      expect(response.status).toBe(401);
+    }
+
+    const throttled = await fetch(`http://127.0.0.1:${server.getListeningPort()}/webhooks`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer wrong-secret",
+      },
+      body: JSON.stringify({ source: "github", event: "push" }),
+    });
+    expect(throttled.status).toBe(429);
+    expect(throttled.headers.get("retry-after")).toBeTruthy();
+
+    const good = await fetch(`http://127.0.0.1:${server.getListeningPort()}/webhooks`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer secret-shared",
+      },
+      body: JSON.stringify({ source: "github", event: "push", id: "evt-ok" }),
+    });
+    expect(good.status).toBe(202);
+
+    const badAgain = await fetch(`http://127.0.0.1:${server.getListeningPort()}/webhooks`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer wrong-secret",
+      },
+      body: JSON.stringify({ source: "github", event: "push" }),
+    });
+    expect(badAgain.status).toBe(401);
   });
 
   it("times out slow authenticated request bodies", async () => {

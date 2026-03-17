@@ -868,6 +868,55 @@ describe("service lifecycle decisions", () => {
     store.close();
   });
 
+  it("does not re-seed a previous secret from bootstrap config after mailbox state exists", async () => {
+    const { service, store } = await createService({
+      webhookSharedSecret: "bootstrap-secret",
+      webhookPreviousSharedSecret: "bootstrap-previous",
+    });
+    store.setWebhookMailboxState({
+      currentSecret: "persisted-secret",
+      previousSecret: null,
+      previousSecretExpiresAt: null,
+      updatedAt: "2026-03-17T00:00:00.000Z",
+    });
+
+    await (service as any).handleGetWebhookMailboxTool({
+      threadId: "thread-1",
+      turnId: "turn-1",
+      callId: "call-1",
+    });
+
+    expect(store.getWebhookMailboxState()).toMatchObject({
+      currentSecret: "persisted-secret",
+      previousSecret: null,
+      previousSecretExpiresAt: null,
+    });
+    store.close();
+  });
+
+  it("clears expired previous secrets from persisted mailbox state during initialization", async () => {
+    const { service, store } = await createService();
+    store.setWebhookMailboxState({
+      currentSecret: "persisted-secret",
+      previousSecret: "expired-secret",
+      previousSecretExpiresAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-03-17T00:00:00.000Z",
+    });
+
+    await (service as any).handleGetWebhookMailboxTool({
+      threadId: "thread-1",
+      turnId: "turn-1",
+      callId: "call-1",
+    });
+
+    expect(store.getWebhookMailboxState()).toMatchObject({
+      currentSecret: "persisted-secret",
+      previousSecret: null,
+      previousSecretExpiresAt: null,
+    });
+    store.close();
+  });
+
   it("creates a heartbeat registration and updates the local projection", async () => {
     const { dir, service, store } = await createService();
     createWorker(service, { workstreamId: "T1:root" });

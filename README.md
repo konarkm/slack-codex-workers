@@ -134,7 +134,7 @@ Key variables:
 - `WEBHOOK_BODY_READ_TIMEOUT_MS`: max time to wait for an authenticated webhook request body before returning `408`. Default: `30000`
 - `WEBHOOK_PAYLOAD_STORAGE_DIR`: optional raw webhook payload storage override. Default: `WORKSPACE_ROOT/.slack-workers/bridge/webhooks`
 - `WEBHOOK_SHARED_SECRET`: optional bootstrap secret for the shared webhook mailbox; if unset, the bridge generates and persists one on first boot
-- `WEBHOOK_PREVIOUS_SHARED_SECRET`: optional bootstrap fallback secret accepted during an initial 24-hour overlap window; ignored after persisted mailbox state exists
+- `WEBHOOK_PREVIOUS_SHARED_SECRET`: optional bootstrap fallback secret accepted during an initial 24-hour overlap window when mailbox state is first created; it is not reapplied after persisted mailbox state exists
 - `WEBHOOK_PUBLIC_BASE_URL`: external base URL used when the bridge reports the mailbox endpoint to agents, for example `https://hooks.example.com`
 
 ## Run

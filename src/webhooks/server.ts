@@ -90,7 +90,7 @@ export class WebhookIngressServer {
     try {
       const parsed = await this.normalizeRequest(req);
       if ("status" in parsed) {
-        this.respondJson(res, parsed.status, parsed.body);
+        this.respondJson(res, parsed.status, parsed.body, parsed.headers);
         return;
       }
       if (!this.canAcceptRequest()) {
@@ -117,7 +117,7 @@ export class WebhookIngressServer {
 
   private async normalizeRequest(
     req: IncomingMessage,
-  ): Promise<NormalizedWebhookIngress | { status: number; body: Record<string, unknown> }> {
+  ): Promise<NormalizedWebhookIngress | { status: number; body: Record<string, unknown>; headers?: Record<string, string> }> {
     if (req.method !== "POST") {
       return { status: 405, body: { ok: false, error: "method_not_allowed" } };
     }
@@ -131,30 +131,33 @@ export class WebhookIngressServer {
       return { status: 503, body: { ok: false, error: "mailbox_unavailable" } };
     }
     const clientKey = this.resolveClientKey(req);
-    const blockedUntil = this.getAuthBlockUntil(clientKey);
-    if (blockedUntil > Date.now()) {
-      return {
-        status: 429,
-        body: {
-          ok: false,
-          error: "auth_rate_limited",
-          retryAfterSeconds: Math.max(1, Math.ceil((blockedUntil - Date.now()) / 1000)),
-        },
-      };
-    }
     const providedSecret = this.extractSecret(req);
     const previousSecretValid = Boolean(
       mailboxState.previousSecret
       && mailboxState.previousSecretExpiresAt
       && Date.parse(mailboxState.previousSecretExpiresAt) > Date.now(),
     );
-    if (
-      !providedSecret
-      || (
-        !safeSecretEquals(providedSecret, mailboxState.currentSecret)
-        && !(previousSecretValid && safeSecretEquals(providedSecret, mailboxState.previousSecret!))
-      )
-    ) {
+    const authorized = Boolean(
+      providedSecret
+      && (
+        safeSecretEquals(providedSecret, mailboxState.currentSecret)
+        || (previousSecretValid && safeSecretEquals(providedSecret, mailboxState.previousSecret!))
+      ),
+    );
+    if (!authorized) {
+      const blockedUntil = this.getAuthBlockUntil(clientKey);
+      if (blockedUntil > Date.now()) {
+        const retryAfterSeconds = Math.max(1, Math.ceil((blockedUntil - Date.now()) / 1000));
+        return {
+          status: 429,
+          body: {
+            ok: false,
+            error: "auth_rate_limited",
+            retryAfterSeconds,
+          },
+          headers: { "retry-after": `${retryAfterSeconds}` },
+        };
+      }
       this.recordAuthFailure(clientKey);
       return { status: 401, body: { ok: false, error: "unauthorized" } };
     }
@@ -239,10 +242,6 @@ export class WebhookIngressServer {
   }
 
   private resolveClientKey(req: IncomingMessage): string {
-    const forwardedFor = req.headers["x-forwarded-for"];
-    if (typeof forwardedFor === "string" && forwardedFor.trim()) {
-      return forwardedFor.split(",")[0]!.trim();
-    }
     return req.socket.remoteAddress ?? "unknown";
   }
 
@@ -269,10 +268,13 @@ export class WebhookIngressServer {
     this.authFailures.delete(clientKey);
   }
 
-  private respondJson(res: ServerResponse, status: number, body: Record<string, unknown>): void {
+  private respondJson(res: ServerResponse, status: number, body: Record<string, unknown>, headers?: Record<string, string>): void {
     if (res.headersSent) return;
     res.statusCode = status;
     res.setHeader("content-type", "application/json; charset=utf-8");
+    for (const [key, value] of Object.entries(headers ?? {})) {
+      res.setHeader(key, value);
+    }
     res.end(`${JSON.stringify(body)}\n`);
   }
 }

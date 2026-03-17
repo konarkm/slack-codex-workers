@@ -2865,16 +2865,6 @@ export class SlackCodexWorkersService extends EventEmitter {
         this.store.setWebhookMailboxState(updated);
         return updated;
       }
-      if (!existing.previousSecret && this.config.webhookPreviousSharedSecret) {
-        const updated = {
-          ...existing,
-          previousSecret: this.config.webhookPreviousSharedSecret,
-          previousSecretExpiresAt: new Date(now + WEBHOOK_PREVIOUS_SECRET_OVERLAP_MS).toISOString(),
-          updatedAt: new Date().toISOString(),
-        };
-        this.store.setWebhookMailboxState(updated);
-        return updated;
-      }
       return existing;
     }
     const state: WebhookMailboxState = {
