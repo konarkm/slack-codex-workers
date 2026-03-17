@@ -20,14 +20,27 @@ Slack-first bridge for running many Codex app-server workers behind one Slack bo
 Implemented in this repo:
 
 - single-workspace Bolt Socket Mode bridge
-- SQLite persistence for workstream registry, worker mappings, DM sessions, defaults, cached channels, durable inbound message state, and attachment metadata
+- SQLite persistence for workstream registry, worker mappings, DM sessions, defaults, cached channels, durable inbound message state, attachment metadata, registrations, pending wakes, and webhook events
 - one shared `codex app-server` subprocess
 - root workstream bootstrap under `WORKSPACE_ROOT`
 - explicit workstream scaffolding under nested directories with `WORKSTREAM.md`, `AGENTS.md`, and local `.slack-workers/`
 - canonical workstream item landing for new public work
-- dynamic tools:
+- durable heartbeat / cron / webhook registrations with wake-self delivery and scheduled workstream spawns
+- authenticated webhook ingress with durable raw payload storage and event dedupe
+- worker dynamic tools:
   - `slack_list_channels`
   - `slack_spawn_worker`
+  - `slack_create_workstream`
+  - `slack_upload_files`
+  - `get_current_time`
+  - `set_heartbeat`
+  - `set_cron`
+  - `set_webhook`
+  - `disable_registration`
+  - `list_registrations`
+  - `get_registration`
+  - `list_wake_deliveries`
+- admin DM dynamic tools:
   - `slack_create_workstream`
   - `slack_upload_files`
   - `get_current_time`
@@ -57,9 +70,9 @@ Implemented in this repo:
 
 Not implemented yet:
 
-- registrations (`heartbeat`, `cron`, `webhook`) and wake-self delivery
-- bridge-global fired-event storage and webhook ingress
 - parent worker wait/watch loop for child workers
+- webhook/upload retention cleanup and broader repair tooling
+- richer admin/operator-wide inspection and control-plane tools
 - multi-workspace OAuth install flow
 - HTTP health/readiness endpoints
 
@@ -111,6 +124,12 @@ Key variables:
 - `ATTACHMENT_RETENTION_MS`: reserved for future retention cleanup; currently a no-op and should stay `off`/`null`
 - `SLACK_UPLOAD_TIMEOUT_MS`: timeout for outbound Slack file upload calls
 - `SLACK_UPLOAD_MAX_FILES`: max files accepted by one `slack_upload_files` tool call
+- `WORKSPACE_TIMEZONE`: timezone used for cron registrations. Defaults to the host timezone and falls back to `UTC` if invalid
+- `WEBHOOK_PORT`: local port for authenticated webhook ingress. Default: `3014`
+- `WEBHOOK_PATH`: base webhook path. Default: `/webhooks`
+- `WEBHOOK_BODY_MAX_BYTES`: max accepted webhook request body size
+- `WEBHOOK_PAYLOAD_STORAGE_DIR`: optional raw webhook payload storage override. Default: `WORKSPACE_ROOT/.slack-workers/bridge/webhooks`
+- `WEBHOOK_SOURCE_SECRETS`: comma-separated `source=secret` pairs used to authenticate ingress, for example `github=abc123,stripe=def456`
 
 ## Run
 
@@ -166,9 +185,15 @@ For a supervised production build:
 - Normal user messages sent while a thread is blocked or recovery-required are rejected and must be resent after the thread becomes usable again.
 - Attachment-only messages are supported; images are passed as images and other files are stored locally with file-path notes.
 - `slack_upload_files` uploads one or more local files from allowed roots into the current Slack conversation; worker threads upload into the active thread, and admin DMs upload into the DM conversation.
+- `get_current_time` returns the current UTC time, the configured workspace timezone, and the current local time in that timezone.
 - `slack_list_channels` only returns registered workstream channels.
 - `slack_spawn_worker` only targets registered workstream channels.
 - `slack_create_workstream` is available to workers and the admin DM. It is intended to be used after explicit user approval in the conversation, not behind a separate permission layer.
+- `set_heartbeat` only works in a public worker thread and always targets the current worker with `wake_self`.
+- `set_cron` and `set_webhook` default to `target='self'`; `target='workstream'` creates future public work in the current workstream.
+- `set_cron` expects a 5-field numeric cron string and uses `WORKSPACE_TIMEZONE` when evaluating schedules.
+- `list_wake_deliveries` returns runtime wake delivery records in scope, including queued, delivered, failed, and quarantined entries.
+- Webhook ingress listens at `WEBHOOK_PATH/:source`, requires either `Authorization: Bearer <secret>` or `x-bridge-webhook-secret`, and accepts JSON shaped like `{ event, id?, match?, payload? }`.
 - `/status` and `/health` are available in worker threads and admin DMs. Thread commands report thread-specific state; DM commands report bridge-wide state.
 - Thread `/model` and `/effort` set thread-local overrides. DM `/model` and `/effort` set the global defaults used by any thread that does not have an override.
 - `/workstream-create` is available in worker threads and admin DMs for explicit bridge-owned creation.
