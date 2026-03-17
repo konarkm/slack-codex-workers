@@ -69,6 +69,7 @@ const BLOCKED_RUNNING_TURN_POLL_INTERVAL_MS = 2_000;
 const BLOCKED_RUNNING_TURN_POLL_WINDOW_MS = 30_000;
 const REGISTRATION_POLL_INTERVAL_MS = 5_000;
 const WAKE_RETRY_MAX_ATTEMPTS = 3;
+const WEBHOOK_PREVIOUS_SECRET_OVERLAP_MS = 24 * 60 * 60 * 1000;
 const webhookShutdownErrorCode = "WEBHOOK_SHUTDOWN";
 const STATUS_REACTIONS = {
   seen: "eyes",
@@ -1722,6 +1723,7 @@ export class SlackCodexWorkersService extends EventEmitter {
     const updated: WebhookMailboxState = {
       currentSecret: generateWebhookSecret(),
       previousSecret: current.currentSecret,
+      previousSecretExpiresAt: new Date(Date.now() + WEBHOOK_PREVIOUS_SECRET_OVERLAP_MS).toISOString(),
       updatedAt: new Date().toISOString(),
     };
     this.store.setWebhookMailboxState(updated);
@@ -2840,10 +2842,34 @@ export class SlackCodexWorkersService extends EventEmitter {
   private ensureWebhookMailboxInitialized(): WebhookMailboxState {
     const existing = this.store.getWebhookMailboxState();
     if (existing?.currentSecret) {
+      const now = Date.now();
+      if (existing.previousSecret && existing.previousSecretExpiresAt) {
+        const expiresAt = Date.parse(existing.previousSecretExpiresAt);
+        if (Number.isFinite(expiresAt) && expiresAt <= now) {
+          const updated = {
+            ...existing,
+            previousSecret: null,
+            previousSecretExpiresAt: null,
+            updatedAt: new Date().toISOString(),
+          };
+          this.store.setWebhookMailboxState(updated);
+          return updated;
+        }
+      }
+      if (existing.previousSecret && !existing.previousSecretExpiresAt) {
+        const updated = {
+          ...existing,
+          previousSecretExpiresAt: new Date(now + WEBHOOK_PREVIOUS_SECRET_OVERLAP_MS).toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+        this.store.setWebhookMailboxState(updated);
+        return updated;
+      }
       if (!existing.previousSecret && this.config.webhookPreviousSharedSecret) {
         const updated = {
           ...existing,
           previousSecret: this.config.webhookPreviousSharedSecret,
+          previousSecretExpiresAt: new Date(now + WEBHOOK_PREVIOUS_SECRET_OVERLAP_MS).toISOString(),
           updatedAt: new Date().toISOString(),
         };
         this.store.setWebhookMailboxState(updated);
@@ -2854,6 +2880,9 @@ export class SlackCodexWorkersService extends EventEmitter {
     const state: WebhookMailboxState = {
       currentSecret: this.config.webhookSharedSecret ?? generateWebhookSecret(),
       previousSecret: this.config.webhookPreviousSharedSecret,
+      previousSecretExpiresAt: this.config.webhookPreviousSharedSecret
+        ? new Date(Date.now() + WEBHOOK_PREVIOUS_SECRET_OVERLAP_MS).toISOString()
+        : null,
       updatedAt: new Date().toISOString(),
     };
     this.store.setWebhookMailboxState(state);
@@ -3015,6 +3044,7 @@ function formatWebhookMailboxInfo(config: AppConfig, mailbox: WebhookMailboxStat
     `webhook_public_url: ${publicUrl ?? "(not configured)"}`,
     `webhook_path: ${config.webhookPath}`,
     `webhook_shared_secret: ${mailbox.currentSecret}`,
+    `webhook_previous_secret_expires_at: ${mailbox.previousSecretExpiresAt ?? "(none)"}`,
     `auth_header_bearer: Authorization: Bearer ${mailbox.currentSecret}`,
     `auth_header_alt: x-bridge-webhook-secret: ${mailbox.currentSecret}`,
     "json_body_shape: {\"source\":\"agentmail\",\"event\":\"email.received\",\"id\":\"optional-id\",\"match\":{\"key\":\"value\"},\"payload\":{...}}",

@@ -50,7 +50,7 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reje
   return { promise, resolve, reject };
 }
 
-function makeConfig(dir: string): AppConfig {
+function makeConfig(dir: string, overrides: Partial<AppConfig> = {}): AppConfig {
   return {
     slackBotToken: "xoxb-test",
     slackAppToken: "xapp-test",
@@ -75,17 +75,19 @@ function makeConfig(dir: string): AppConfig {
     webhookPort: nextWebhookPort++,
     webhookPath: "/webhooks",
     webhookBodyMaxBytes: 256 * 1024,
+    webhookBodyReadTimeoutMs: 30_000,
     webhookPayloadStorageDir: path.join(dir, "webhooks"),
     webhookSharedSecret: "secret-shared",
     webhookPreviousSharedSecret: "secret-previous",
     webhookPublicBaseUrl: "https://hooks.example.test",
+    ...overrides,
   };
 }
 
-async function createService() {
+async function createService(configOverrides: Partial<AppConfig> = {}) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "slack-codex-workers-service-"));
   tempDirs.push(dir);
-  const service = new SlackCodexWorkersService(makeConfig(dir)) as any;
+  const service = new SlackCodexWorkersService(makeConfig(dir, configOverrides)) as any;
   activeServices.push(service);
   const slack = {
     postThreadReply: vi.fn().mockResolvedValue("reply-ts"),
@@ -812,8 +814,57 @@ describe("service lifecycle decisions", () => {
 
     expect(result).toContain("webhook_public_url: https://hooks.example.test/webhooks");
     expect(result).toContain("webhook_shared_secret: secret-shared");
+    expect(result).toContain("webhook_previous_secret_expires_at:");
     expect(result).toContain("auth_header_bearer: Authorization: Bearer secret-shared");
     expect(result).toContain("\"source\":\"agentmail\"");
+    store.close();
+  });
+
+  it("generates a webhook mailbox secret when no bootstrap secret is configured", async () => {
+    const { service, store } = await createService({
+      webhookSharedSecret: null,
+      webhookPreviousSharedSecret: null,
+      webhookPublicBaseUrl: null,
+    });
+
+    const result = await (service as any).handleGetWebhookMailboxTool({
+      threadId: "thread-1",
+      turnId: "turn-1",
+      callId: "call-1",
+    });
+
+    const mailbox = store.getWebhookMailboxState();
+    expect(mailbox?.currentSecret).toBeTruthy();
+    expect(mailbox?.previousSecret).toBeNull();
+    expect(mailbox?.previousSecretExpiresAt).toBeNull();
+    expect(result).toContain("webhook_public_url: (not configured)");
+    store.close();
+  });
+
+  it("keeps persisted mailbox secrets instead of replacing them with bootstrap config", async () => {
+    const { service, store } = await createService({
+      webhookSharedSecret: "bootstrap-secret",
+      webhookPreviousSharedSecret: "bootstrap-previous",
+    });
+    store.setWebhookMailboxState({
+      currentSecret: "persisted-secret",
+      previousSecret: "persisted-previous",
+      previousSecretExpiresAt: "2099-01-01T00:00:00.000Z",
+      updatedAt: "2026-03-17T00:00:00.000Z",
+    });
+
+    const result = await (service as any).handleGetWebhookMailboxTool({
+      threadId: "thread-1",
+      turnId: "turn-1",
+      callId: "call-1",
+    });
+
+    expect(result).toContain("webhook_shared_secret: persisted-secret");
+    expect(store.getWebhookMailboxState()).toMatchObject({
+      currentSecret: "persisted-secret",
+      previousSecret: "persisted-previous",
+      previousSecretExpiresAt: "2099-01-01T00:00:00.000Z",
+    });
     store.close();
   });
 
@@ -1455,6 +1506,8 @@ describe("service lifecycle decisions", () => {
     expect(result).toContain("webhook_shared_secret:");
     expect(mailbox?.previousSecret).toBe("secret-shared");
     expect(mailbox?.currentSecret).not.toBe("secret-shared");
+    expect(mailbox?.previousSecretExpiresAt).toBeTruthy();
+    expect(result).toContain("webhook_previous_secret_expires_at:");
 
     await expect((service as any).handleRotateWebhookSecretTool({
       threadId: "thread-1",

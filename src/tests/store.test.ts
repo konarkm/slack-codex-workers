@@ -64,12 +64,14 @@ describe("store", () => {
     store.setWebhookMailboxState({
       currentSecret: "secret-current",
       previousSecret: "secret-previous",
+      previousSecretExpiresAt: "2026-03-18T00:00:00.000Z",
       updatedAt: "2026-03-17T00:00:00.000Z",
     });
 
     expect(store.getWebhookMailboxState()).toEqual({
       currentSecret: "secret-current",
       previousSecret: "secret-previous",
+      previousSecretExpiresAt: "2026-03-18T00:00:00.000Z",
       updatedAt: "2026-03-17T00:00:00.000Z",
     });
     store.close();

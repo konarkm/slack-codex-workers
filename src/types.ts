@@ -183,6 +183,7 @@ export interface WebhookEventRecord {
 export interface WebhookMailboxState {
   currentSecret: string;
   previousSecret: string | null;
+  previousSecretExpiresAt: string | null;
   updatedAt: string;
 }
 

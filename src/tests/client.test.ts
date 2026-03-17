@@ -53,4 +53,30 @@ describe("codex client dynamic tool routing", () => {
       success: true,
     });
   });
+
+  it("routes rotate_webhook_secret through the dynamic tool handler", async () => {
+    const respond = vi.fn().mockResolvedValue(undefined);
+    const rotateWebhookSecret = vi.fn().mockResolvedValue("webhook_shared_secret: rotated-secret");
+    const client = Object.create(CodexClient.prototype) as any;
+    client.rpc = { respond };
+    client.dynamicToolHandlers = { rotateWebhookSecret };
+
+    await client.handleDynamicToolCall("req-3", {
+      threadId: "thread-3",
+      turnId: "turn-3",
+      callId: "call-3",
+      tool: "rotate_webhook_secret",
+      arguments: {},
+    });
+
+    expect(rotateWebhookSecret).toHaveBeenCalledWith({
+      threadId: "thread-3",
+      turnId: "turn-3",
+      callId: "call-3",
+    });
+    expect(respond).toHaveBeenCalledWith("req-3", {
+      contentItems: [{ type: "inputText", text: "webhook_shared_secret: rotated-secret" }],
+      success: true,
+    });
+  });
 });

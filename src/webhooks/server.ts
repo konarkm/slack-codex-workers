@@ -5,6 +5,14 @@ import type { AppConfig } from "../config.js";
 import type { WebhookMailboxState } from "../types.js";
 
 const webhookSourcePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const AUTH_FAILURE_WINDOW_MS = 5 * 60 * 1000;
+const AUTH_FAILURE_MAX_ATTEMPTS = 10;
+const AUTH_FAILURE_BLOCK_MS = 15 * 60 * 1000;
+
+interface AuthFailureState {
+  failures: number[];
+  blockedUntil: number;
+}
 
 export function normalizeWebhookSource(value: string | null | undefined): string | null {
   const source = value?.trim() ?? "";
@@ -29,6 +37,7 @@ interface WebhookIngressResult {
 
 export class WebhookIngressServer {
   private server: Server | null = null;
+  private readonly authFailures = new Map<string, AuthFailureState>();
 
   constructor(
     private readonly config: AppConfig,
@@ -121,28 +130,54 @@ export class WebhookIngressServer {
     if (!mailboxState?.currentSecret) {
       return { status: 503, body: { ok: false, error: "mailbox_unavailable" } };
     }
+    const clientKey = this.resolveClientKey(req);
+    const blockedUntil = this.getAuthBlockUntil(clientKey);
+    if (blockedUntil > Date.now()) {
+      return {
+        status: 429,
+        body: {
+          ok: false,
+          error: "auth_rate_limited",
+          retryAfterSeconds: Math.max(1, Math.ceil((blockedUntil - Date.now()) / 1000)),
+        },
+      };
+    }
     const providedSecret = this.extractSecret(req);
+    const previousSecretValid = Boolean(
+      mailboxState.previousSecret
+      && mailboxState.previousSecretExpiresAt
+      && Date.parse(mailboxState.previousSecretExpiresAt) > Date.now(),
+    );
     if (
       !providedSecret
       || (
         !safeSecretEquals(providedSecret, mailboxState.currentSecret)
-        && !(mailboxState.previousSecret && safeSecretEquals(providedSecret, mailboxState.previousSecret))
+        && !(previousSecretValid && safeSecretEquals(providedSecret, mailboxState.previousSecret!))
       )
     ) {
+      this.recordAuthFailure(clientKey);
       return { status: 401, body: { ok: false, error: "unauthorized" } };
     }
+    this.resetAuthFailures(clientKey);
     if (!this.canAcceptRequest()) {
       return { status: 503, body: { ok: false, error: "shutting_down" } };
     }
 
     let rawBody: string;
     try {
-      rawBody = await readRequestBody(req, this.config.webhookBodyMaxBytes);
+      rawBody = await readRequestBody(req, this.config.webhookBodyMaxBytes, this.config.webhookBodyReadTimeoutMs);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return {
-        status: message === "body_too_large" ? 413 : 400,
-        body: { ok: false, error: message === "body_too_large" ? "payload_too_large" : "invalid_body" },
+        status: message === "body_too_large" ? 413 : message === "body_read_timeout" ? 408 : 400,
+        body: {
+          ok: false,
+          error: message === "body_too_large"
+            ? "payload_too_large"
+            : message === "body_read_timeout"
+              ? "request_body_timeout"
+              : "invalid_body",
+        },
       };
     }
 
@@ -203,6 +238,37 @@ export class WebhookIngressServer {
     return null;
   }
 
+  private resolveClientKey(req: IncomingMessage): string {
+    const forwardedFor = req.headers["x-forwarded-for"];
+    if (typeof forwardedFor === "string" && forwardedFor.trim()) {
+      return forwardedFor.split(",")[0]!.trim();
+    }
+    return req.socket.remoteAddress ?? "unknown";
+  }
+
+  private getAuthBlockUntil(clientKey: string): number {
+    const state = this.authFailures.get(clientKey);
+    if (!state) return 0;
+    if (state.blockedUntil > 0 && state.blockedUntil <= Date.now()) {
+      this.authFailures.delete(clientKey);
+      return 0;
+    }
+    return state.blockedUntil;
+  }
+
+  private recordAuthFailure(clientKey: string): void {
+    const now = Date.now();
+    const current = this.authFailures.get(clientKey) ?? { failures: [], blockedUntil: 0 };
+    const recentFailures = current.failures.filter((timestamp) => now - timestamp <= AUTH_FAILURE_WINDOW_MS);
+    recentFailures.push(now);
+    const blockedUntil = recentFailures.length >= AUTH_FAILURE_MAX_ATTEMPTS ? now + AUTH_FAILURE_BLOCK_MS : current.blockedUntil;
+    this.authFailures.set(clientKey, { failures: recentFailures, blockedUntil });
+  }
+
+  private resetAuthFailures(clientKey: string): void {
+    this.authFailures.delete(clientKey);
+  }
+
   private respondJson(res: ServerResponse, status: number, body: Record<string, unknown>): void {
     if (res.headersSent) return;
     res.statusCode = status;
@@ -211,18 +277,56 @@ export class WebhookIngressServer {
   }
 }
 
-async function readRequestBody(req: IncomingMessage, maxBytes: number): Promise<string> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of req) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    size += buffer.length;
-    if (size > maxBytes) {
-      throw new Error("body_too_large");
-    }
-    chunks.push(buffer);
-  }
-  return Buffer.concat(chunks).toString("utf8");
+async function readRequestBody(req: IncomingMessage, maxBytes: number, timeoutMs: number): Promise<string> {
+  return await new Promise<string>((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error("body_read_timeout"));
+    }, timeoutMs);
+
+    const cleanup = () => {
+      clearTimeout(timeout);
+      req.off("data", onData);
+      req.off("end", onEnd);
+      req.off("error", onError);
+      req.off("close", onClose);
+    };
+
+    const onData = (chunk: Buffer | string) => {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += buffer.length;
+      if (size > maxBytes) {
+        cleanup();
+        reject(new Error("body_too_large"));
+        return;
+      }
+      chunks.push(buffer);
+    };
+
+    const onEnd = () => {
+      cleanup();
+      resolve(Buffer.concat(chunks).toString("utf8"));
+    };
+
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+
+    const onClose = () => {
+      cleanup();
+      if (!req.complete) {
+        reject(new Error("invalid_body"));
+      }
+    };
+
+    req.on("data", onData);
+    req.on("end", onEnd);
+    req.on("error", onError);
+    req.on("close", onClose);
+  });
 }
 
 function extractStringMap(value: unknown): Record<string, string> | null {

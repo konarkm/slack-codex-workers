@@ -1,3 +1,4 @@
+import http from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AppConfig } from "../config.js";
 import { WebhookIngressServer } from "../webhooks/server.js";
@@ -9,6 +10,7 @@ function makeMailboxState(overrides: Partial<WebhookMailboxState> = {}): Webhook
   return {
     currentSecret: "secret-shared",
     previousSecret: "secret-previous",
+    previousSecretExpiresAt: "2099-01-01T00:00:00.000Z",
     updatedAt: "2026-03-17T00:00:00.000Z",
     ...overrides,
   };
@@ -39,6 +41,7 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     webhookPort: 0,
     webhookPath: "/webhooks",
     webhookBodyMaxBytes: 64,
+    webhookBodyReadTimeoutMs: 30_000,
     webhookPayloadStorageDir: "/tmp/webhooks",
     webhookSharedSecret: "secret-shared",
     webhookPreviousSharedSecret: "secret-previous",
@@ -82,7 +85,7 @@ describe("webhook ingress server", () => {
         "content-type": "application/json",
         authorization: "Bearer wrong-secret",
       },
-      body: JSON.stringify({ source: "unknown", event: "push" }),
+      body: JSON.stringify({ source: "unknown", event: "push", payload: { text: "x".repeat(512) } }),
     });
 
     expect(response.status).toBe(401);
@@ -309,6 +312,29 @@ describe("webhook ingress server", () => {
     }));
   });
 
+  it("rejects expired previous secrets", async () => {
+    const handler = vi.fn();
+    const server = new WebhookIngressServer(
+      makeConfig({ webhookBodyMaxBytes: 1024 }),
+      handler,
+      () => makeMailboxState({ previousSecretExpiresAt: "2026-01-01T00:00:00.000Z" }),
+    );
+    activeServers.push(server);
+    await server.start();
+
+    const response = await fetch(`http://127.0.0.1:${server.getListeningPort()}/webhooks`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer secret-previous",
+      },
+      body: JSON.stringify({ source: "weather", event: "rain.forecast" }),
+    });
+
+    expect(response.status).toBe(401);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
   it("requires source in the JSON body", async () => {
     const handler = vi.fn();
     const server = new WebhookIngressServer(makeConfig({ webhookBodyMaxBytes: 1024 }), handler, () => makeMailboxState());
@@ -326,6 +352,70 @@ describe("webhook ingress server", () => {
 
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toMatchObject({ ok: false, error: "missing_source" });
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("rate limits repeated auth failures per client", async () => {
+    const handler = vi.fn();
+    const server = new WebhookIngressServer(makeConfig({ webhookBodyMaxBytes: 1024 }), handler, () => makeMailboxState());
+    activeServers.push(server);
+    await server.start();
+
+    let throttledStatus = 0;
+    let throttledBody = "";
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const response = await fetch(`http://127.0.0.1:${server.getListeningPort()}/webhooks`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: "Bearer wrong-secret",
+        },
+        body: JSON.stringify({ source: "github", event: "push" }),
+      });
+      if (response.status === 429) {
+        throttledStatus = response.status;
+        throttledBody = await response.text();
+        break;
+      }
+      expect(response.status).toBe(401);
+    }
+
+    expect(throttledStatus).toBe(429);
+    expect(throttledBody).toContain("auth_rate_limited");
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("times out slow authenticated request bodies", async () => {
+    const handler = vi.fn();
+    const server = new WebhookIngressServer(
+      makeConfig({ webhookBodyMaxBytes: 1024, webhookBodyReadTimeoutMs: 50 }),
+      handler,
+      () => makeMailboxState(),
+    );
+    activeServers.push(server);
+    await server.start();
+
+    const response = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const req = http.request({
+        host: "127.0.0.1",
+        port: server.getListeningPort()!,
+        path: "/webhooks",
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: "Bearer secret-shared",
+        },
+      }, (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+        res.on("end", () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }));
+      });
+      req.on("error", reject);
+      req.write("{\"source\":\"github\"");
+    });
+
+    expect(response.status).toBe(408);
+    expect(response.body).toContain("request_body_timeout");
     expect(handler).not.toHaveBeenCalled();
   });
 });

@@ -36,6 +36,7 @@ const configSchema = z.object({
   webhookPort: z.number().int().positive().default(3014),
   webhookPath: z.string().min(1).default(defaultWebhookPath),
   webhookBodyMaxBytes: z.number().int().positive().default(256 * 1024),
+  webhookBodyReadTimeoutMs: z.number().int().positive().default(30_000),
   webhookPayloadStorageDir: z.string().min(1).default(path.join(defaultStateDir, "webhooks")),
   webhookSharedSecret: z.string().min(1).nullable().default(null),
   webhookPreviousSharedSecret: z.string().min(1).nullable().default(null),
@@ -74,6 +75,7 @@ export function loadConfig(): AppConfig {
     webhookPort: parseNumber(process.env.WEBHOOK_PORT, 3014),
     webhookPath: normalizeWebhookPath(process.env.WEBHOOK_PATH),
     webhookBodyMaxBytes: parseNumber(process.env.WEBHOOK_BODY_MAX_BYTES, 256 * 1024),
+    webhookBodyReadTimeoutMs: parseNumber(process.env.WEBHOOK_BODY_READ_TIMEOUT_MS, 30_000),
     webhookPayloadStorageDir: process.env.WEBHOOK_PAYLOAD_STORAGE_DIR ?? path.join(stateDir, "webhooks"),
     webhookSharedSecret: parseOptionalString(process.env.WEBHOOK_SHARED_SECRET),
     webhookPreviousSharedSecret: parseOptionalString(process.env.WEBHOOK_PREVIOUS_SHARED_SECRET),
@@ -165,11 +167,11 @@ function normalizeOptionalBaseUrl(value: string | undefined): string | null {
   try {
     const url = new URL(trimmed);
     if (url.protocol !== "http:" && url.protocol !== "https:") {
-      return null;
+      throw new Error("WEBHOOK_PUBLIC_BASE_URL must use http or https.");
     }
     return url.toString().replace(/\/+$/, "");
   } catch {
-    return null;
+    throw new Error(`Invalid WEBHOOK_PUBLIC_BASE_URL: ${trimmed}`);
   }
 }
 
