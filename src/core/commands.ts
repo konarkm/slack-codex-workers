@@ -71,6 +71,7 @@ export function helpText(scope: "dm" | "thread"): string {
   lines.push("/compact - compact this worker thread when idle");
   lines.push("/stop - request interruption of the active worker turn");
   lines.push("/recover - recover this thread only when the backing Codex thread is missing or blocked");
+  lines.push("/workstream-create <slug> [parent=<path>] [description...] - create a new workstream with explicit user approval");
   return lines.join("\n");
 }
 

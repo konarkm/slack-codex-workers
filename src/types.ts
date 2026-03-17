@@ -97,6 +97,37 @@ export interface WorkstreamRecord {
   updatedAt: string;
 }
 
+export interface PendingWorkerShellSource {
+  sourceKind: string;
+  sourceSummary: string;
+  sourceSlackChannelId?: string | null;
+  sourceSlackMessageTs?: string | null;
+  fromAddress?: string | null;
+  toAddress?: string | null;
+}
+
+export interface PendingWorkerShellRecord {
+  id: string;
+  teamId: string;
+  workstreamId: string;
+  channelId: string;
+  rootTs: string | null;
+  title: string;
+  requestItemId: string | null;
+  requestItemPath: string | null;
+  ownerUserId: string;
+  rootOwnerUserId: string;
+  settings: RuntimeSettings;
+  identity: WorkerIdentity | null;
+  parentWorkerKey: string | null;
+  source: PendingWorkerShellSource;
+  status: "pending" | "slack_created" | "thread_created" | "ready_to_start" | "failed";
+  appThreadId: string | null;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface DmSessionRecord {
   teamId: string;
   userId: string;

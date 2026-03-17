@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AppConfig } from "../config.js";
 import { SlackCodexWorkersService } from "../core/service.js";
+import { WorkstreamManager } from "../workstreams/manager.js";
 import type { DmSessionRecord, SlackMessageContext, WorkerRecord } from "../types.js";
 
 const tempDirs: string[] = [];
@@ -656,8 +657,38 @@ describe("service lifecycle decisions", () => {
       relativePath: "ops",
       channelName: "ops",
     });
-    await expect(fs.readFile(path.join(dir, "ops", "WORKSTREAM.md"), "utf8")).resolves.toContain("# ops Workstream");
-    await expect(fs.readFile(path.join(dir, "ops", "AGENTS.md"), "utf8")).resolves.toContain("Consult WORKSTREAM.md first");
+    await expect(fs.readFile(path.join(dir, "ops", "WORKSTREAM.md"), "utf8")).resolves.toContain("Slack surface: #ops");
+    await expect(fs.readFile(path.join(dir, "ops", "AGENTS.md"), "utf8")).resolves.toContain("WORKSTREAM.md");
+    await expect(fs.readFile(path.join(dir, "ops", ".slack-workers", "registrations.json"), "utf8")).resolves.toContain("[]");
+    store.close();
+  });
+
+  it("creates a workstream from a worker thread command using the current workstream as the default parent", async () => {
+    const { service, slack, store } = await createService();
+    const worker = createWorker(service, { workstreamId: "T1:root" });
+
+    await service.handleThreadCommand(worker, "workstream-create", ["ops"]);
+
+    expect(slack.createPublicChannel).toHaveBeenCalledWith("T1", "ops");
+    expect(store.getWorkstreamByRelativePath("T1", "ops")).toBeTruthy();
+    expect(slack.postThreadReply).toHaveBeenCalledWith("C1", "1.000", expect.stringContaining("Created workstream ops."));
+    store.close();
+  });
+
+  it("creates a workstream from the worker bridge tool", async () => {
+    const { service, slack, store } = await createService();
+    createDmSession(service);
+    createWorker(service, { workstreamId: "T1:root" });
+
+    const result = await service.handleCreateWorkstreamTool(
+      { slug: "research", description: "Deep investigations" },
+      { threadId: "thread-1", turnId: "turn-1", callId: "call-1" },
+    );
+
+    expect(result).toContain("Created workstream research.");
+    expect(slack.createPublicChannel).toHaveBeenCalledWith("T1", "research");
+    expect(store.getWorkstreamByRelativePath("T1", "research")).toMatchObject({ relativePath: "research" });
+    expect(slack.postTopLevelMessage).toHaveBeenCalledWith("D1", expect.stringContaining("Created workstream research."));
     store.close();
   });
 
@@ -698,11 +729,27 @@ describe("service lifecycle decisions", () => {
 
     await service.onWorkerCompleted(worker!.key, "Deploy issue is fixed.", "completed");
 
-    const itemFiles = await fs.readdir(path.join(dir, ".slack-workers", "root", "active"));
+    const itemFiles = await fs.readdir(path.join(dir, ".slack-workers", "archive"));
     expect(itemFiles.some((file) => file.startsWith("res-"))).toBe(true);
     const responseFile = itemFiles.find((file) => file.startsWith("res-"))!;
-    await expect(fs.readFile(path.join(dir, ".slack-workers", "root", "active", responseFile), "utf8")).resolves.toContain('"kind": "response"');
+    await expect(fs.readFile(path.join(dir, ".slack-workers", "archive", responseFile), "utf8")).resolves.toContain('"kind": "response"');
     store.close();
+  });
+
+  it("bootstraps the root workstream and root local protocol files", async () => {
+    const { dir, service, slack, store } = await createService();
+    store.close();
+    await fs.rm(path.join(dir, "test.db"), { force: true });
+    service.store = new (service.store.constructor as any)(path.join(dir, "test.db"));
+    service.workstreams = new WorkstreamManager(makeConfig(dir), service.store);
+
+    await service.bootstrapWorkstreams();
+
+    expect(slack.ensurePublicChannel).toHaveBeenCalledWith("T1", "general");
+    await expect(fs.access(path.join(dir, "WORKSTREAM.md"))).resolves.toBeUndefined();
+    await expect(fs.readFile(path.join(dir, "AGENTS.md"), "utf8")).resolves.toContain("WORKSTREAM.md");
+    await expect(fs.readFile(path.join(dir, ".slack-workers", "registrations.json"), "utf8")).resolves.toContain("[]");
+    await expect(fs.access(path.join(dir, ".slack-workers", "bridge"))).resolves.toBeUndefined();
   });
 
   it("ignores started work events and posts DM assistant messages without edits", async () => {

@@ -7,6 +7,8 @@ import {
   adminDynamicTools,
   adminDeveloperInstructions,
   dynamicToolCallParamsSchema,
+  slackCreateWorkstreamArgsSchema,
+  slackCreateWorkstreamToolName,
   slackListChannelsArgsSchema,
   slackListChannelsToolName,
   slackSpawnWorkerArgsSchema,
@@ -45,6 +47,7 @@ export interface DynamicToolHandlerContext {
 export interface DynamicToolHandlers {
   listChannels(args: z.infer<typeof slackListChannelsArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
   spawnWorker(args: z.infer<typeof slackSpawnWorkerArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
+  createWorkstream(args: z.infer<typeof slackCreateWorkstreamArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
   uploadFiles(args: z.infer<typeof slackUploadFilesArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
 }
 
@@ -423,6 +426,13 @@ export class CodexClient {
     if (parsed.data.tool === slackSpawnWorkerToolName) {
       const args = slackSpawnWorkerArgsSchema.parse(parsed.data.arguments);
       const text = await this.dynamicToolHandlers.spawnWorker(args, ctx);
+      await this.rpc.respond(id, { contentItems: [{ type: "inputText", text }], success: true });
+      return;
+    }
+
+    if (parsed.data.tool === slackCreateWorkstreamToolName) {
+      const args = slackCreateWorkstreamArgsSchema.parse(parsed.data.arguments);
+      const text = await this.dynamicToolHandlers.createWorkstream(args, ctx);
       await this.rpc.respond(id, { contentItems: [{ type: "inputText", text }], success: true });
       return;
     }

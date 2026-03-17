@@ -21,6 +21,7 @@ import type {
   InboundMessageKind,
   InboundMessageRecord,
   JsonRpcId,
+  PendingWorkerShellRecord,
   PendingRestartRecord,
   PendingRequestState,
   RestartTarget,
@@ -40,6 +41,15 @@ interface RenderSessionState {
 type InboundHandlingResult =
   | { status: "processed" }
   | { status: "manual_retry"; reason: string };
+
+type WorkstreamSourceInput = {
+  sourceKind: string;
+  sourceSummary: string;
+  sourceSlackChannelId?: string | null;
+  sourceSlackMessageTs?: string | null;
+  fromAddress?: string | null;
+  toAddress?: string | null;
+};
 
 interface DmCommandResult {
   response: string;
@@ -79,6 +89,7 @@ export class SlackCodexWorkersService extends EventEmitter {
     this.codex.registerDynamicToolHandlers({
       listChannels: async (args, ctx) => this.handleListChannelsTool(args.query ?? "", ctx),
       spawnWorker: async (args, ctx) => this.handleSpawnWorkerTool(args, ctx),
+      createWorkstream: async (args, ctx) => this.handleCreateWorkstreamTool(args, ctx),
       uploadFiles: async (args, ctx) => this.handleUploadFilesTool(args, ctx),
     });
     this.codex.registerInteractiveRequestHandler(async (request) => this.handleInteractiveRequest(request));
@@ -332,11 +343,21 @@ export class SlackCodexWorkersService extends EventEmitter {
 
     const existing = this.store.getWorker(context.teamId, context.channelId, context.ts);
     if (existing) {
+      const worker = this.ensureWorkerWorkstream(this.ensureWorkerIdentity(existing));
       this.store.updateInboundMessageProgress(record.key, {
-        workerKey: existing.key,
-        appThreadId: existing.appThreadId,
-        turnId: existing.activeTurnId,
+        workerKey: worker.key,
+        appThreadId: worker.appThreadId,
+        turnId: worker.activeTurnId,
       });
+      if (!worker.activeTurnId && worker.status === "idle" && worker.lastInboundMessageTs === context.ts) {
+        const turnInput = await this.toTurnInput(context, record.key, true);
+        const turnId = await this.startWorkerTurn(worker, turnInput);
+        this.store.updateInboundMessageProgress(record.key, {
+          workerKey: worker.key,
+          appThreadId: worker.appThreadId,
+          turnId,
+        });
+      }
       return { status: "processed" };
     }
 
@@ -346,7 +367,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       channelId: context.channelId,
       existingRootTs: context.ts,
       title: buildRequestTitle(context.text),
-      itemBody: context.text,
+      itemBody: turnInput.text,
       turnInput,
       rootOwnerUserId: context.userId,
       ownerUserId: context.userId,
@@ -356,10 +377,11 @@ export class SlackCodexWorkersService extends EventEmitter {
         sourceSummary: `${context.username} started a new request in #${context.channelName ?? context.channelId}`,
         sourceSlackChannelId: context.channelId,
         sourceSlackMessageTs: context.ts,
+        toAddress: formatWorkstreamAddress(workstream),
       },
       identity: null,
       parentWorkerKey: null,
-      useExistingRootMessage: true,
+      shellId: record.key,
     });
     const created = this.store.getWorker(context.teamId, context.channelId, context.ts);
     if (created) {
@@ -628,30 +650,61 @@ export class SlackCodexWorkersService extends EventEmitter {
     rootOwnerUserId: string;
     ownerUserId: string;
     runtimeSettings: RuntimeSettings;
-    source: {
-      sourceKind: string;
-      sourceSummary: string;
-      sourceSlackChannelId?: string | null;
-      sourceSlackMessageTs?: string | null;
-    };
+    source: WorkstreamSourceInput;
     identity: WorkerRecord["identity"] | null;
     parentWorkerKey: string | null;
     existingRootTs?: string;
-    useExistingRootMessage?: boolean;
     mode?: "fresh" | "fork";
     surfaceFailuresInThread?: boolean;
+    shellId?: string;
   }): Promise<string> {
-    const requestItem = await this.workstreams.createRequestItem(input.workstream, {
-      title: input.title,
-      body: input.itemBody,
-      source: input.source,
-    });
+    const shellId = input.shellId ?? `${input.workstream.teamId}:${input.channelId}:${input.existingRootTs ?? Date.now().toString()}:${input.title}`;
+    let shell = this.store.getPendingWorkerShell(shellId);
+    if (!shell) {
+      shell = this.store.upsertPendingWorkerShell({
+        id: shellId,
+        teamId: input.workstream.teamId,
+        workstreamId: input.workstream.id,
+        channelId: input.channelId,
+        rootTs: input.existingRootTs ?? null,
+        title: input.title,
+        requestItemId: null,
+        requestItemPath: null,
+        ownerUserId: input.ownerUserId,
+        rootOwnerUserId: input.rootOwnerUserId,
+        settings: input.runtimeSettings,
+        identity: input.identity ?? assignWorkerIdentity(this.store.listWorkers()),
+        parentWorkerKey: input.parentWorkerKey,
+        source: input.source,
+        status: "pending",
+        appThreadId: null,
+        lastError: null,
+      });
+    }
+    if (!shell.requestItemId || !shell.requestItemPath) {
+      const requestItem = await this.workstreams.createRequestItem(input.workstream, {
+        title: input.title,
+        body: input.itemBody,
+        source: input.source,
+      });
+      shell = this.store.upsertPendingWorkerShell({
+        ...shell,
+        requestItemId: requestItem.id,
+        requestItemPath: requestItem.filePath,
+        lastError: null,
+      });
+    }
 
-    const identity = input.identity ?? assignWorkerIdentity(this.store.listWorkers());
-    const rootTs = input.existingRootTs
+    const rootTs = shell.rootTs
       ?? await this.enqueueSlackWrite(`spawn:${input.workstream.id}:${input.channelId}`, async () =>
-        this.slack.postTopLevelMessage(input.channelId, input.title, identity),
+        this.slack.postTopLevelMessage(input.channelId, input.title, shell!.identity),
       );
+    shell = this.store.upsertPendingWorkerShell({
+      ...shell,
+      rootTs,
+      status: "slack_created",
+      lastError: null,
+    });
 
     let threadId: string;
     try {
@@ -669,8 +722,19 @@ export class SlackCodexWorkersService extends EventEmitter {
         });
       }
       const message = error instanceof Error ? error.message : String(error);
+      this.store.upsertPendingWorkerShell({
+        ...shell,
+        status: "failed",
+        lastError: message,
+      });
       throw new Error(input.surfaceFailuresInThread ? `failed to create the backing worker: ${message}` : message);
     }
+    shell = this.store.upsertPendingWorkerShell({
+      ...shell,
+      status: "thread_created",
+      appThreadId: threadId,
+      lastError: null,
+    });
 
     const worker = this.store.upsertWorker({
       key: `${input.workstream.teamId}:${input.channelId}:${rootTs}`,
@@ -687,20 +751,38 @@ export class SlackCodexWorkersService extends EventEmitter {
       currentAgentItemId: null,
       currentWorklogSlackTs: null,
       settings: input.runtimeSettings,
-      identity,
+      identity: shell.identity,
       parentWorkerKey: input.parentWorkerKey,
-      requestItemId: requestItem.id,
-      requestItemPath: requestItem.filePath,
+      requestItemId: shell.requestItemId,
+      requestItemPath: shell.requestItemPath,
       lastError: null,
       lastInboundMessageTs: rootTs,
       pendingRequest: null,
     });
-    await this.workstreams.bindRequestItemToWorker(input.workstream, requestItem, worker);
+    await this.workstreams.bindRequestItemToWorker(
+      input.workstream,
+      {
+        id: shell.requestItemId!,
+        filePath: shell.requestItemPath!,
+        title: shell.title,
+        body: input.itemBody,
+        source: shell.source,
+        createdAt: shell.createdAt,
+      },
+      worker,
+    );
+    this.store.upsertPendingWorkerShell({
+      ...shell,
+      status: "ready_to_start",
+      lastError: null,
+    });
     await this.setWorkerIdentityReaction(worker);
     await this.setThreadStatusReaction(input.channelId, rootTs, STATUS_REACTIONS.seen);
 
     try {
-      return await this.startWorkerTurn(worker, input.turnInput);
+      const turnId = await this.startWorkerTurn(worker, input.turnInput);
+      this.store.deletePendingWorkerShell(shell.id);
+      return turnId;
     } catch (error) {
       if (input.surfaceFailuresInThread) {
         const message = error instanceof Error ? error.message : String(error);
@@ -709,6 +791,11 @@ export class SlackCodexWorkersService extends EventEmitter {
           lastError: message,
         });
         await this.postWorkerSystemMessage(worker, `Worker startup failed: ${message}`);
+        this.store.upsertPendingWorkerShell({
+          ...shell,
+          status: "failed",
+          lastError: message,
+        });
       }
       throw error;
     }
@@ -891,11 +978,14 @@ export class SlackCodexWorkersService extends EventEmitter {
         const responseBody = status === "completed"
           ? finalAssistantText
           : `Turn ${status}.${error ? ` ${error}` : ""}`;
-        await this.workstreams.appendResponseItem(workstream, worker, {
+        const responsePath = await this.workstreams.appendResponseItem(workstream, worker, {
           status,
           body: responseBody,
           requestItemId: worker.requestItemId,
         });
+        if (status === "completed" || status === "failed") {
+          await this.workstreams.archiveWorkerItems(workstream, worker, responsePath, status);
+        }
       }
     }
 
@@ -1115,6 +1205,8 @@ export class SlackCodexWorkersService extends EventEmitter {
         const recovered = await this.recoverWorker(worker);
         response = `Created a fresh backing Codex thread for this Slack conversation.\nThread: ${recovered.appThreadId}`;
       }
+    } else if (name === "workstream-create") {
+      response = await this.createWorkstreamFromThreadArgs(worker, args);
     } else {
       response = "This command is only available in DMs.";
     }
@@ -1231,34 +1323,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       return { response: `Canceled queued restart: ${queued.target}` };
     }
     if (name === "workstream-create") {
-      const parsed = parseWorkstreamCreateArgs(args);
-      if (!parsed) {
-        return { response: "Usage: /workstream-create <slug> [parent=<path>] [description...]" };
-      }
-      const existingChannel = await this.slack.findPublicChannelByName(session.teamId, parsed.slug);
-      if (existingChannel) {
-        return { response: `Slack channel #${existingChannel.name} already exists. Workstream creation refuses to auto-link existing channels in this version.` };
-      }
-      try {
-        const workstream = await this.workstreams.createWorkstream(
-          session.teamId,
-          {
-            slug: parsed.slug,
-            parentRelativePath: parsed.parentRelativePath,
-            description: parsed.description,
-          },
-          async () => this.slack.createPublicChannel(session.teamId, parsed.slug),
-        );
-        return {
-          response: [
-            `Created workstream ${formatWorkstreamAddress(workstream)}.`,
-            `channel: #${workstream.channelName}`,
-            `path: ${workstream.relativePath || "."}`,
-          ].join("\n"),
-        };
-      } catch (error) {
-        return { response: `Workstream creation failed: ${error instanceof Error ? error.message : String(error)}` };
-      }
+      return { response: await this.createWorkstreamFromDmArgs(session, args) };
     }
     return { response: "Unknown command. Use /help" };
   }
@@ -1479,11 +1544,14 @@ export class SlackCodexWorkersService extends EventEmitter {
           sourceSummary: `spawned from ${parent.key}`,
           sourceSlackChannelId: parent.channelId,
           sourceSlackMessageTs: parent.rootTs,
+          fromAddress: formatWorkstreamAddress(parentWorkstream) + `/${parent.key}`,
+          toAddress: formatWorkstreamAddress(targetWorkstream),
         },
         identity: childIdentity,
         parentWorkerKey: parent.key,
         mode: args.mode,
         surfaceFailuresInThread: true,
+        shellId: ctx.callId,
       });
       return `Spawned child worker in ${targetChannel.channelId} with title "${args.title}".`;
     } catch (error) {
@@ -1493,6 +1561,39 @@ export class SlackCodexWorkersService extends EventEmitter {
       }
       return `Child worker startup failed: ${message}`;
     }
+  }
+
+  private async handleCreateWorkstreamTool(
+    args: { slug: string; parent?: string | undefined; description?: string | undefined },
+    ctx: DynamicToolHandlerContext,
+  ): Promise<string> {
+    const worker = this.store.getWorkerByAppThreadId(ctx.threadId);
+    if (worker) {
+      return this.createWorkstreamForContext({
+        teamId: worker.teamId,
+        defaultParentRelativePath: worker.workstreamId
+          ? (this.store.getWorkstreamById(worker.workstreamId)?.relativePath ?? null)
+          : null,
+        slug: args.slug,
+        parentRelativePath: args.parent,
+        description: args.description,
+        initiatedFrom: `worker:${worker.key}`,
+      });
+    }
+
+    const session = this.store.listDmSessions().find((candidate) => candidate.appThreadId === ctx.threadId) ?? null;
+    if (session) {
+      return this.createWorkstreamForContext({
+        teamId: session.teamId,
+        defaultParentRelativePath: null,
+        slug: args.slug,
+        parentRelativePath: args.parent,
+        description: args.description,
+        initiatedFrom: `dm:${session.userId}`,
+      });
+    }
+
+    return "No Slack context found for workstream creation.";
   }
 
   private async handleUploadFilesTool(
@@ -1517,6 +1618,99 @@ export class SlackCodexWorkersService extends EventEmitter {
     }
 
     return "No Slack upload context found.";
+  }
+
+  private async createWorkstreamFromThreadArgs(worker: WorkerRecord, args: string[]): Promise<string> {
+    const parsed = parseWorkstreamCreateArgs(args);
+    if (!parsed) {
+      return "Usage: /workstream-create <slug> [parent=<path>] [description...]";
+    }
+    const currentWorkstream = worker.workstreamId ? this.store.getWorkstreamById(worker.workstreamId) : null;
+    return this.createWorkstreamForContext({
+      teamId: worker.teamId,
+      defaultParentRelativePath: currentWorkstream?.relativePath ?? null,
+      slug: parsed.slug,
+      parentRelativePath: parsed.parentRelativePath,
+      description: parsed.description,
+      initiatedFrom: `worker:${worker.key}`,
+    });
+  }
+
+  private async createWorkstreamFromDmArgs(session: DmSessionRecord, args: string[]): Promise<string> {
+    const parsed = parseWorkstreamCreateArgs(args);
+    if (!parsed) {
+      return "Usage: /workstream-create <slug> [parent=<path>] [description...]";
+    }
+    return this.createWorkstreamForContext({
+      teamId: session.teamId,
+      defaultParentRelativePath: null,
+      slug: parsed.slug,
+      parentRelativePath: parsed.parentRelativePath,
+      description: parsed.description,
+      initiatedFrom: `dm:${session.userId}`,
+      excludeAdminChannelId: session.channelId,
+    });
+  }
+
+  private async createWorkstreamForContext(input: {
+    teamId: string;
+    defaultParentRelativePath: string | null;
+    slug: string;
+    parentRelativePath?: string | null;
+    description?: string | null;
+    initiatedFrom: string;
+    excludeAdminChannelId?: string | null;
+  }): Promise<string> {
+    const existingChannel = await this.slack.findPublicChannelByName(input.teamId, input.slug);
+    if (existingChannel) {
+      return `Slack channel #${existingChannel.name} already exists. Workstream creation refuses to auto-link existing channels in this version.`;
+    }
+    try {
+      const workstream = await this.workstreams.createWorkstream(
+        input.teamId,
+        {
+          slug: input.slug,
+          parentRelativePath: input.parentRelativePath ?? input.defaultParentRelativePath,
+          description: input.description ?? null,
+        },
+        async () => this.slack.createPublicChannel(input.teamId, input.slug),
+      );
+      const message = [
+        `Created workstream ${formatWorkstreamAddress(workstream)}.`,
+        `channel: #${workstream.channelName}`,
+        `path: ${workstream.relativePath || "."}`,
+      ].join("\n");
+      await this.notifyAdminControlSurface(
+        input.teamId,
+        `${message}\ninitiated_from: ${input.initiatedFrom}`,
+        input.excludeAdminChannelId ?? null,
+      );
+      return message;
+    } catch (error) {
+      const rawMessage = error instanceof Error ? error.message : String(error);
+      const message = rawMessage.includes("was created and preserved")
+        ? rawMessage
+        : `Workstream creation failed: ${rawMessage}`;
+      await this.notifyAdminControlSurface(
+        input.teamId,
+        `${message}\ninitiated_from: ${input.initiatedFrom}`,
+        input.excludeAdminChannelId ?? null,
+      );
+      return message;
+    }
+  }
+
+  private async notifyAdminControlSurface(teamId: string, message: string, excludeChannelId: string | null = null): Promise<void> {
+    const sessions = this.store.listDmSessions().filter((session) => (
+      session.teamId === teamId
+      && this.config.adminUserIds.includes(session.userId)
+      && session.channelId !== excludeChannelId
+    ));
+    for (const session of sessions) {
+      await this.enqueueSlackWrite(this.getDmQueueKey(session.teamId, session.userId), async () => {
+        await this.slack.postTopLevelMessage(session.channelId, renderSystemMessage(message));
+      });
+    }
   }
 
   private async handleInteractiveRequest(request: InteractiveRequest): Promise<void> {

@@ -16,6 +16,8 @@ interface RequestItemSource {
   sourceSummary: string;
   sourceSlackChannelId?: string | null;
   sourceSlackMessageTs?: string | null;
+  fromAddress?: string | null;
+  toAddress?: string | null;
 }
 
 interface RequestItemRef {
@@ -24,6 +26,7 @@ interface RequestItemRef {
   title: string;
   body: string;
   source: RequestItemSource;
+  createdAt: string;
 }
 
 interface ItemMetadata {
@@ -31,9 +34,10 @@ interface ItemMetadata {
   kind: "request" | "response";
   status: string;
   workstream: string;
+  from: string | null;
+  to: string | null;
   claimed_by: string | null;
   bridge_worker_key: string | null;
-  app_thread_id: string | null;
   source_kind: string;
   source_summary: string;
   source_slack_channel_id: string | null;
@@ -133,7 +137,9 @@ export class WorkstreamManager {
       if (localCreated) {
         // Past public exposure, keep the filesystem scaffold in place for repair instead of rolling it back.
       }
-      throw error;
+      throw new Error(
+        `Slack channel #${channel.name} was created and preserved, but workstream registration failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 
@@ -158,9 +164,10 @@ export class WorkstreamManager {
       kind: "request",
       status: "active",
       workstream: formatWorkstreamAddress(workstream),
+      from: input.source.fromAddress ?? null,
+      to: input.source.toAddress ?? formatWorkstreamAddress(workstream),
       claimed_by: null,
       bridge_worker_key: null,
-      app_thread_id: null,
       source_kind: input.source.sourceKind,
       source_summary: input.source.sourceSummary,
       source_slack_channel_id: input.source.sourceSlackChannelId ?? null,
@@ -175,6 +182,7 @@ export class WorkstreamManager {
       title: input.title,
       body: input.body,
       source: input.source,
+      createdAt: metadata.created_at,
     };
   }
 
@@ -188,14 +196,15 @@ export class WorkstreamManager {
       kind: "request",
       status: "active",
       workstream: formatWorkstreamAddress(workstream),
+      from: item.source.fromAddress ?? null,
+      to: item.source.toAddress ?? formatWorkstreamAddress(workstream),
       claimed_by: formatWorkerAddress(workstream, worker.key),
       bridge_worker_key: worker.key,
-      app_thread_id: worker.appThreadId,
       source_kind: item.source.sourceKind,
       source_summary: item.source.sourceSummary,
       source_slack_channel_id: item.source.sourceSlackChannelId ?? null,
       source_slack_message_ts: item.source.sourceSlackMessageTs ?? null,
-      created_at: new Date().toISOString(),
+      created_at: item.createdAt,
       updated_at: new Date().toISOString(),
     };
     await fs.writeFile(item.filePath, renderItemDocument(metadata, item.title, item.body));
@@ -221,9 +230,10 @@ export class WorkstreamManager {
       kind: "response",
       status: input.status,
       workstream: formatWorkstreamAddress(workstream),
+      from: formatWorkerAddress(workstream, worker.key),
+      to: formatWorkstreamAddress(workstream),
       claimed_by: formatWorkerAddress(workstream, worker.key),
       bridge_worker_key: worker.key,
-      app_thread_id: worker.appThreadId,
       source_kind: "worker-response",
       source_summary: requestSummary,
       source_slack_channel_id: worker.channelId,
@@ -234,6 +244,18 @@ export class WorkstreamManager {
     const title = input.requestItemId ? `Response to ${input.requestItemId}` : `Worker response (${input.status})`;
     await fs.writeFile(filePath, renderItemDocument(metadata, title, input.body.trim() || "(empty response)"));
     return filePath;
+  }
+
+  async archiveWorkerItems(
+    workstream: WorkstreamRecord,
+    worker: WorkerRecord,
+    responseFilePath: string,
+    finalStatus: "completed" | "failed",
+  ): Promise<void> {
+    if (worker.requestItemPath) {
+      await this.archiveItem(workstream, worker.requestItemPath, finalStatus);
+    }
+    await this.archiveItem(workstream, responseFilePath, finalStatus);
   }
 
   getWorkstreamDir(relativePath: string): string {
@@ -249,10 +271,15 @@ export class WorkstreamManager {
   }
 
   private async ensureRootLayout(): Promise<void> {
+    await fs.mkdir(this.getRootHiddenDir(), { recursive: true });
     await fs.mkdir(this.getBridgeStateDir(), { recursive: true });
     await this.migrateLegacyRootItemBuckets();
     await fs.mkdir(this.getWorkstreamActiveDir(ROOT_WORKSTREAM_PATH), { recursive: true });
     await fs.mkdir(this.getWorkstreamArchiveDir(ROOT_WORKSTREAM_PATH), { recursive: true });
+    await writeFileIfMissing(
+      this.getWorkstreamRegistrationsProjectionPath(ROOT_WORKSTREAM_PATH),
+      "[]\n",
+    );
     await writeFileIfMissing(
       path.join(this.config.workspaceRoot, "WORKSTREAM.md"),
       renderRootWorkstreamScaffold(),
@@ -271,6 +298,10 @@ export class WorkstreamManager {
     await fs.mkdir(path.join(dirPath, ".slack-workers", "active"), { recursive: true });
     await fs.mkdir(path.join(dirPath, ".slack-workers", "archive"), { recursive: true });
     await writeFileIfMissing(
+      this.getWorkstreamRegistrationsProjectionPath(relativePath),
+      "[]\n",
+    );
+    await writeFileIfMissing(
       path.join(dirPath, "WORKSTREAM.md"),
       renderChildWorkstreamScaffold(relativePath, input),
     );
@@ -280,27 +311,58 @@ export class WorkstreamManager {
     );
   }
 
-  private getBridgeStateDir(): string {
+  private getRootHiddenDir(): string {
     return path.join(this.config.workspaceRoot, ".slack-workers");
+  }
+
+  private getBridgeStateDir(): string {
+    return path.join(this.getRootHiddenDir(), "bridge");
   }
 
   private getWorkstreamActiveDir(relativePath: string): string {
     if (!relativePath) {
-      return path.join(this.getBridgeStateDir(), "root", "active");
+      return path.join(this.getRootHiddenDir(), "active");
     }
     return path.join(this.getWorkstreamDir(relativePath), ".slack-workers", "active");
   }
 
   private getWorkstreamArchiveDir(relativePath: string): string {
     if (!relativePath) {
-      return path.join(this.getBridgeStateDir(), "root", "archive");
+      return path.join(this.getRootHiddenDir(), "archive");
     }
     return path.join(this.getWorkstreamDir(relativePath), ".slack-workers", "archive");
   }
 
+  private getWorkstreamRegistrationsProjectionPath(relativePath: string): string {
+    if (!relativePath) {
+      return path.join(this.getRootHiddenDir(), "registrations.json");
+    }
+    return path.join(this.getWorkstreamDir(relativePath), ".slack-workers", "registrations.json");
+  }
+
+  private async archiveItem(workstream: WorkstreamRecord, filePath: string, finalStatus: string): Promise<void> {
+    if (!(await pathExists(filePath))) return;
+    const raw = await fs.readFile(filePath, "utf8");
+    const parsed = parseItemDocument(raw);
+    const metadata = {
+      ...parsed.metadata,
+      status: finalStatus,
+      updated_at: new Date().toISOString(),
+    };
+    const archiveDir = this.getWorkstreamArchiveDir(workstream.relativePath);
+    await fs.mkdir(archiveDir, { recursive: true });
+    const archivedPath = path.join(archiveDir, path.basename(filePath));
+    await fs.writeFile(archivedPath, renderItemDocument(metadata, parsed.title, parsed.body));
+    if (archivedPath !== filePath) {
+      await fs.rm(filePath, { force: true });
+    }
+  }
+
   private async migrateLegacyRootItemBuckets(): Promise<void> {
-    const stateDir = this.getBridgeStateDir();
+    const stateDir = this.getRootHiddenDir();
     const legacyToNext: Array<[string, string]> = [
+      [path.join(stateDir, "root", "active"), this.getWorkstreamActiveDir(ROOT_WORKSTREAM_PATH)],
+      [path.join(stateDir, "root", "archive"), this.getWorkstreamArchiveDir(ROOT_WORKSTREAM_PATH)],
       [path.join(stateDir, "root-active"), this.getWorkstreamActiveDir(ROOT_WORKSTREAM_PATH)],
       [path.join(stateDir, "root-archive"), this.getWorkstreamArchiveDir(ROOT_WORKSTREAM_PATH)],
     ];
@@ -345,9 +407,13 @@ function renderRootWorkstreamScaffold(): string {
     "",
     "Purpose: top-level generalist workstream for requests that do not belong in a more specialized child workstream yet.",
     "",
+    "What belongs here: cross-cutting, ambiguous, or newly arriving work before it is split into a more specialized child workstream.",
+    "",
     "Slack surface: #general",
     "",
     "Notification policy: visible in-thread, with the final settled response mentioning the root request owner.",
+    "",
+    "Local protocol pointers: root request and response items live in .slack-workers/{active,archive}; local read-only projections such as registrations.json live alongside them.",
     "",
     "Continuity: use local workstream files, external systems, and prior Codex thread history as needed.",
     "",
@@ -364,11 +430,15 @@ function renderChildWorkstreamScaffold(
     "",
     `Purpose: ${input.description ?? "Fill in the purpose of this workstream."}`,
     "",
+    "What belongs here: define the kinds of work, requests, and notes that should land in this workstream and what should be pushed to a child workstream instead.",
+    "",
     `Slack surface: #${input.channelName}`,
     "",
     `Parent workstream: ${input.parentRelativePath || "root"}`,
     "",
     "Notification policy: visible in-thread, with the final settled response mentioning the request owner unless the worker decides otherwise for that turn.",
+    "",
+    "Local protocol pointers: local request and response items live in .slack-workers/{active,archive}; local read-only projections such as registrations.json live alongside them.",
     "",
     "Continuity: keep durable context in local files and external systems instead of relying on one Slack thread.",
     "",
@@ -397,6 +467,28 @@ function renderItemDocument(metadata: ItemMetadata, title: string, body: string)
     body.trim() || "(empty)",
     "",
   ].join("\n");
+}
+
+function parseItemDocument(value: string): { metadata: ItemMetadata; title: string; body: string } {
+  const prefix = `${ITEM_METADATA_PREFIX}\n`;
+  const suffix = `\n${ITEM_METADATA_SUFFIX}`;
+  if (!value.startsWith(prefix)) {
+    throw new Error("Item document missing metadata prefix");
+  }
+  const endIndex = value.indexOf(suffix);
+  if (endIndex < 0) {
+    throw new Error("Item document missing metadata suffix");
+  }
+  const metadataJson = value.slice(prefix.length, endIndex);
+  const remainder = value.slice(endIndex + suffix.length).trimStart();
+  const titleLine = remainder.split(/\r?\n/g)[0] ?? "";
+  const title = titleLine.replace(/^#\s*/, "").trim() || "Untitled";
+  const body = remainder.split(/\r?\n/g).slice(2).join("\n").trim();
+  return {
+    metadata: JSON.parse(metadataJson) as ItemMetadata,
+    title,
+    body,
+  };
 }
 
 async function writeFileIfMissing(filePath: string, contents: string): Promise<void> {

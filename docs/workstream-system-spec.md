@@ -187,16 +187,27 @@ No child workstreams or departments are created by default.
 
 ### Root `.slack-workers/`
 
-The root hidden directory is for bridge-global infrastructure only.
+The root hidden directory is split between:
 
-It should contain the canonical global runtime state, including:
+- root-workstream local protocol/runtime state at the top level
+- nested bridge-global infrastructure under a dedicated infra subdirectory
 
-- bridge-global DB
+This keeps the root workstream shaped like a normal workstream while still preserving a clear bridge-owned infra boundary.
+
+At the top level it should contain the root workstream's local protocol/runtime state, including:
+
+- `active/`
+- `archive/`
+- local read-only projections such as `registrations.json`
+
+Under a nested bridge infra directory, it should contain the canonical global runtime state, including:
+
+- bridge-global DB, currently under `bridge/bridge.sqlite`
 - fired-event payload storage
 - logs
 - runtime/global infra state as needed
 
-It should not contain:
+The bridge infra subtree should not contain:
 
 - workstream directories
 - business/domain records
@@ -278,6 +289,15 @@ When a new workstream is created, the bridge should generate:
 Workstream creation is bridge-owned and explicit.
 
 Only the user creates workstreams. Agents may suggest them.
+
+In practice, workstream creation is exposed as a bridge tool that may be invoked from:
+
+- worker/public threads
+- the admin DM/control surface
+
+Agents should only invoke that tool after the user has explicitly approved creating the workstream in the current conversation.
+
+This is conversational/tool guidance, not a separate permission subsystem.
 
 ### Inputs
 
@@ -617,6 +637,15 @@ Disabled registrations should remain inspectable.
 `list_registrations()` should default to the current worker and its immediate workstream context, not parent/global scope.
 
 `get_registration()` returns the full canonical registration details.
+
+### Canonical Persistence
+
+Canonical registration state is bridge-global and should live in bridge-owned infrastructure storage.
+
+Current intended shape:
+
+- canonical registrations live in bridge-global DB-backed infra under the nested bridge infra subtree
+- each workstream gets a local read-only JSON projection such as `registrations.json`
 
 ### Local Projection
 

@@ -8,7 +8,7 @@ import type { ReasoningEffort, RuntimeSettings } from "./types.js";
 loadDotEnv();
 
 const fallbackWorkspaceRoot = process.cwd();
-const defaultStateDir = path.join(fallbackWorkspaceRoot, ".slack-workers");
+const defaultStateDir = path.join(fallbackWorkspaceRoot, ".slack-workers", "bridge");
 
 const configSchema = z.object({
   slackBotToken: z.string().min(1),
@@ -66,13 +66,15 @@ export function loadConfig(): AppConfig {
 }
 
 function prepareDefaultStateDir(workspaceRoot: string, allowLegacyMigration: boolean): string {
-  const preferred = path.join(workspaceRoot, ".slack-workers");
+  const rootHiddenDir = path.join(workspaceRoot, ".slack-workers");
+  const preferred = path.join(rootHiddenDir, "bridge");
   const legacy = path.join(workspaceRoot, ".slack-codex-workers");
   if (
     allowLegacyMigration
-    && !fs.existsSync(preferred)
+    && !fs.existsSync(rootHiddenDir)
     && fs.existsSync(legacy)
   ) {
+    fs.mkdirSync(rootHiddenDir, { recursive: true });
     fs.renameSync(legacy, preferred);
   }
   if (!fs.existsSync(preferred)) {

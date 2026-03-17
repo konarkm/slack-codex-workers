@@ -7,8 +7,10 @@ import type {
   InboundMessageRecord,
   InboundMessageStatus,
   MessageAttachmentRecord,
+  PendingWorkerShellRecord,
   PendingRestartRecord,
   PendingRequestState,
+  PendingWorkerShellSource,
   RuntimeSettings,
   SessionStatus,
   TeamDefaults,
@@ -57,6 +59,23 @@ function parseIdentity(value: string | null | undefined): WorkerIdentity | null 
     };
   } catch {
     return null;
+  }
+}
+
+function parsePendingWorkerShellSource(value: string | null | undefined): PendingWorkerShellSource {
+  if (!value) return { sourceKind: "unknown", sourceSummary: "unknown" };
+  try {
+    const parsed = JSON.parse(value) as Partial<PendingWorkerShellSource>;
+    return {
+      sourceKind: typeof parsed.sourceKind === "string" ? parsed.sourceKind : "unknown",
+      sourceSummary: typeof parsed.sourceSummary === "string" ? parsed.sourceSummary : "unknown",
+      sourceSlackChannelId: typeof parsed.sourceSlackChannelId === "string" ? parsed.sourceSlackChannelId : null,
+      sourceSlackMessageTs: typeof parsed.sourceSlackMessageTs === "string" ? parsed.sourceSlackMessageTs : null,
+      fromAddress: typeof parsed.fromAddress === "string" ? parsed.fromAddress : null,
+      toAddress: typeof parsed.toAddress === "string" ? parsed.toAddress : null,
+    };
+  } catch {
+    return { sourceKind: "unknown", sourceSummary: "unknown" };
   }
 }
 
@@ -120,6 +139,28 @@ export class Store {
         updated_at TEXT NOT NULL,
         UNIQUE(team_id, relative_path),
         UNIQUE(team_id, channel_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS pending_worker_shells (
+        id TEXT PRIMARY KEY,
+        team_id TEXT NOT NULL,
+        workstream_id TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
+        root_ts TEXT,
+        title TEXT NOT NULL,
+        request_item_id TEXT,
+        request_item_path TEXT,
+        owner_user_id TEXT NOT NULL,
+        root_owner_user_id TEXT NOT NULL,
+        settings_json TEXT NOT NULL,
+        identity_json TEXT,
+        parent_worker_key TEXT,
+        source_json TEXT NOT NULL,
+        status TEXT NOT NULL,
+        app_thread_id TEXT,
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS dm_sessions (
@@ -262,8 +303,8 @@ export class Store {
         settings_json=excluded.settings_json,
         identity_json=excluded.identity_json,
         parent_worker_key=excluded.parent_worker_key,
-        request_item_id=excluded.request_item_id,
-        request_item_path=excluded.request_item_path,
+      request_item_id=excluded.request_item_id,
+      request_item_path=excluded.request_item_path,
         last_error=excluded.last_error,
         last_inbound_message_ts=excluded.last_inbound_message_ts,
         pending_request_json=excluded.pending_request_json,
@@ -522,6 +563,77 @@ export class Store {
     return this.getWorkstreamById(input.id)!;
   }
 
+  getPendingWorkerShell(id: string): PendingWorkerShellRecord | null {
+    const row = this.db.prepare("SELECT * FROM pending_worker_shells WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+    return row ? this.toPendingWorkerShell(row) : null;
+  }
+
+  getPendingWorkerShellByRoot(teamId: string, channelId: string, rootTs: string): PendingWorkerShellRecord | null {
+    const row = this.db.prepare(`
+      SELECT * FROM pending_worker_shells
+      WHERE team_id = ? AND channel_id = ? AND root_ts = ?
+      ORDER BY created_at DESC
+      LIMIT 1
+    `).get(teamId, channelId, rootTs) as Record<string, unknown> | undefined;
+    return row ? this.toPendingWorkerShell(row) : null;
+  }
+
+  upsertPendingWorkerShell(
+    input: Omit<PendingWorkerShellRecord, "createdAt" | "updatedAt"> & { createdAt?: string; updatedAt?: string },
+  ): PendingWorkerShellRecord {
+    const current = this.getPendingWorkerShell(input.id);
+    const createdAt = current?.createdAt ?? input.createdAt ?? nowIso();
+    const updatedAt = input.updatedAt ?? nowIso();
+    this.db.prepare(`
+      INSERT INTO pending_worker_shells (
+        id, team_id, workstream_id, channel_id, root_ts, title, request_item_id, request_item_path,
+        owner_user_id, root_owner_user_id, settings_json, identity_json, parent_worker_key,
+        source_json, status, app_thread_id, last_error, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        channel_id=excluded.channel_id,
+        root_ts=excluded.root_ts,
+        title=excluded.title,
+        request_item_id=excluded.request_item_id,
+        request_item_path=excluded.request_item_path,
+        owner_user_id=excluded.owner_user_id,
+        root_owner_user_id=excluded.root_owner_user_id,
+        settings_json=excluded.settings_json,
+        identity_json=excluded.identity_json,
+        parent_worker_key=excluded.parent_worker_key,
+        source_json=excluded.source_json,
+        status=excluded.status,
+        app_thread_id=excluded.app_thread_id,
+        last_error=excluded.last_error,
+        updated_at=excluded.updated_at
+    `).run(
+      input.id,
+      input.teamId,
+      input.workstreamId,
+      input.channelId,
+      input.rootTs,
+      input.title,
+      input.requestItemId,
+      input.requestItemPath,
+      input.ownerUserId,
+      input.rootOwnerUserId,
+      JSON.stringify(input.settings),
+      input.identity ? JSON.stringify(input.identity) : null,
+      input.parentWorkerKey,
+      JSON.stringify(input.source),
+      input.status,
+      input.appThreadId,
+      input.lastError,
+      createdAt,
+      updatedAt,
+    );
+    return this.getPendingWorkerShell(input.id)!;
+  }
+
+  deletePendingWorkerShell(id: string): void {
+    this.db.prepare("DELETE FROM pending_worker_shells WHERE id = ?").run(id);
+  }
+
   createOrGetInboundMessage(input: {
     key: string;
     teamId: string;
@@ -722,6 +834,30 @@ export class Store {
       channelId: String(row.channel_id),
       channelName: String(row.channel_name),
       description: row.description ? String(row.description) : null,
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+    };
+  }
+
+  private toPendingWorkerShell(row: Record<string, unknown>): PendingWorkerShellRecord {
+    return {
+      id: String(row.id),
+      teamId: String(row.team_id),
+      workstreamId: String(row.workstream_id),
+      channelId: String(row.channel_id),
+      rootTs: row.root_ts ? String(row.root_ts) : null,
+      title: String(row.title),
+      requestItemId: row.request_item_id ? String(row.request_item_id) : null,
+      requestItemPath: row.request_item_path ? String(row.request_item_path) : null,
+      ownerUserId: String(row.owner_user_id),
+      rootOwnerUserId: String(row.root_owner_user_id),
+      settings: parseSettings(typeof row.settings_json === "string" ? row.settings_json : null),
+      identity: parseIdentity(typeof row.identity_json === "string" ? row.identity_json : null),
+      parentWorkerKey: row.parent_worker_key ? String(row.parent_worker_key) : null,
+      source: parsePendingWorkerShellSource(typeof row.source_json === "string" ? row.source_json : null),
+      status: String(row.status) as PendingWorkerShellRecord["status"],
+      appThreadId: row.app_thread_id ? String(row.app_thread_id) : null,
+      lastError: row.last_error ? String(row.last_error) : null,
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
     };

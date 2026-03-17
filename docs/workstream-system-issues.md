@@ -101,6 +101,8 @@ Settled:
 
 - canonical registrations are bridge-global
 - workstreams get read-only local JSON projections
+- canonical registrations should live in bridge-owned infra storage, not in workstream-local projection files
+- current intended implementation uses bridge-global DB-backed infra plus local `registrations.json` projections
 
 Open:
 
@@ -112,13 +114,22 @@ Open:
 
 Settled:
 
-- root `.slack-workers/` is bridge-global infra
+- root `.slack-workers/` top level is the root workstream's local protocol/runtime state
+- nested bridge infra under root `.slack-workers/` holds bridge-global infrastructure
 - workstream `.slack-workers/` is local protocol/runtime state
+
+Settled current intended filenames/layout:
+
+- root `.slack-workers/active/`
+- root `.slack-workers/archive/`
+- root `.slack-workers/registrations.json`
+- root `.slack-workers/bridge/` for bridge-global infra
+- child workstream `.slack-workers/active/`
+- child workstream `.slack-workers/archive/`
+- child workstream `.slack-workers/registrations.json`
 
 Open:
 
-- exact filenames under root `.slack-workers/`
-- exact filenames under workstream `.slack-workers/`
 - whether local wake-self traces should exist and in what form
 
 ## 5. Default scaffold wording
@@ -215,6 +226,20 @@ Open:
 
 - whether any admin-only or repair-oriented registry inspection tool should exist later
 - how much partial-failure workstream creation state should be visible through docs/projections versus only the bridge
+
+## 12. Exact workstream creation tool surface
+
+Settled:
+
+- workstream creation is bridge-owned and explicit
+- it should be exposed as a bridge tool
+- it may be invoked from worker threads or the admin DM/control surface
+- agents should only invoke it after explicit user approval in the conversation
+
+Open:
+
+- exact tool name and argument schema
+- whether slash-command affordances remain in parallel for humans/operators
 
 ## Current Code / Target Architecture Tension Notes
 

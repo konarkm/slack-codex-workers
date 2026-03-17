@@ -28,6 +28,7 @@ Implemented in this repo:
 - dynamic tools:
   - `slack_list_channels`
   - `slack_spawn_worker`
+  - `slack_create_workstream`
   - `slack_upload_files`
 - channel-thread commands:
   - `/help`
@@ -67,7 +68,7 @@ Not implemented yet:
 - local `codex` binary on `PATH`, or `CODEX_BIN` set explicitly
 - Slack app configured for Socket Mode
 
-Recommended Slack bot scopes:
+Required Slack bot scopes for the default bootstrap and workstream-creation path:
 
 - `app_mentions:read`
 - `channels:history`
@@ -100,9 +101,9 @@ Key variables:
 - `SLACK_ALLOWED_TEAM_ID`: optional hard guard for one workspace
 - `WORKSPACE_ROOT`: canonical workspace root. Codex runs here, and bridge state defaults under `WORKSPACE_ROOT/.slack-workers/`
 - `CODEX_CWD`: legacy alias for `WORKSPACE_ROOT`; still accepted for compatibility, but `WORKSPACE_ROOT` is the preferred env var
-- `DATABASE_PATH`: optional SQLite override. Default: `WORKSPACE_ROOT/.slack-workers/bridge.sqlite`
+- `DATABASE_PATH`: optional SQLite override. Default: `WORKSPACE_ROOT/.slack-workers/bridge/bridge.sqlite`
 - `SUPERVISOR_RESTART_ENABLED`: set automatically by `./scripts/launch.sh`; only override it if you know what you are doing
-- `ATTACHMENT_STORAGE_DIR`: optional attachment storage override. Default: `WORKSPACE_ROOT/.slack-workers/attachments`
+- `ATTACHMENT_STORAGE_DIR`: optional attachment storage override. Default: `WORKSPACE_ROOT/.slack-workers/bridge/attachments`
 - `ATTACHMENT_MAX_BYTES`: per-file cap in bytes
 - `ATTACHMENT_TOTAL_MAX_BYTES`: total cap per Slack message in bytes; set to `off` for no total cap
 - `ATTACHMENT_DOWNLOAD_TIMEOUT_MS`: timeout per file download
@@ -139,14 +140,16 @@ For a supervised production build:
 ## Behavior Notes
 
 - The server repo is just the bridge code. Runtime state lives under the configured workspace root:
-  - SQLite: `WORKSPACE_ROOT/.slack-workers/bridge.sqlite`
-  - downloaded Slack files: `WORKSPACE_ROOT/.slack-workers/attachments/`
-  - root workstream request/response items: `WORKSPACE_ROOT/.slack-workers/root/active/`
+  - root workstream request/response items: `WORKSPACE_ROOT/.slack-workers/{active,archive}/`
+  - root local read-only projections such as registrations: `WORKSPACE_ROOT/.slack-workers/registrations.json`
+  - SQLite and other bridge infra: `WORKSPACE_ROOT/.slack-workers/bridge/`
+  - SQLite: `WORKSPACE_ROOT/.slack-workers/bridge/bridge.sqlite`
+  - downloaded Slack files: `WORKSPACE_ROOT/.slack-workers/bridge/attachments/`
 - You can override those paths explicitly, but the default mental model is “all session state belongs to the workspace.”
 
 - Root `WORKSTREAM.md` and `AGENTS.md` are scaffolded at startup if missing.
 - If legacy default state still lives under `WORKSPACE_ROOT/.slack-codex-workers/` and no explicit path overrides are set, startup migrates it once to `WORKSPACE_ROOT/.slack-workers/`.
-- Child workstreams are created explicitly from the admin DM command and get their own visible directory plus local `.slack-workers/active` and `.slack-workers/archive`.
+- Child workstreams are created explicitly via bridge-owned creation paths and get their own visible directory plus local `.slack-workers/active`, `.slack-workers/archive`, and `registrations.json`.
 - Channel roots only create workers in registered workstream-home channels.
 - Channel roots create workers keyed by `(teamId, channelId, rootTs)`.
 - Each worker keeps a durable workstream request item; completion appends a response item instead of depending only on Slack thread history.
@@ -164,8 +167,10 @@ For a supervised production build:
 - `slack_upload_files` uploads one or more local files from allowed roots into the current Slack conversation; worker threads upload into the active thread, and admin DMs upload into the DM conversation.
 - `slack_list_channels` only returns registered workstream channels.
 - `slack_spawn_worker` only targets registered workstream channels.
+- `slack_create_workstream` is available to workers and the admin DM. It is intended to be used after explicit user approval in the conversation, not behind a separate permission layer.
 - `/status` and `/health` are available in worker threads and admin DMs. Thread commands report thread-specific state; DM commands report bridge-wide state.
 - Thread `/model` and `/effort` set thread-local overrides. DM `/model` and `/effort` set the global defaults used by any thread that does not have an override.
+- `/workstream-create` is available in worker threads and admin DMs for explicit bridge-owned creation.
 - `/restart <codex|bridge|both>` queues a restart request and waits for the runtime to become idle.
 - `/restart-now` forces the currently queued restart immediately.
 - `/restart-cancel` clears the currently queued restart.

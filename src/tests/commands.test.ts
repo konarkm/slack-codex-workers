@@ -26,6 +26,7 @@ describe("commands", () => {
     expect(helpText("dm")).toContain("/restart-cancel");
     expect(helpText("dm")).toContain("/recover");
     expect(helpText("dm")).toContain("/stop");
+    expect(helpText("dm")).toContain("/workstream-create");
     expect(helpText("dm")).toContain("missing or blocked");
   });
 
@@ -34,6 +35,7 @@ describe("commands", () => {
     expect(helpText("thread")).toContain("/health");
     expect(helpText("thread")).toContain("/recover");
     expect(helpText("thread")).toContain("/stop");
+    expect(helpText("thread")).toContain("/workstream-create");
     expect(helpText("thread")).not.toContain("/restart");
     expect(helpText("thread")).toContain("missing or blocked");
   });
