@@ -48,27 +48,27 @@ Implemented in this repo:
   - `get_webhook_mailbox`
   - `rotate_webhook_secret`
 - channel-thread commands:
-  - `/help`
-  - `/status`
-  - `/health`
-  - `/model`
-  - `/effort`
-  - `/compact`
-  - `/stop`
-  - `/recover`
+  - `.help` / `/help`
+  - `.status` / `/status`
+  - `.health` / `/health`
+  - `.model` / `/model`
+  - `.effort` / `/effort`
+  - `.compact` / `/compact`
+  - `.stop` / `/stop`
+  - `.recover` / `/recover`
 - admin DM commands:
-  - `/help`
-  - `/status`
-  - `/health`
-  - `/model`
-  - `/effort`
-  - `/compact`
-  - `/stop`
-  - `/recover`
-  - `/restart <codex|bridge|both>`
-  - `/restart-now`
-  - `/restart-cancel`
-  - `/workstream-create <slug> [parent=<path>] [description...]`
+  - `.help` / `/help`
+  - `.status` / `/status`
+  - `.health` / `/health`
+  - `.model` / `/model`
+  - `.effort` / `/effort`
+  - `.compact` / `/compact`
+  - `.stop` / `/stop`
+  - `.recover` / `/recover`
+  - `.restart <codex|bridge|both>` / `/restart <codex|bridge|both>`
+  - `.restart-now` / `/restart-now`
+  - `.restart-cancel` / `/restart-cancel`
+  - `.workstream-create <slug> [parent=<path>] [description...]` / `/workstream-create <slug> [parent=<path>] [description...]`
 - image and file attachment ingestion
 
 Not implemented yet:
@@ -208,6 +208,7 @@ For a supervised production build:
 - Webhook ingress listens at `WEBHOOK_PATH`, requires either `Authorization: Bearer <secret>` or `x-bridge-webhook-secret`, rate-limits repeated auth failures per client, times out slow authenticated request bodies, and accepts JSON shaped like `{ source, event, id?, match?, payload? }`.
 - For a local Cloudflare Tunnel deployment, prefer `WEBHOOK_BIND_HOST=127.0.0.1`, set `WEBHOOK_PUBLIC_BASE_URL` to the public hostname, and enable `WEBHOOK_TRUST_LOOPBACK_PROXY=1` so auth throttling can key off Cloudflare-forwarded client IPs only when the immediate peer is local.
 - `/status` and `/health` are available in worker threads and admin DMs. Thread commands report thread-specific state; DM commands report bridge-wide state.
+- Dot-command aliases such as `.status`, `.health`, `.restart`, and `.workstream-create` are supported everywhere the slash commands are supported. In the Slack client, dot commands are the most reliable form because some slash commands collide with Slack's built-in command UI. If you still prefer slash commands, a leading space also works because the bridge trims message text before parsing.
 - Thread `/model` and `/effort` set thread-local overrides. DM `/model` and `/effort` set the global defaults used by any thread that does not have an override.
 - `/workstream-create` is available in worker threads and admin DMs for explicit bridge-owned creation.
 - `/restart <codex|bridge|both>` queues a restart request and waits for the runtime to become idle.

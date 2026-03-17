@@ -1248,7 +1248,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       } else {
         const effort = normalizeEffort(args[0]);
         if (!effort) {
-          response = `Usage: /effort <${DEFAULT_EFFORTS.join("|")}>`;
+          response = `Usage: .effort <${DEFAULT_EFFORTS.join("|")}> (or /effort ...)`;
         } else {
           worker.settings.effort = effort;
           this.store.updateWorkerState(worker.key, { settings: worker.settings });
@@ -1314,7 +1314,7 @@ export class SlackCodexWorkersService extends EventEmitter {
         return { response: `Global default effort: ${defaults.effort ?? "(unset)"}\nAllowed: ${DEFAULT_EFFORTS.join(", ")}` };
       }
       const effort = normalizeEffort(args[0]);
-      if (!effort) return { response: `Usage: /effort <${DEFAULT_EFFORTS.join("|")}>` };
+      if (!effort) return { response: `Usage: .effort <${DEFAULT_EFFORTS.join("|")}> (or /effort ...)` };
       defaults.effort = effort;
       this.store.setTeamDefaults(session.teamId, defaults);
       return { response: `Default effort set: ${effort}` };
@@ -1347,7 +1347,7 @@ export class SlackCodexWorkersService extends EventEmitter {
     if (name === "restart") {
       const target = (args[0] ?? "").toLowerCase();
       if (!target || !["codex", "bridge", "both"].includes(target)) {
-        return { response: "Usage: /restart <codex|bridge|both>" };
+        return { response: "Usage: .restart <codex|bridge|both> (or /restart ...)" };
       }
       const queued = this.store.getPendingRestart();
       if (queued) {
@@ -2205,7 +2205,7 @@ export class SlackCodexWorkersService extends EventEmitter {
   private async createWorkstreamFromThreadArgs(worker: WorkerRecord, args: string[]): Promise<string> {
     const parsed = parseWorkstreamCreateArgs(args);
     if (!parsed) {
-      return "Usage: /workstream-create <slug> [parent=<path>] [description...]";
+      return "Usage: .workstream-create <slug> [parent=<path>] [description...] (or /workstream-create ...)";
     }
     const currentWorkstream = worker.workstreamId ? this.store.getWorkstreamById(worker.workstreamId) : null;
     return this.createWorkstreamForContext({
@@ -2221,7 +2221,7 @@ export class SlackCodexWorkersService extends EventEmitter {
   private async createWorkstreamFromDmArgs(session: DmSessionRecord, args: string[]): Promise<string> {
     const parsed = parseWorkstreamCreateArgs(args);
     if (!parsed) {
-      return "Usage: /workstream-create <slug> [parent=<path>] [description...]";
+      return "Usage: .workstream-create <slug> [parent=<path>] [description...] (or /workstream-create ...)";
     }
     return this.createWorkstreamForContext({
       teamId: session.teamId,
