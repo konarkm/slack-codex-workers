@@ -1032,6 +1032,7 @@ describe("service lifecycle decisions", () => {
     });
 
     expect(result).toMatchObject({ duplicate: false, matchedRegistrations: 1 });
+    expect(service.scheduleRegistrationLoop).toHaveBeenCalledWith(0);
     await service.deliverQueuedWakes();
 
     const wakes = store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000");
@@ -1221,6 +1222,7 @@ describe("service lifecycle decisions", () => {
     });
 
     expect(result).toMatchObject({ duplicate: false, matchedRegistrations: 1 });
+    expect(service.scheduleRegistrationLoop).toHaveBeenCalledWith(0);
     await service.deliverQueuedWakes();
 
     expect(slack.postTopLevelMessage).toHaveBeenCalledWith(
@@ -1297,6 +1299,85 @@ describe("service lifecycle decisions", () => {
       lastError: expect.stringContaining("temporary outage"),
     });
     store.close();
+  });
+
+  it("rejects webhook registrations whose source cannot be routed by ingress", async () => {
+    const { service } = await createService();
+    await service.bootstrapWorkstreams();
+    const workstream = service.store.getWorkstreamById("T1:root");
+    expect(workstream).not.toBeNull();
+    const worker = createWorker(service, { workstreamId: "T1:root" });
+
+    await expect(service.registrations.setWebhook(
+      {
+        teamId: "T1",
+        workstream: workstream!,
+        worker,
+      },
+      {
+        source: "bad/source",
+        events: ["push"],
+        target: "self",
+      },
+    )).rejects.toThrow("Webhook source must match");
+  });
+
+  it("accepts webhook HTTP ingress through the running service and requests wake scheduling", async () => {
+    const { service, store } = await createService();
+    await service.start();
+    const scheduleSpy = vi.spyOn(service, "scheduleRegistrationLoop");
+    scheduleSpy.mockClear();
+    createWorker(service, { workstreamId: "T1:root" });
+    store.upsertRegistration({
+      id: "reg-webhook-http",
+      teamId: "T1",
+      workstreamId: "T1:root",
+      workerKey: "T1:C1:1.000",
+      ownerUserId: "U1",
+      rootOwnerUserId: "U1",
+      description: "Handle webhook over HTTP",
+      enabled: true,
+      target: {
+        kind: "worker",
+        workstreamId: "T1:root",
+        workerKey: "T1:C1:1.000",
+      },
+      action: { kind: "wake_self" },
+      trigger: {
+        kind: "webhook",
+        source: "github",
+        events: ["push"],
+        match: { repo: "acme/api" },
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    const port = service.webhooks.getListeningPort();
+    expect(port).not.toBeNull();
+    const response = await fetch(`http://127.0.0.1:${port}/webhooks/github`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer secret-github",
+      },
+      body: JSON.stringify({
+        event: "push",
+        id: "evt-http-1",
+        match: { repo: "acme/api" },
+        payload: { commits: 1 },
+      }),
+    });
+
+    expect(response.status).toBe(202);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: true,
+      duplicate: false,
+      matchedRegistrations: 1,
+    });
+    expect(scheduleSpy).toHaveBeenCalledWith(0);
+    expect(store.getWebhookEvent("T1", "github", "push", "evt-http-1")).not.toBeNull();
+    expect(store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000")).toHaveLength(1);
   });
 
   it("coalesces missed heartbeat runs instead of draining backlog", async () => {

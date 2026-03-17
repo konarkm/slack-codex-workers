@@ -159,6 +159,7 @@ Current implementation contract:
 - `schedule` currently uses a standard 5-field cron string
 - omitted cron/webhook `target` defaults to `self`
 - cron registrations use the configured workspace timezone
+- webhook `source` must match `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`
 - `events` is an explicit string list
 - `match` is an optional exact-match string map
 - `description` remains optional
@@ -178,6 +179,7 @@ Principles are settled:
 Current implementation contract:
 
 - auth uses one configured secret per webhook `source`
+- unknown and mis-authenticated sources both return the same generic unauthorized response
 - idempotency uses `(team, source, event, dedupe_key)`
 - requests may provide an explicit `id`; otherwise the bridge derives a stable hash from the normalized outer JSON envelope
 - raw payload envelopes are stored under the bridge-owned webhook payload directory grouped by `source` and UTC date

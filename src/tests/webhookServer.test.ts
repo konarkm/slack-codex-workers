@@ -58,6 +58,26 @@ describe("webhook ingress server", () => {
     expect(handler).not.toHaveBeenCalled();
   });
 
+  it("uses the same unauthorized response for unknown sources", async () => {
+    const handler = vi.fn();
+    const server = new WebhookIngressServer(makeConfig(), handler);
+    activeServers.push(server);
+    await server.start();
+
+    const response = await fetch(`http://127.0.0.1:${server.getListeningPort()}/webhooks/unknown`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer secret-github",
+      },
+      body: JSON.stringify({ event: "push" }),
+    });
+
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toMatchObject({ ok: false, error: "unauthorized" });
+    expect(handler).not.toHaveBeenCalled();
+  });
+
   it("rejects encoded webhook sources that would escape the payload root", async () => {
     const handler = vi.fn();
     const server = new WebhookIngressServer(makeConfig(), handler);

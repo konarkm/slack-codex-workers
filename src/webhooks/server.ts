@@ -5,6 +5,11 @@ import type { AppConfig } from "../config.js";
 
 const webhookSourcePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
+export function normalizeWebhookSource(value: string | null | undefined): string | null {
+  const source = value?.trim() ?? "";
+  return webhookSourcePattern.test(source) ? source : null;
+}
+
 export interface NormalizedWebhookIngress {
   source: string;
   event: string;
@@ -113,7 +118,7 @@ export class WebhookIngressServer {
 
     const expectedSecret = this.config.webhookSourceSecrets[source];
     if (!expectedSecret) {
-      return { status: 401, body: { ok: false, error: "unauthorized_source" } };
+      return { status: 401, body: { ok: false, error: "unauthorized" } };
     }
     const providedSecret = this.extractSecret(req);
     if (!providedSecret || !safeSecretEquals(providedSecret, expectedSecret)) {
@@ -184,7 +189,7 @@ export class WebhookIngressServer {
     } catch {
       return null;
     }
-    return webhookSourcePattern.test(source) ? source : null;
+    return normalizeWebhookSource(source);
   }
 
   private extractSecret(req: IncomingMessage): string | null {

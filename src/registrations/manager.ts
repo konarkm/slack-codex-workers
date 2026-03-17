@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { AppConfig } from "../config.js";
 import { Store } from "../db/store.js";
 import { validateCronSchedule } from "./cron.js";
+import { normalizeWebhookSource } from "../webhooks/server.js";
 import type {
   PendingWakeRecord,
   RegistrationRecord,
@@ -97,11 +98,15 @@ export class RegistrationManager {
     },
   ): Promise<RegistrationRecord> {
     this.ensureUpsertAllowed(ctx, input.registrationId);
+    const source = normalizeWebhookSource(input.source);
+    if (!source) {
+      throw new Error("Webhook source must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}.");
+    }
     const target = this.resolveTarget(ctx, input.target);
     const action = input.target === "self" ? { kind: "wake_self" as const } : { kind: "spawn" as const };
     const trigger: WebhookRegistrationTrigger = {
       kind: "webhook",
-      source: input.source,
+      source,
       events: input.events,
       match: input.match ?? null,
     };

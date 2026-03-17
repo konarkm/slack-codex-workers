@@ -1915,6 +1915,9 @@ export class SlackCodexWorkersService extends EventEmitter {
     }));
     let persisted: { record: WebhookEventRecord; created: boolean };
     try {
+      // Known limitation: shutdown that begins after ingress reaches this point can still
+      // allow the in-flight request to persist before the broader runtime finishes draining.
+      // Fully eliminating that race needs a stronger shutdown barrier than the current model.
       persisted = this.store.createWebhookEventWithPendingWakesIfAbsent({
         id: `evt-${randomUUID().slice(0, 8)}`,
         teamId,

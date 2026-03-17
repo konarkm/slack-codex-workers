@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+const webhookSourcePattern = "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$";
+
 export const slackListChannelsToolName = "slack_list_channels";
 export const slackSpawnWorkerToolName = "slack_spawn_worker";
 export const slackCreateWorkstreamToolName = "slack_create_workstream";
@@ -100,7 +102,7 @@ export const workerDynamicTools = [
   {
     name: slackSetCronToolName,
     description:
-      "Create or update a durable cron registration. target='self' wakes the current worker; target='workstream' creates new public work in the current workstream.",
+      "Create or update a durable cron registration. If target is omitted it defaults to 'self'. target='self' wakes the current worker; target='workstream' creates new public work in the current workstream. Cron schedules are interpreted in the configured workspace timezone.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -116,14 +118,14 @@ export const workerDynamicTools = [
   {
     name: slackSetWebhookToolName,
     description:
-      "Create or update a durable webhook registration. target='self' wakes the current worker; target='workstream' creates new public work in the current workstream.",
+      "Create or update a durable webhook registration. If target is omitted it defaults to 'self'. target='self' wakes the current worker; target='workstream' creates new public work in the current workstream. source must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       required: ["source", "events"],
       properties: {
         registrationId: { type: "string", minLength: 1 },
-        source: { type: "string", minLength: 1 },
+        source: { type: "string", minLength: 1, pattern: webhookSourcePattern },
         events: {
           type: "array",
           minItems: 1,
