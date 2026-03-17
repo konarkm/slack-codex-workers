@@ -174,6 +174,8 @@ describe("store", () => {
       teamId: "T1",
       workstreamId: "T1:root",
       workerKey: "worker-1",
+      ownerUserId: "U1",
+      rootOwnerUserId: "U1",
       description: "Check backlog",
       enabled: true,
       target: {

@@ -137,6 +137,8 @@ export interface RegistrationRecord {
   teamId: string;
   workstreamId: string;
   workerKey: string | null;
+  ownerUserId: string;
+  rootOwnerUserId: string;
   description: string | null;
   enabled: boolean;
   target: RegistrationTarget;

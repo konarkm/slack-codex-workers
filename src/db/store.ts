@@ -222,6 +222,8 @@ export class Store {
         team_id TEXT NOT NULL,
         workstream_id TEXT NOT NULL,
         worker_key TEXT,
+        owner_user_id TEXT NOT NULL DEFAULT '',
+        root_owner_user_id TEXT NOT NULL DEFAULT '',
         description TEXT,
         enabled INTEGER NOT NULL,
         target_json TEXT NOT NULL,
@@ -340,6 +342,8 @@ export class Store {
     this.ensureColumn("workers", "workstream_id", "TEXT");
     this.ensureColumn("workers", "request_item_id", "TEXT");
     this.ensureColumn("workers", "request_item_path", "TEXT");
+    this.ensureColumn("registrations", "owner_user_id", "TEXT NOT NULL DEFAULT ''");
+    this.ensureColumn("registrations", "root_owner_user_id", "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn("dm_sessions", "channel_id", "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn("dm_sessions", "status", "TEXT NOT NULL DEFAULT 'idle'");
     this.ensureColumn("dm_sessions", "last_error", "TEXT");
@@ -711,11 +715,13 @@ export class Store {
     const updatedAt = input.updatedAt ?? nowIso();
     this.db.prepare(`
       INSERT INTO registrations (
-        id, team_id, workstream_id, worker_key, description, enabled, target_json, action_json, trigger_json, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        id, team_id, workstream_id, worker_key, owner_user_id, root_owner_user_id, description, enabled, target_json, action_json, trigger_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         workstream_id=excluded.workstream_id,
         worker_key=excluded.worker_key,
+        owner_user_id=excluded.owner_user_id,
+        root_owner_user_id=excluded.root_owner_user_id,
         description=excluded.description,
         enabled=excluded.enabled,
         target_json=excluded.target_json,
@@ -727,6 +733,8 @@ export class Store {
       input.teamId,
       input.workstreamId,
       input.workerKey,
+      input.ownerUserId,
+      input.rootOwnerUserId,
       input.description,
       input.enabled ? 1 : 0,
       JSON.stringify(input.target),
@@ -1115,6 +1123,8 @@ export class Store {
       teamId: String(row.team_id),
       workstreamId: String(row.workstream_id),
       workerKey: row.worker_key ? String(row.worker_key) : null,
+      ownerUserId: String(row.owner_user_id ?? ""),
+      rootOwnerUserId: String(row.root_owner_user_id ?? ""),
       description: row.description ? String(row.description) : null,
       enabled: Boolean(row.enabled),
       target: parseRegistrationTarget(typeof row.target_json === "string" ? row.target_json : null),

@@ -7,7 +7,36 @@ import { SlackCodexWorkersService } from "../core/service.js";
 import { WorkstreamManager } from "../workstreams/manager.js";
 import type { DmSessionRecord, SlackMessageContext, WorkerRecord } from "../types.js";
 
+vi.mock("@slack/bolt", () => ({
+  App: class {
+    public client = {
+      auth: { test: vi.fn().mockResolvedValue({ user_id: "B1", team_id: "T1" }) },
+      users: { info: vi.fn().mockResolvedValue({ user: { profile: { display_name: "mock-user" } } }) },
+      chat: {
+        postMessage: vi.fn().mockResolvedValue({ ok: true, ts: "1.000" }),
+        update: vi.fn().mockResolvedValue({ ok: true }),
+      },
+      reactions: {
+        add: vi.fn().mockResolvedValue({ ok: true }),
+        remove: vi.fn().mockResolvedValue({ ok: true }),
+      },
+      files: {
+        uploadV2: vi.fn().mockResolvedValue({ files: [] }),
+      },
+      conversations: {
+        join: vi.fn().mockResolvedValue({ ok: true }),
+        create: vi.fn().mockResolvedValue({ channel: { id: "C-created", name: "created", is_private: false, is_member: true } }),
+        list: vi.fn().mockResolvedValue({ channels: [], response_metadata: {} }),
+      },
+    };
+
+    public start = vi.fn().mockResolvedValue(undefined);
+    public stop = vi.fn().mockResolvedValue(undefined);
+  },
+}));
+
 const tempDirs: string[] = [];
+const activeServices: any[] = [];
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void } {
   let resolve!: (value: T) => void;
@@ -47,6 +76,7 @@ async function createService() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "slack-codex-workers-service-"));
   tempDirs.push(dir);
   const service = new SlackCodexWorkersService(makeConfig(dir)) as any;
+  activeServices.push(service);
   const slack = {
     postThreadReply: vi.fn().mockResolvedValue("reply-ts"),
     postTopLevelMessage: vi.fn().mockResolvedValue("root-ts"),
@@ -158,6 +188,13 @@ function createDmSession(service: any, overrides: Partial<DmSessionRecord> = {})
 }
 
 afterEach(async () => {
+  while (activeServices.length > 0) {
+    const service = activeServices.pop();
+    if (service?.registrationPollTimer) {
+      clearTimeout(service.registrationPollTimer);
+      service.registrationPollTimer = null;
+    }
+  }
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop();
     if (dir) {
@@ -715,6 +752,8 @@ describe("service lifecycle decisions", () => {
       teamId: "T1",
       workstreamId: "T1:root",
       workerKey: "T1:C1:1.000",
+      ownerUserId: "U1",
+      rootOwnerUserId: "U1",
       description: "Check for replies",
       enabled: true,
       target: {
@@ -758,6 +797,8 @@ describe("service lifecycle decisions", () => {
       teamId: "T1",
       workstreamId: "T1:root",
       workerKey: "T1:C1:1.000",
+      ownerUserId: "U1",
+      rootOwnerUserId: "U1",
       description: "Check for follow-ups",
       enabled: true,
       target: {
@@ -771,7 +812,7 @@ describe("service lifecycle decisions", () => {
       updatedAt: "2026-01-01T00:00:00.000Z",
     });
 
-    await service.enqueueDueHeartbeatWakes();
+    await service.enqueueDueRegistrationWakes();
     await service.deliverQueuedWakes();
 
     const wakes = store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000");
@@ -804,6 +845,8 @@ describe("service lifecycle decisions", () => {
       teamId: "T1",
       workstreamId: "T1:root",
       workerKey: "T1:C1:1.000",
+      ownerUserId: "U1",
+      rootOwnerUserId: "U1",
       description: null,
       enabled: true,
       target: {
@@ -817,7 +860,7 @@ describe("service lifecycle decisions", () => {
       updatedAt: "2026-01-01T00:00:00.000Z",
     });
 
-    await service.enqueueDueHeartbeatWakes();
+    await service.enqueueDueRegistrationWakes();
     await service.deliverQueuedWakes();
 
     expect(codex.startTurnWithResumeFallback).not.toHaveBeenCalled();
@@ -833,6 +876,86 @@ describe("service lifecycle decisions", () => {
 
     expect(codex.startTurnWithResumeFallback).toHaveBeenCalledTimes(1);
     expect(store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000")[0]).toMatchObject({ status: "delivered" });
+    store.close();
+  });
+
+  it("queues and delivers cron wakes into an idle worker", async () => {
+    const { service, codex, store } = await createService();
+    createWorker(service, { workstreamId: "T1:root" });
+    codex.reconcileThreadForSend.mockResolvedValue("idle");
+    codex.startTurnWithResumeFallback.mockResolvedValue("turn-cron");
+
+    store.upsertRegistration({
+      id: "reg-cron",
+      teamId: "T1",
+      workstreamId: "T1:root",
+      workerKey: "T1:C1:1.000",
+      ownerUserId: "U1",
+      rootOwnerUserId: "U1",
+      description: "Hourly check",
+      enabled: true,
+      target: {
+        kind: "worker",
+        workstreamId: "T1:root",
+        workerKey: "T1:C1:1.000",
+      },
+      action: { kind: "wake_self" },
+      trigger: { kind: "cron", schedule: "* * * * *" },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    await service.enqueueDueRegistrationWakes();
+    await service.deliverQueuedWakes();
+
+    expect(store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000")[0]).toMatchObject({ status: "delivered" });
+    expect(codex.startTurnWithResumeFallback).toHaveBeenCalledWith(
+      "thread-1",
+      expect.objectContaining({
+        text: expect.stringContaining("trigger: cron"),
+      }),
+      expect.any(Object),
+      expect.any(Object),
+    );
+    store.close();
+  });
+
+  it("spawns new work for workstream-target cron registrations", async () => {
+    const { service, codex, store, slack } = await createService();
+    createWorker(service, { workstreamId: "T1:root" });
+    codex.createWorkerThread.mockResolvedValue({ threadId: "thread-2" });
+    codex.startTurnWithResumeFallback.mockResolvedValue("turn-spawn");
+
+    store.upsertRegistration({
+      id: "reg-cron-spawn",
+      teamId: "T1",
+      workstreamId: "T1:root",
+      workerKey: null,
+      ownerUserId: "U1",
+      rootOwnerUserId: "U1",
+      description: "Daily digest",
+      enabled: true,
+      target: {
+        kind: "workstream",
+        workstreamId: "T1:root",
+        workerKey: null,
+      },
+      action: { kind: "spawn" },
+      trigger: { kind: "cron", schedule: "* * * * *" },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    await service.enqueueDueRegistrationWakes();
+    await service.deliverQueuedWakes();
+
+    expect(slack.postTopLevelMessage).toHaveBeenCalledWith(
+      "C1",
+      expect.stringContaining("Scheduled work: Daily digest"),
+      expect.anything(),
+    );
+    expect(store.listWorkers()).toHaveLength(2);
+    expect(store.listPendingWakesForScope("T1", "T1:root", null)[0]).toMatchObject({ status: "delivered" });
     store.close();
   });
 

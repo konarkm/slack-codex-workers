@@ -11,6 +11,7 @@ import {
 } from "../codex/client.js";
 import { Store } from "../db/store.js";
 import { logInfo, logWarn } from "../logger.js";
+import { findLatestMatchingCronMinute } from "../registrations/cron.js";
 import { RegistrationManager, type RegistrationContext } from "../registrations/manager.js";
 import { prepareSlackAttachments } from "../slack/attachments.js";
 import { appendFileNotes, renderEventMessage, renderFinalMessage, renderSystemMessage } from "../slack/renderer.js";
@@ -61,7 +62,7 @@ interface DmCommandResult {
 
 const BLOCKED_RUNNING_TURN_POLL_INTERVAL_MS = 2_000;
 const BLOCKED_RUNNING_TURN_POLL_WINDOW_MS = 30_000;
-const HEARTBEAT_POLL_INTERVAL_MS = 5_000;
+const REGISTRATION_POLL_INTERVAL_MS = 5_000;
 const STATUS_REACTIONS = {
   seen: "eyes",
   running: "hourglass_flowing_sand",
@@ -83,8 +84,8 @@ export class SlackCodexWorkersService extends EventEmitter {
   private readonly blockedTurnDeadlines = new Map<string, number>();
   private readonly startingWorkerTurns = new Map<string, Promise<string>>();
   private readonly startingDmTurns = new Map<string, Promise<string>>();
-  private heartbeatPollTimer: NodeJS.Timeout | null = null;
-  private processingHeartbeatLoop = false;
+  private registrationPollTimer: NodeJS.Timeout | null = null;
+  private processingRegistrationLoop = false;
   private executingQueuedRestart = false;
 
   constructor(private readonly config: AppConfig) {
@@ -119,7 +120,7 @@ export class SlackCodexWorkersService extends EventEmitter {
     this.store.resetInterruptedInboundMessages();
     await this.reconcilePersistedRuntimeState();
     await this.replayPendingInboundMessages();
-    this.scheduleHeartbeatLoop(0);
+    this.scheduleRegistrationLoop(0);
     logInfo("Slack Codex Workers ready");
   }
 
@@ -135,9 +136,9 @@ export class SlackCodexWorkersService extends EventEmitter {
     }
     this.blockedTurnPolls.clear();
     this.blockedTurnDeadlines.clear();
-    if (this.heartbeatPollTimer) {
-      clearTimeout(this.heartbeatPollTimer);
-      this.heartbeatPollTimer = null;
+    if (this.registrationPollTimer) {
+      clearTimeout(this.registrationPollTimer);
+      this.registrationPollTimer = null;
     }
     await this.slack.stop();
     await this.codex.stop();
@@ -1027,7 +1028,7 @@ export class SlackCodexWorkersService extends EventEmitter {
           ? STATUS_REACTIONS.interrupted
           : STATUS_REACTIONS.failed,
     );
-    await this.processHeartbeatLoop();
+    await this.processRegistrationLoop();
     await this.maybeExecuteQueuedRestart();
   }
 
@@ -1108,7 +1109,7 @@ export class SlackCodexWorkersService extends EventEmitter {
         );
       });
     }
-    await this.processHeartbeatLoop();
+    await this.processRegistrationLoop();
     await this.maybeExecuteQueuedRestart();
   }
 
@@ -1745,37 +1746,36 @@ export class SlackCodexWorkersService extends EventEmitter {
     };
   }
 
-  private scheduleHeartbeatLoop(delayMs = HEARTBEAT_POLL_INTERVAL_MS): void {
-    if (this.heartbeatPollTimer) {
-      clearTimeout(this.heartbeatPollTimer);
+  private scheduleRegistrationLoop(delayMs = REGISTRATION_POLL_INTERVAL_MS): void {
+    if (this.registrationPollTimer) {
+      clearTimeout(this.registrationPollTimer);
     }
-    this.heartbeatPollTimer = setTimeout(() => {
-      void this.processHeartbeatLoop();
+    this.registrationPollTimer = setTimeout(() => {
+      void this.processRegistrationLoop();
     }, Math.max(0, delayMs));
   }
 
-  private async processHeartbeatLoop(): Promise<void> {
-    if (this.processingHeartbeatLoop) return;
-    this.processingHeartbeatLoop = true;
+  private async processRegistrationLoop(): Promise<void> {
+    if (this.processingRegistrationLoop) return;
+    this.processingRegistrationLoop = true;
     try {
-      await this.enqueueDueHeartbeatWakes();
+      await this.enqueueDueRegistrationWakes();
       await this.deliverQueuedWakes();
     } finally {
-      this.processingHeartbeatLoop = false;
-      this.scheduleHeartbeatLoop();
+      this.processingRegistrationLoop = false;
+      this.scheduleRegistrationLoop();
     }
   }
 
-  private async enqueueDueHeartbeatWakes(): Promise<void> {
+  private async enqueueDueRegistrationWakes(): Promise<void> {
     const registrations = this.store.listRegistrationsForTeam(this.slack.getTeamId() ?? this.config.allowedTeamId ?? "single-workspace");
     const now = Date.now();
     for (const registration of registrations) {
-      if (!registration.enabled || registration.trigger.kind !== "heartbeat") continue;
+      if (!registration.enabled) continue;
       const latestWake = this.store.getLatestPendingWakeForRegistration(registration.id);
       if (latestWake?.status === "queued") continue;
-      const baseline = latestWake?.createdAt ?? registration.createdAt;
-      const dueAtMs = Date.parse(baseline) + registration.trigger.intervalMinutes * 60_000;
-      if (Number.isNaN(dueAtMs) || dueAtMs > now) continue;
+      const dueAt = this.resolveRegistrationDueAt(registration, latestWake?.createdAt ?? null, now);
+      if (!dueAt) continue;
       this.store.createPendingWake({
         id: `wake-${randomUUID().slice(0, 8)}`,
         teamId: registration.teamId,
@@ -1783,9 +1783,9 @@ export class SlackCodexWorkersService extends EventEmitter {
         workstreamId: registration.workstreamId,
         workerKey: registration.workerKey,
         status: "queued",
-        summary: `heartbeat fired for ${registration.id}`,
+        summary: `${registration.trigger.kind} fired for ${registration.id}`,
         payloadPath: null,
-        dueAt: new Date(dueAtMs).toISOString(),
+        dueAt: dueAt,
       });
     }
   }
@@ -1801,38 +1801,98 @@ export class SlackCodexWorkersService extends EventEmitter {
         });
         continue;
       }
-      if (registration.action.kind !== "wake_self" || !registration.workerKey) {
+      if (registration.action.kind === "wake_self" && registration.workerKey) {
+        let worker = this.store.getWorkerByKey(registration.workerKey);
+        if (!worker) {
+          this.store.updatePendingWake(wake.id, {
+            status: "failed",
+            summary: `${wake.summary} (worker missing)`,
+          });
+          continue;
+        }
+        if (this.startingWorkerTurns.has(worker.key) || worker.pendingRequest || worker.activeTurnId || worker.status === "running") {
+          continue;
+        }
+        worker = await this.prepareWorkerForSend(worker);
+        if (worker.pendingRequest || worker.activeTurnId || worker.status === "running" || isManuallyBlockedStatus(worker.status)) {
+          continue;
+        }
+        try {
+          await this.startWorkerTurn(worker, buildWakeTurnInput(registration, wake));
+          this.store.updatePendingWake(wake.id, {
+            status: "delivered",
+            summary: `${wake.summary} (delivered)`,
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.store.updatePendingWake(wake.id, {
+            status: "failed",
+            summary: `${wake.summary} (failed: ${message})`,
+          });
+        }
         continue;
       }
-      let worker = this.store.getWorkerByKey(registration.workerKey);
-      if (!worker) {
-        this.store.updatePendingWake(wake.id, {
-          status: "failed",
-          summary: `${wake.summary} (worker missing)`,
-        });
-        continue;
-      }
-      if (this.startingWorkerTurns.has(worker.key) || worker.pendingRequest || worker.activeTurnId || worker.status === "running") {
-        continue;
-      }
-      worker = await this.prepareWorkerForSend(worker);
-      if (worker.pendingRequest || worker.activeTurnId || worker.status === "running" || isManuallyBlockedStatus(worker.status)) {
-        continue;
-      }
-      try {
-        await this.startWorkerTurn(worker, buildWakeTurnInput(registration, wake));
-        this.store.updatePendingWake(wake.id, {
-          status: "delivered",
-          summary: `${wake.summary} (delivered)`,
-        });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        this.store.updatePendingWake(wake.id, {
-          status: "failed",
-          summary: `${wake.summary} (failed: ${message})`,
-        });
+
+      if (registration.action.kind === "spawn") {
+        const workstream = this.store.getWorkstreamById(registration.target.workstreamId);
+        if (!workstream) {
+          this.store.updatePendingWake(wake.id, {
+            status: "failed",
+            summary: `${wake.summary} (workstream missing)`,
+          });
+          continue;
+        }
+        try {
+          await this.spawnWorkerIntoWorkstream({
+            workstream,
+            channelId: workstream.channelId,
+            title: buildScheduledSpawnTitle(registration),
+            itemBody: buildWakeTurnInput(registration, wake).text,
+            turnInput: buildWakeTurnInput(registration, wake),
+            rootOwnerUserId: registration.rootOwnerUserId,
+            ownerUserId: registration.ownerUserId,
+            runtimeSettings: { model: null, effort: null },
+            source: {
+              sourceKind: `${registration.trigger.kind}-registration`,
+              sourceSummary: wake.summary,
+              toAddress: formatWorkstreamAddress(workstream),
+            },
+            identity: null,
+            parentWorkerKey: null,
+            shellId: wake.id,
+            surfaceFailuresInThread: true,
+          });
+          this.store.updatePendingWake(wake.id, {
+            status: "delivered",
+            summary: `${wake.summary} (spawned)`,
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.store.updatePendingWake(wake.id, {
+            status: "failed",
+            summary: `${wake.summary} (failed: ${message})`,
+          });
+        }
       }
     }
+  }
+
+  private resolveRegistrationDueAt(registration: RegistrationRecord, baselineIso: string | null, nowMs: number): string | null {
+    const baseline = baselineIso ? new Date(baselineIso) : new Date(registration.createdAt);
+    if (Number.isNaN(baseline.getTime())) return null;
+
+    if (registration.trigger.kind === "heartbeat") {
+      const dueAtMs = baseline.getTime() + registration.trigger.intervalMinutes * 60_000;
+      if (dueAtMs > nowMs) return null;
+      return new Date(dueAtMs).toISOString();
+    }
+
+    if (registration.trigger.kind === "cron") {
+      const latest = findLatestMatchingCronMinute(registration.trigger.schedule, baseline, new Date(nowMs));
+      return latest ? latest.toISOString() : null;
+    }
+
+    return null;
   }
 
   private async createWorkstreamFromThreadArgs(worker: WorkerRecord, args: string[]): Promise<string> {
@@ -2560,6 +2620,13 @@ function buildWakeTurnInput(registration: RegistrationRecord, wake: { id: string
     text: details.join("\n"),
     imagePaths: [],
   };
+}
+
+function buildScheduledSpawnTitle(registration: RegistrationRecord): string {
+  if (registration.description?.trim()) {
+    return `Scheduled work: ${registration.description.trim()}`;
+  }
+  return `Scheduled work (${registration.trigger.kind})`;
 }
 
 function describeEffectiveSetting(threadValue: string | null, defaultValue: string | null): string {
