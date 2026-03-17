@@ -685,6 +685,7 @@ export class SlackCodexWorkersService extends EventEmitter {
     surfaceFailuresInThread?: boolean;
     shellId?: string;
   }): Promise<string> {
+    this.assertNotStopping();
     const shellId = input.shellId ?? `${input.workstream.teamId}:${input.channelId}:${input.existingRootTs ?? Date.now().toString()}:${input.title}`;
     let shell = this.store.getPendingWorkerShell(shellId);
     if (!shell) {
@@ -708,6 +709,7 @@ export class SlackCodexWorkersService extends EventEmitter {
         lastError: null,
       });
     }
+    this.assertNotStopping();
     if (!shell.requestItemId || !shell.requestItemPath) {
       const requestItem = await this.workstreams.createRequestItem(input.workstream, {
         title: input.title,
@@ -721,6 +723,7 @@ export class SlackCodexWorkersService extends EventEmitter {
         lastError: null,
       });
     }
+    this.assertNotStopping();
 
     const rootTs = shell.rootTs
       ?? await this.enqueueSlackWrite(`spawn:${input.workstream.id}:${input.channelId}`, async () =>
@@ -732,6 +735,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       status: "slack_created",
       lastError: null,
     });
+    this.assertNotStopping();
 
     let threadId: string;
     try {
@@ -764,6 +768,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       appThreadId: threadId,
       lastError: null,
     });
+    this.assertNotStopping();
 
     const worker = this.store.upsertWorker({
       key: `${input.workstream.teamId}:${input.channelId}:${rootTs}`,
@@ -788,6 +793,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       lastInboundMessageTs: rootTs,
       pendingRequest: null,
     });
+    this.assertNotStopping();
     await this.workstreams.bindRequestItemToWorker(
       input.workstream,
       {
@@ -805,6 +811,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       status: "ready_to_start",
       lastError: null,
     });
+    this.assertNotStopping();
     await this.setWorkerIdentityReaction(worker);
     await this.setThreadStatusReaction(input.channelId, rootTs, STATUS_REACTIONS.seen);
 
@@ -827,6 +834,12 @@ export class SlackCodexWorkersService extends EventEmitter {
         });
       }
       throw error;
+    }
+  }
+
+  private assertNotStopping(): void {
+    if (this.stopping) {
+      throw new Error("Shutdown in progress.");
     }
   }
 
