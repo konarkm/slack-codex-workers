@@ -122,7 +122,7 @@ function parseRegistrationAction(value: string | null | undefined): Registration
 
 function parseRegistrationTrigger(value: string | null | undefined): RegistrationTrigger {
   if (!value) {
-    return { kind: "cron", schedule: "", timezone: "UTC" };
+    return { kind: "cron", schedule: "", timezone: "" };
   }
   try {
     const parsed = JSON.parse(value) as Record<string, unknown>;
@@ -149,10 +149,10 @@ function parseRegistrationTrigger(value: string | null | undefined): Registratio
     return {
       kind: "cron",
       schedule: typeof parsed.schedule === "string" ? parsed.schedule : "",
-      timezone: typeof parsed.timezone === "string" ? parsed.timezone : "UTC",
+      timezone: typeof parsed.timezone === "string" ? parsed.timezone : "",
     };
   } catch {
-    return { kind: "cron", schedule: "", timezone: "UTC" };
+    return { kind: "cron", schedule: "", timezone: "" };
   }
 }
 

@@ -1086,6 +1086,95 @@ describe("service lifecycle decisions", () => {
     store.close();
   });
 
+  it("retries transient wake_self delivery failures without dropping the wake", async () => {
+    const { service, codex, store } = await createService();
+    createWorker(service, { workstreamId: "T1:root" });
+    codex.reconcileThreadForSend.mockResolvedValue("idle");
+    codex.startTurnWithResumeFallback
+      .mockRejectedValueOnce(new Error("temporary start failure"))
+      .mockResolvedValueOnce("turn-heartbeat");
+
+    store.upsertRegistration({
+      id: "reg-heartbeat",
+      teamId: "T1",
+      workstreamId: "T1:root",
+      workerKey: "T1:C1:1.000",
+      ownerUserId: "U1",
+      rootOwnerUserId: "U1",
+      description: null,
+      enabled: true,
+      target: {
+        kind: "worker",
+        workstreamId: "T1:root",
+        workerKey: "T1:C1:1.000",
+      },
+      action: { kind: "wake_self" },
+      trigger: { kind: "heartbeat", intervalMinutes: 1 },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    await service.enqueueDueRegistrationWakes();
+    await service.deliverQueuedWakes();
+
+    let wakes = store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000");
+    expect(wakes).toHaveLength(1);
+    expect(wakes[0]).toMatchObject({ status: "queued" });
+    expect(wakes[0]?.summary).toContain("retrying after wake_self failure");
+
+    await service.deliverQueuedWakes();
+
+    wakes = store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000");
+    expect(wakes[0]).toMatchObject({ status: "delivered" });
+    expect(codex.startTurnWithResumeFallback).toHaveBeenCalledTimes(2);
+    store.close();
+  });
+
+  it("retries scheduled spawn on the same public shell after a transient failure", async () => {
+    const { service, codex, store, slack } = await createService();
+    createWorker(service, { workstreamId: "T1:root" });
+    codex.createWorkerThread
+      .mockRejectedValueOnce(new Error("thread start failed"))
+      .mockResolvedValueOnce({ threadId: "thread-2" });
+    codex.startTurnWithResumeFallback.mockResolvedValue("turn-spawn");
+
+    store.upsertRegistration({
+      id: "reg-cron-spawn",
+      teamId: "T1",
+      workstreamId: "T1:root",
+      workerKey: null,
+      ownerUserId: "U1",
+      rootOwnerUserId: "U1",
+      description: "Daily digest",
+      enabled: true,
+      target: {
+        kind: "workstream",
+        workstreamId: "T1:root",
+        workerKey: null,
+      },
+      action: { kind: "spawn" },
+      trigger: { kind: "cron", schedule: "* * * * *", timezone: "America/Los_Angeles" },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    await service.enqueueDueRegistrationWakes();
+    await service.deliverQueuedWakes();
+
+    let wakes = store.listPendingWakesForScope("T1", "T1:root", null);
+    expect(wakes).toHaveLength(1);
+    expect(wakes[0]).toMatchObject({ status: "queued" });
+    expect(slack.postTopLevelMessage).toHaveBeenCalledTimes(1);
+
+    await service.deliverQueuedWakes();
+
+    wakes = store.listPendingWakesForScope("T1", "T1:root", null);
+    expect(wakes[0]).toMatchObject({ status: "delivered" });
+    expect(slack.postTopLevelMessage).toHaveBeenCalledTimes(1);
+    expect(store.listWorkers()).toHaveLength(2);
+    store.close();
+  });
+
   it("writes request and response items for a root workstream worker", async () => {
     const { dir, service, codex, store } = await createService();
     codex.createWorkerThread.mockResolvedValue({ threadId: "thread-2" });

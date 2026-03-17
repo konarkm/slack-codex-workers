@@ -1834,6 +1834,10 @@ export class SlackCodexWorkersService extends EventEmitter {
   private async deliverQueuedWakes(): Promise<void> {
     const wakes = this.store.listQueuedPendingWakes();
     for (const wake of wakes) {
+      if (this.store.getPendingRestart() && this.isRuntimeIdle()) {
+        await this.maybeExecuteQueuedRestart();
+        return;
+      }
       const registration = this.store.getRegistration(wake.registrationId);
       if (!registration || !registration.enabled) {
         this.store.updatePendingWake(wake.id, {
@@ -1867,8 +1871,8 @@ export class SlackCodexWorkersService extends EventEmitter {
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           this.store.updatePendingWake(wake.id, {
-            status: "failed",
-            summary: `${wake.summary} (failed: ${message})`,
+            status: "queued",
+            summary: `${stripWakeStatusSuffix(wake.summary)} (retrying after wake_self failure: ${message})`,
           });
         }
         continue;
@@ -1910,8 +1914,8 @@ export class SlackCodexWorkersService extends EventEmitter {
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           this.store.updatePendingWake(wake.id, {
-            status: "failed",
-            summary: `${wake.summary} (failed: ${message})`,
+            status: "queued",
+            summary: `${stripWakeStatusSuffix(wake.summary)} (retrying after spawn failure: ${message})`,
           });
         }
       }
@@ -2639,6 +2643,13 @@ function isPermanentInvalidConfigWake(
   if (!wake || wake.status !== "failed") return false;
   if (!wake.summary.startsWith("[config error]")) return false;
   return wake.updatedAt >= registrationUpdatedAt;
+}
+
+function stripWakeStatusSuffix(summary: string): string {
+  const marker = " (";
+  const index = summary.indexOf(marker);
+  if (index < 0) return summary;
+  return summary.slice(0, index);
 }
 
 function formatRegistrationSummary(registration: RegistrationRecord): string {
