@@ -180,6 +180,12 @@ export interface WebhookEventRecord {
   updatedAt: string;
 }
 
+export interface WebhookMailboxState {
+  currentSecret: string;
+  previousSecret: string | null;
+  updatedAt: string;
+}
+
 export interface PendingWorkerShellSource {
   sourceKind: string;
   sourceSummary: string;

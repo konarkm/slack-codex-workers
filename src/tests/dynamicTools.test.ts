@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   adminDynamicTools,
   slackGetCurrentTimeToolName,
+  slackGetWebhookMailboxToolName,
+  slackRotateWebhookSecretToolName,
   slackCreateWorkstreamArgsSchema,
   slackSetCronArgsSchema,
   slackSetWebhookArgsSchema,
@@ -69,5 +71,17 @@ describe("dynamic tools", () => {
   it("exposes the current time tool to the admin surface", () => {
     const tool = adminDynamicTools.find((entry) => entry.name === slackGetCurrentTimeToolName);
     expect(tool?.description).toContain("current local time or timezone");
+  });
+
+  it("exposes the shared webhook mailbox tool to workers and admins", () => {
+    const workerTool = workerDynamicTools.find((entry) => entry.name === slackGetWebhookMailboxToolName);
+    const adminTool = adminDynamicTools.find((entry) => entry.name === slackGetWebhookMailboxToolName);
+    expect(workerTool?.description).toContain("shared webhook mailbox");
+    expect(adminTool?.description).toContain("shared webhook mailbox");
+  });
+
+  it("exposes webhook secret rotation only on the admin surface", () => {
+    expect(workerDynamicTools.map((entry) => entry.name)).not.toContain(slackRotateWebhookSecretToolName);
+    expect(adminDynamicTools.map((entry) => entry.name)).toContain(slackRotateWebhookSecretToolName);
   });
 });

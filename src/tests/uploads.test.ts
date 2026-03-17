@@ -33,7 +33,9 @@ function makeConfig(dir: string): AppConfig {
     webhookPath: "/webhooks",
     webhookBodyMaxBytes: 256 * 1024,
     webhookPayloadStorageDir: path.join(dir, "webhooks"),
-    webhookSourceSecrets: { github: "secret-github" },
+    webhookSharedSecret: "secret-shared",
+    webhookPreviousSharedSecret: null,
+    webhookPublicBaseUrl: null,
   };
 }
 

@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { DEFAULT_EFFORTS, type AppConfig } from "../config.js";
@@ -37,6 +37,7 @@ import type {
   SlackMessageContext,
   TurnInput,
   WebhookEventRecord,
+  WebhookMailboxState,
   WorkstreamRecord,
   WorkerRecord,
   WorklogItem,
@@ -108,6 +109,7 @@ export class SlackCodexWorkersService extends EventEmitter {
     this.webhooks = new WebhookIngressServer(
       config,
       async (input) => this.ingestWebhookEvent(input),
+      () => this.store.getWebhookMailboxState(),
       () => this.runtimeStarted && !this.stopping,
     );
     this.codex.registerDynamicToolHandlers({
@@ -116,6 +118,8 @@ export class SlackCodexWorkersService extends EventEmitter {
       createWorkstream: async (args, ctx) => this.handleCreateWorkstreamTool(args, ctx),
       uploadFiles: async (args, ctx) => this.handleUploadFilesTool(args, ctx),
       getCurrentTime: async (ctx) => this.handleGetCurrentTimeTool(ctx),
+      getWebhookMailbox: async (ctx) => this.handleGetWebhookMailboxTool(ctx),
+      rotateWebhookSecret: async (ctx) => this.handleRotateWebhookSecretTool(ctx),
       setHeartbeat: async (args, ctx) => this.handleSetHeartbeatTool(args, ctx),
       setCron: async (args, ctx) => this.handleSetCronTool(args, ctx),
       setWebhook: async (args, ctx) => this.handleSetWebhookTool(args, ctx),
@@ -133,6 +137,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       await this.codex.start();
       this.registerSlackHandlers();
       await this.slack.start();
+      this.ensureWebhookMailboxInitialized();
       await this.webhooks.start();
       await this.bootstrapWorkstreams();
       await this.postPendingRestartNotice();
@@ -1558,9 +1563,18 @@ export class SlackCodexWorkersService extends EventEmitter {
     const message = notice.target === "both"
       ? "Bridge and Codex restarted. Back online."
       : "Bridge restarted. Back online.";
-    await this.enqueueSlackWrite(this.getDmQueueKey(notice.teamId, notice.userId), async () => {
-      await this.slack.postTopLevelMessage(notice.channelId, renderSystemMessage(message));
-    });
+    try {
+      await this.enqueueSlackWrite(this.getDmQueueKey(notice.teamId, notice.userId), async () => {
+        await this.slack.postTopLevelMessage(notice.channelId, renderSystemMessage(message));
+      });
+    } catch (error) {
+      logWarn("failed to post pending restart notice", {
+        teamId: notice.teamId,
+        userId: notice.userId,
+        channelId: notice.channelId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   private async handleListChannelsTool(query: string, ctx: DynamicToolHandlerContext): Promise<string> {
@@ -1695,6 +1709,23 @@ export class SlackCodexWorkersService extends EventEmitter {
 
   private async handleGetCurrentTimeTool(_ctx: DynamicToolHandlerContext): Promise<string> {
     return formatCurrentTimeInfo(this.config.workspaceTimezone, new Date());
+  }
+
+  private async handleGetWebhookMailboxTool(_ctx: DynamicToolHandlerContext): Promise<string> {
+    const mailbox = this.requireWebhookMailboxState();
+    return formatWebhookMailboxInfo(this.config, mailbox);
+  }
+
+  private async handleRotateWebhookSecretTool(ctx: DynamicToolHandlerContext): Promise<string> {
+    this.requireAdminDmContext(ctx);
+    const current = this.requireWebhookMailboxState();
+    const updated: WebhookMailboxState = {
+      currentSecret: generateWebhookSecret(),
+      previousSecret: current.currentSecret,
+      updatedAt: new Date().toISOString(),
+    };
+    this.store.setWebhookMailboxState(updated);
+    return formatWebhookMailboxInfo(this.config, updated);
   }
 
   private async handleSetHeartbeatTool(
@@ -2797,6 +2828,41 @@ export class SlackCodexWorkersService extends EventEmitter {
     if (!session) throw new Error(`Missing DM session ${teamId}:${userId}`);
     return session;
   }
+
+  private requireAdminDmContext(ctx: DynamicToolHandlerContext): DmSessionRecord {
+    const session = this.store.listDmSessions().find((candidate) => candidate.appThreadId === ctx.threadId) ?? null;
+    if (!session) {
+      throw new Error("This tool is only available from the admin DM.");
+    }
+    return session;
+  }
+
+  private ensureWebhookMailboxInitialized(): WebhookMailboxState {
+    const existing = this.store.getWebhookMailboxState();
+    if (existing?.currentSecret) {
+      if (!existing.previousSecret && this.config.webhookPreviousSharedSecret) {
+        const updated = {
+          ...existing,
+          previousSecret: this.config.webhookPreviousSharedSecret,
+          updatedAt: new Date().toISOString(),
+        };
+        this.store.setWebhookMailboxState(updated);
+        return updated;
+      }
+      return existing;
+    }
+    const state: WebhookMailboxState = {
+      currentSecret: this.config.webhookSharedSecret ?? generateWebhookSecret(),
+      previousSecret: this.config.webhookPreviousSharedSecret,
+      updatedAt: new Date().toISOString(),
+    };
+    this.store.setWebhookMailboxState(state);
+    return state;
+  }
+
+  private requireWebhookMailboxState(): WebhookMailboxState {
+    return this.ensureWebhookMailboxInitialized();
+  }
 }
 
 function buildInboundMessageKey(context: SlackMessageContext, kind: InboundMessageKind): string {
@@ -2941,6 +3007,27 @@ function formatCurrentTimeInfo(timeZone: string, now: Date): string {
     `workspace_timezone: ${timeZone}`,
     `current_time_local: ${local}`,
   ].join("\n");
+}
+
+function formatWebhookMailboxInfo(config: AppConfig, mailbox: WebhookMailboxState): string {
+  const publicUrl = buildWebhookPublicUrl(config);
+  return [
+    `webhook_public_url: ${publicUrl ?? "(not configured)"}`,
+    `webhook_path: ${config.webhookPath}`,
+    `webhook_shared_secret: ${mailbox.currentSecret}`,
+    `auth_header_bearer: Authorization: Bearer ${mailbox.currentSecret}`,
+    `auth_header_alt: x-bridge-webhook-secret: ${mailbox.currentSecret}`,
+    "json_body_shape: {\"source\":\"agentmail\",\"event\":\"email.received\",\"id\":\"optional-id\",\"match\":{\"key\":\"value\"},\"payload\":{...}}",
+  ].join("\n");
+}
+
+function buildWebhookPublicUrl(config: AppConfig): string | null {
+  if (!config.webhookPublicBaseUrl) return null;
+  return `${config.webhookPublicBaseUrl}${config.webhookPath === "/" ? "" : config.webhookPath}`;
+}
+
+function generateWebhookSecret(): string {
+  return randomBytes(24).toString("base64url");
 }
 
 function formatRegistrationLine(registration: RegistrationRecord): string {

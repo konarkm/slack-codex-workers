@@ -37,7 +37,9 @@ const configSchema = z.object({
   webhookPath: z.string().min(1).default(defaultWebhookPath),
   webhookBodyMaxBytes: z.number().int().positive().default(256 * 1024),
   webhookPayloadStorageDir: z.string().min(1).default(path.join(defaultStateDir, "webhooks")),
-  webhookSourceSecrets: z.record(z.string(), z.string().min(1)).default({}),
+  webhookSharedSecret: z.string().min(1).nullable().default(null),
+  webhookPreviousSharedSecret: z.string().min(1).nullable().default(null),
+  webhookPublicBaseUrl: z.string().min(1).nullable().default(null),
 });
 
 export type AppConfig = z.infer<typeof configSchema>;
@@ -73,7 +75,9 @@ export function loadConfig(): AppConfig {
     webhookPath: normalizeWebhookPath(process.env.WEBHOOK_PATH),
     webhookBodyMaxBytes: parseNumber(process.env.WEBHOOK_BODY_MAX_BYTES, 256 * 1024),
     webhookPayloadStorageDir: process.env.WEBHOOK_PAYLOAD_STORAGE_DIR ?? path.join(stateDir, "webhooks"),
-    webhookSourceSecrets: parseWebhookSourceSecrets(process.env.WEBHOOK_SOURCE_SECRETS),
+    webhookSharedSecret: parseOptionalString(process.env.WEBHOOK_SHARED_SECRET),
+    webhookPreviousSharedSecret: parseOptionalString(process.env.WEBHOOK_PREVIOUS_SHARED_SECRET),
+    webhookPublicBaseUrl: normalizeOptionalBaseUrl(process.env.WEBHOOK_PUBLIC_BASE_URL),
   };
 
   return configSchema.parse(raw);
@@ -150,24 +154,23 @@ function normalizeWebhookPath(value: string | undefined): string {
   return normalized.length > 1 ? normalized.replace(/\/+$/, "") : normalized;
 }
 
-function parseWebhookSourceSecrets(value: string | undefined): Record<string, string> {
-  if (!value?.trim()) {
-    return {};
+function parseOptionalString(value: string | undefined): string | null {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
+}
+
+function normalizeOptionalBaseUrl(value: string | undefined): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  try {
+    const url = new URL(trimmed);
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      return null;
+    }
+    return url.toString().replace(/\/+$/, "");
+  } catch {
+    return null;
   }
-  return Object.fromEntries(
-    value
-      .split(",")
-      .map((entry) => entry.trim())
-      .filter((entry) => entry.length > 0)
-      .map((entry) => {
-        const separatorIndex = entry.indexOf("=");
-        if (separatorIndex <= 0 || separatorIndex === entry.length - 1) {
-          throw new Error(`Invalid WEBHOOK_SOURCE_SECRETS entry: ${entry}`);
-        }
-        return [entry.slice(0, separatorIndex).trim(), entry.slice(separatorIndex + 1).trim()];
-      })
-      .filter((entry) => entry[0].length > 0 && entry[1].length > 0),
-  );
 }
 
 function validateTimezone(value: string): string {

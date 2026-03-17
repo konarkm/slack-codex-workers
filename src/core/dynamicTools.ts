@@ -7,6 +7,8 @@ export const slackSpawnWorkerToolName = "slack_spawn_worker";
 export const slackCreateWorkstreamToolName = "slack_create_workstream";
 export const slackUploadFilesToolName = "slack_upload_files";
 export const slackGetCurrentTimeToolName = "get_current_time";
+export const slackGetWebhookMailboxToolName = "get_webhook_mailbox";
+export const slackRotateWebhookSecretToolName = "rotate_webhook_secret";
 export const slackSetHeartbeatToolName = "set_heartbeat";
 export const slackSetCronToolName = "set_cron";
 export const slackSetWebhookToolName = "set_webhook";
@@ -96,6 +98,16 @@ export const workerDynamicTools = [
     },
   },
   {
+    name: slackGetWebhookMailboxToolName,
+    description:
+      "Get the shared webhook mailbox configuration for this bridge, including the public endpoint when configured, the shared secret, the accepted auth headers, and the JSON body shape expected by webhook ingress.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {},
+    },
+  },
+  {
     name: slackSetHeartbeatToolName,
     description:
       "Create or update a durable worker heartbeat registration for the current public worker thread. This always targets wake_self on the current worker.",
@@ -129,7 +141,7 @@ export const workerDynamicTools = [
   {
     name: slackSetWebhookToolName,
     description:
-      "Create or update a durable webhook registration. If target is omitted it defaults to 'self'. target='self' wakes the current worker; target='workstream' creates new public work in the current workstream. source must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}.",
+      "Create or update a durable webhook registration against the shared bridge webhook mailbox. If target is omitted it defaults to 'self'. target='self' wakes the current worker; target='workstream' creates new public work in the current workstream. source is the logical producer namespace and must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}. Use get_webhook_mailbox when you need the shared endpoint, auth secret, or payload shape for configuring external systems.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -201,8 +213,19 @@ export const workerDynamicTools = [
 
 export const adminDynamicTools = [
   workerDynamicTools[4],
+  workerDynamicTools[5],
   workerDynamicTools[2],
   workerDynamicTools[3],
+  {
+    name: slackRotateWebhookSecretToolName,
+    description:
+      "Rotate the shared webhook mailbox secret for the entire bridge. This moves the previous current secret into fallback position and returns the updated mailbox bundle. Use this only in the admin DM when rotating external webhook credentials intentionally.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {},
+    },
+  },
 ] as const;
 
 export const dynamicToolCallParamsSchema = z.object({
@@ -237,6 +260,9 @@ export const slackUploadFilesArgsSchema = z.object({
     title: z.string().min(1).optional(),
   })).min(1),
 });
+
+export const slackGetWebhookMailboxArgsSchema = z.object({});
+export const slackRotateWebhookSecretArgsSchema = z.object({});
 
 export const slackSetHeartbeatArgsSchema = z.object({
   registrationId: z.string().min(1).optional(),
@@ -275,6 +301,7 @@ export const workerDeveloperInstructions = [
   "Use slack_spawn_worker only for distinct user-facing child tasks that should live as their own top-level Slack thread. Do not use it for internal subagents or minor follow-ups.",
   "Use slack_create_workstream only after the human has explicitly approved creating a new workstream in the current conversation. This is conversational/tool guidance, not a separate permission layer.",
   "Use get_current_time when you need the current local time or configured workspace timezone for time-aware reasoning or scheduling.",
+  "Use get_webhook_mailbox when you need the bridge's shared webhook endpoint, secret, or accepted payload shape so you can configure external systems end-to-end.",
   "Use set_heartbeat, set_cron, set_webhook, disable_registration, list_registrations, get_registration, and list_wake_deliveries to manage durable wakeup registrations and inspect wake execution history for the current worker/workstream when you need ongoing automation.",
   "Use slack_upload_files when you need to share one or more existing local files into the current Slack thread. Only upload files that materially help the user.",
   "If you create a child worker, it is fire-and-forget. Do not wait on the child unless the human explicitly asks you to.",
@@ -286,6 +313,7 @@ export const adminDeveloperInstructions = [
   "Bridge slash commands are intercepted before they reach you.",
   "Use slack_create_workstream only after the human has explicitly approved creating a new workstream in the conversation.",
   "Use get_current_time when you need the current local time or configured workspace timezone.",
+  "Use get_webhook_mailbox to inspect the current shared webhook mailbox endpoint and secret, and use rotate_webhook_secret when the human intentionally wants to rotate that organization-wide secret.",
   "Use slack_upload_files when you need to share one or more existing local files into this admin DM conversation.",
   "Use concise operational language suitable for an admin/operator chat.",
 ].join("\n");

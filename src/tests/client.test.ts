@@ -27,4 +27,30 @@ describe("codex client dynamic tool routing", () => {
       success: true,
     });
   });
+
+  it("routes get_webhook_mailbox through the dynamic tool handler", async () => {
+    const respond = vi.fn().mockResolvedValue(undefined);
+    const getWebhookMailbox = vi.fn().mockResolvedValue("webhook_public_url: https://hooks.example.test/webhooks");
+    const client = Object.create(CodexClient.prototype) as any;
+    client.rpc = { respond };
+    client.dynamicToolHandlers = { getWebhookMailbox };
+
+    await client.handleDynamicToolCall("req-2", {
+      threadId: "thread-2",
+      turnId: "turn-2",
+      callId: "call-2",
+      tool: "get_webhook_mailbox",
+      arguments: {},
+    });
+
+    expect(getWebhookMailbox).toHaveBeenCalledWith({
+      threadId: "thread-2",
+      turnId: "turn-2",
+      callId: "call-2",
+    });
+    expect(respond).toHaveBeenCalledWith("req-2", {
+      contentItems: [{ type: "inputText", text: "webhook_public_url: https://hooks.example.test/webhooks" }],
+      success: true,
+    });
+  });
 });

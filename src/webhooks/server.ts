@@ -2,6 +2,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { logInfo, logWarn } from "../logger.js";
 import type { AppConfig } from "../config.js";
+import type { WebhookMailboxState } from "../types.js";
 
 const webhookSourcePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
@@ -32,6 +33,7 @@ export class WebhookIngressServer {
   constructor(
     private readonly config: AppConfig,
     private readonly handler: (input: NormalizedWebhookIngress) => Promise<WebhookIngressResult>,
+    private readonly getMailboxState: () => WebhookMailboxState | null,
     private readonly canAcceptRequest: () => boolean = () => true,
   ) {}
 
@@ -51,7 +53,7 @@ export class WebhookIngressServer {
     logInfo("Webhook ingress started", {
       webhookPort: this.config.webhookPort,
       webhookPath: this.config.webhookPath,
-      configuredSources: Object.keys(this.config.webhookSourceSecrets).sort(),
+      mailboxConfigured: Boolean(this.getMailboxState()?.currentSecret),
     });
   }
 
@@ -111,17 +113,22 @@ export class WebhookIngressServer {
       return { status: 405, body: { ok: false, error: "method_not_allowed" } };
     }
 
-    const source = this.extractSource(req.url);
-    if (!source) {
+    if (!this.matchesWebhookPath(req.url)) {
       return { status: 404, body: { ok: false, error: "not_found" } };
     }
 
-    const expectedSecret = this.config.webhookSourceSecrets[source];
-    if (!expectedSecret) {
-      return { status: 401, body: { ok: false, error: "unauthorized" } };
+    const mailboxState = this.getMailboxState();
+    if (!mailboxState?.currentSecret) {
+      return { status: 503, body: { ok: false, error: "mailbox_unavailable" } };
     }
     const providedSecret = this.extractSecret(req);
-    if (!providedSecret || !safeSecretEquals(providedSecret, expectedSecret)) {
+    if (
+      !providedSecret
+      || (
+        !safeSecretEquals(providedSecret, mailboxState.currentSecret)
+        && !(mailboxState.previousSecret && safeSecretEquals(providedSecret, mailboxState.previousSecret))
+      )
+    ) {
       return { status: 401, body: { ok: false, error: "unauthorized" } };
     }
     if (!this.canAcceptRequest()) {
@@ -150,6 +157,10 @@ export class WebhookIngressServer {
       return { status: 400, body: { ok: false, error: "invalid_json" } };
     }
 
+    const source = normalizeWebhookSource(typeof parsedBody.source === "string" ? parsedBody.source : null);
+    if (!source) {
+      return { status: 400, body: { ok: false, error: "missing_source" } };
+    }
     const event = typeof parsedBody.event === "string" && parsedBody.event.trim()
       ? parsedBody.event.trim()
       : null;
@@ -172,24 +183,11 @@ export class WebhookIngressServer {
     };
   }
 
-  private extractSource(rawUrl: string | undefined): string | null {
-    if (!rawUrl) return null;
+  private matchesWebhookPath(rawUrl: string | undefined): boolean {
+    if (!rawUrl) return false;
     const url = new URL(rawUrl, "http://127.0.0.1");
-    const normalizedBase = this.config.webhookPath === "/" ? "" : this.config.webhookPath;
-    if (!url.pathname.startsWith(`${normalizedBase}/`)) {
-      return null;
-    }
-    const encodedSource = url.pathname.slice(normalizedBase.length + 1).trim();
-    if (encodedSource.length === 0 || encodedSource.includes("/")) {
-      return null;
-    }
-    let source: string;
-    try {
-      source = decodeURIComponent(encodedSource);
-    } catch {
-      return null;
-    }
-    return normalizeWebhookSource(source);
+    const normalizedBase = this.config.webhookPath || "/";
+    return url.pathname === normalizedBase;
   }
 
   private extractSecret(req: IncomingMessage): string | null {

@@ -12,12 +12,16 @@ import {
   slackCreateWorkstreamArgsSchema,
   slackCreateWorkstreamToolName,
   slackGetCurrentTimeToolName,
+  slackGetWebhookMailboxArgsSchema,
+  slackGetWebhookMailboxToolName,
   slackGetRegistrationArgsSchema,
   slackGetRegistrationToolName,
   slackListChannelsArgsSchema,
   slackListChannelsToolName,
   slackListWakeDeliveriesToolName,
   slackListRegistrationsToolName,
+  slackRotateWebhookSecretArgsSchema,
+  slackRotateWebhookSecretToolName,
   slackSetCronArgsSchema,
   slackSetCronToolName,
   slackSetHeartbeatArgsSchema,
@@ -63,6 +67,8 @@ export interface DynamicToolHandlers {
   createWorkstream(args: z.infer<typeof slackCreateWorkstreamArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
   uploadFiles(args: z.infer<typeof slackUploadFilesArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
   getCurrentTime(ctx: DynamicToolHandlerContext): Promise<string>;
+  getWebhookMailbox(ctx: DynamicToolHandlerContext): Promise<string>;
+  rotateWebhookSecret(ctx: DynamicToolHandlerContext): Promise<string>;
   setHeartbeat(args: z.infer<typeof slackSetHeartbeatArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
   setCron(args: z.infer<typeof slackSetCronArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
   setWebhook(args: z.infer<typeof slackSetWebhookArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
@@ -467,6 +473,20 @@ export class CodexClient {
 
     if (parsed.data.tool === slackGetCurrentTimeToolName) {
       const text = await this.dynamicToolHandlers.getCurrentTime(ctx);
+      await this.rpc.respond(id, { contentItems: [{ type: "inputText", text }], success: true });
+      return;
+    }
+
+    if (parsed.data.tool === slackGetWebhookMailboxToolName) {
+      slackGetWebhookMailboxArgsSchema.parse(parsed.data.arguments);
+      const text = await this.dynamicToolHandlers.getWebhookMailbox(ctx);
+      await this.rpc.respond(id, { contentItems: [{ type: "inputText", text }], success: true });
+      return;
+    }
+
+    if (parsed.data.tool === slackRotateWebhookSecretToolName) {
+      slackRotateWebhookSecretArgsSchema.parse(parsed.data.arguments);
+      const text = await this.dynamicToolHandlers.rotateWebhookSecret(ctx);
       await this.rpc.respond(id, { contentItems: [{ type: "inputText", text }], success: true });
       return;
     }

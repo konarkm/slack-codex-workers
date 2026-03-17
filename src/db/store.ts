@@ -20,6 +20,7 @@ import type {
   SessionStatus,
   TeamDefaults,
   WebhookEventRecord,
+  WebhookMailboxState,
   WorkstreamRecord,
   WorkerIdentity,
   WorkerRecord,
@@ -668,6 +669,14 @@ export class Store {
 
   setPendingRestartNotice(record: PendingRestartRecord): void {
     this.writeJsonMetadata("restart:notice", record);
+  }
+
+  getWebhookMailboxState(): WebhookMailboxState | null {
+    return this.readJsonMetadata<WebhookMailboxState>("webhook:mailbox");
+  }
+
+  setWebhookMailboxState(state: WebhookMailboxState): void {
+    this.writeJsonMetadata("webhook:mailbox", state);
   }
 
   upsertChannels(channels: ChannelRecord[]): void {

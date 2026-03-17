@@ -76,7 +76,9 @@ function makeConfig(dir: string): AppConfig {
     webhookPath: "/webhooks",
     webhookBodyMaxBytes: 256 * 1024,
     webhookPayloadStorageDir: path.join(dir, "webhooks"),
-    webhookSourceSecrets: { github: "secret-github", stripe: "secret-stripe" },
+    webhookSharedSecret: "secret-shared",
+    webhookPreviousSharedSecret: "secret-previous",
+    webhookPublicBaseUrl: "https://hooks.example.test",
   };
 }
 
@@ -692,6 +694,23 @@ describe("service lifecycle decisions", () => {
     store.close();
   });
 
+  it("does not fail if a pending relaunch notice cannot be posted", async () => {
+    const { service, slack, store } = await createService();
+    store.setPendingRestartNotice({
+      target: "bridge",
+      teamId: "T1",
+      userId: "U-admin",
+      channelId: "D1",
+      requestedAt: "2026-03-12T12:00:00.000Z",
+    });
+    slack.postTopLevelMessage.mockRejectedValueOnce(new Error("cannot_reply_to_message"));
+
+    await expect(service.postPendingRestartNotice()).resolves.toBeUndefined();
+
+    expect(store.consumePendingRestartNotice()).toBeNull();
+    store.close();
+  });
+
   it("uploads files into the current admin DM conversation", async () => {
     const { dir, service, slack, store } = await createService();
     createDmSession(service);
@@ -780,6 +799,22 @@ describe("service lifecycle decisions", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("reports the shared webhook mailbox bundle through the mailbox tool", async () => {
+    const { service, store } = await createService();
+
+    const result = await (service as any).handleGetWebhookMailboxTool({
+      threadId: "thread-1",
+      turnId: "turn-1",
+      callId: "call-1",
+    });
+
+    expect(result).toContain("webhook_public_url: https://hooks.example.test/webhooks");
+    expect(result).toContain("webhook_shared_secret: secret-shared");
+    expect(result).toContain("auth_header_bearer: Authorization: Bearer secret-shared");
+    expect(result).toContain("\"source\":\"agentmail\"");
+    store.close();
   });
 
   it("creates a heartbeat registration and updates the local projection", async () => {
@@ -1379,13 +1414,14 @@ describe("service lifecycle decisions", () => {
 
     const port = service.webhooks.getListeningPort();
     expect(port).not.toBeNull();
-    const response = await fetch(`http://127.0.0.1:${port}/webhooks/github`, {
+    const response = await fetch(`http://127.0.0.1:${port}/webhooks`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        authorization: "Bearer secret-github",
+        authorization: "Bearer secret-shared",
       },
       body: JSON.stringify({
+        source: "github",
         event: "push",
         id: "evt-http-1",
         match: { repo: "acme/api" },
@@ -1402,6 +1438,29 @@ describe("service lifecycle decisions", () => {
     expect(scheduleSpy).toHaveBeenCalledWith(0);
     expect(store.getWebhookEvent("T1", "github", "push", "evt-http-1")).not.toBeNull();
     expect(store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000")).toHaveLength(1);
+    await service.stop();
+  });
+
+  it("rotates the shared webhook secret only from the admin DM context", async () => {
+    const { service, store } = await createService();
+    createDmSession(service, { appThreadId: "dm-thread-1" });
+
+    const result = await (service as any).handleRotateWebhookSecretTool({
+      threadId: "dm-thread-1",
+      turnId: "turn-1",
+      callId: "call-1",
+    });
+
+    const mailbox = store.getWebhookMailboxState();
+    expect(result).toContain("webhook_shared_secret:");
+    expect(mailbox?.previousSecret).toBe("secret-shared");
+    expect(mailbox?.currentSecret).not.toBe("secret-shared");
+
+    await expect((service as any).handleRotateWebhookSecretTool({
+      threadId: "thread-1",
+      turnId: "turn-1",
+      callId: "call-2",
+    })).rejects.toThrow("admin DM");
   });
 
   it("coalesces missed heartbeat runs instead of draining backlog", async () => {

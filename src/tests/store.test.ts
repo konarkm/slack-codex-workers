@@ -59,6 +59,22 @@ describe("store", () => {
     store.close();
   });
 
+  it("stores webhook mailbox state in metadata", async () => {
+    const { store } = await createStore();
+    store.setWebhookMailboxState({
+      currentSecret: "secret-current",
+      previousSecret: "secret-previous",
+      updatedAt: "2026-03-17T00:00:00.000Z",
+    });
+
+    expect(store.getWebhookMailboxState()).toEqual({
+      currentSecret: "secret-current",
+      previousSecret: "secret-previous",
+      updatedAt: "2026-03-17T00:00:00.000Z",
+    });
+    store.close();
+  });
+
   it("clears nullable worker fields when explicitly set to null", async () => {
     const { store } = await createStore();
     store.upsertWorker({
