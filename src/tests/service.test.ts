@@ -1169,16 +1169,17 @@ describe("service lifecycle decisions", () => {
     const wake = store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000")[0]!;
     expect(wake).toMatchObject({ status: "quarantined", attempts: 3 });
     expect(wake.summary).toContain("quarantined");
+    expect(store.getRegistration("reg-heartbeat")).toMatchObject({ enabled: false });
     store.close();
   });
 
   it("retries scheduled spawn on the same public shell after a transient failure", async () => {
     const { service, codex, store, slack } = await createService();
     createWorker(service, { workstreamId: "T1:root" });
-    codex.createWorkerThread
-      .mockRejectedValueOnce(new Error("thread start failed"))
-      .mockResolvedValueOnce({ threadId: "thread-2" });
-    codex.startTurnWithResumeFallback.mockResolvedValue("turn-spawn");
+    codex.createWorkerThread.mockResolvedValue({ threadId: "thread-2" });
+    codex.startTurnWithResumeFallback
+      .mockRejectedValueOnce(new Error("turn start failed"))
+      .mockResolvedValueOnce("turn-spawn");
 
     store.upsertRegistration({
       id: "reg-cron-spawn",
@@ -1214,6 +1215,7 @@ describe("service lifecycle decisions", () => {
     wakes = store.listPendingWakesForScope("T1", "T1:root", null);
     expect(wakes[0]).toMatchObject({ status: "delivered" });
     expect(slack.postTopLevelMessage).toHaveBeenCalledTimes(1);
+    expect(codex.createWorkerThread).toHaveBeenCalledTimes(1);
     expect(store.listWorkers()).toHaveLength(2);
     store.close();
   });
@@ -1249,6 +1251,40 @@ describe("service lifecycle decisions", () => {
     expect(wake).toMatchObject({ status: "quarantined" });
     expect(wake.summary).toContain("invalid action");
     expect(slack.postTopLevelMessage).not.toHaveBeenCalled();
+    expect(store.getRegistration("reg-invalid")).toMatchObject({ enabled: false });
+    store.close();
+  });
+
+  it("disables terminally broken registrations after worker-missing quarantine", async () => {
+    const { service, store } = await createService();
+    store.upsertRegistration({
+      id: "reg-missing-worker",
+      teamId: "T1",
+      workstreamId: "T1:root",
+      workerKey: "T1:C1:missing",
+      ownerUserId: "U1",
+      rootOwnerUserId: "U1",
+      description: null,
+      enabled: true,
+      target: {
+        kind: "worker",
+        workstreamId: "T1:root",
+        workerKey: "T1:C1:missing",
+      },
+      action: { kind: "wake_self" },
+      trigger: { kind: "heartbeat", intervalMinutes: 1 },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    await service.enqueueDueRegistrationWakes();
+    await service.deliverQueuedWakes();
+    await service.enqueueDueRegistrationWakes();
+
+    const wakes = store.listPendingWakesForScope("T1", "T1:root", "T1:C1:missing");
+    expect(wakes).toHaveLength(1);
+    expect(wakes[0]).toMatchObject({ status: "quarantined" });
+    expect(store.getRegistration("reg-missing-worker")).toMatchObject({ enabled: false });
     store.close();
   });
 

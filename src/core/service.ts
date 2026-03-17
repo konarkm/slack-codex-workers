@@ -735,7 +735,9 @@ export class SlackCodexWorkersService extends EventEmitter {
 
     let threadId: string;
     try {
-      if (input.mode === "fork" && input.parentWorkerKey) {
+      if (shell.appThreadId) {
+        threadId = shell.appThreadId;
+      } else if (input.mode === "fork" && input.parentWorkerKey) {
         const parent = this.requireWorker(input.parentWorkerKey);
         threadId = (await this.codex.forkWorkerThread(parent.appThreadId, input.runtimeSettings)).threadId;
       } else {
@@ -1818,6 +1820,7 @@ export class SlackCodexWorkersService extends EventEmitter {
           nextAttemptAt: null,
           lastError: message,
         });
+        await this.registrations.disableRegistrationById(registration.id);
         continue;
       }
       if (!dueAt) continue;
@@ -1849,19 +1852,16 @@ export class SlackCodexWorkersService extends EventEmitter {
       const registration = this.store.getRegistration(wake.registrationId);
       if (!registration || !registration.enabled) {
         this.store.updatePendingWake(wake.id, {
-          status: "failed",
+          status: "quarantined",
           summary: `${wake.summary} (registration unavailable)`,
+          lastError: "registration unavailable",
         });
         continue;
       }
       if (registration.action.kind === "wake_self" && registration.workerKey) {
         let worker = this.store.getWorkerByKey(registration.workerKey);
         if (!worker) {
-          this.store.updatePendingWake(wake.id, {
-            status: "quarantined",
-            summary: `${wake.summary} (worker missing)`,
-            lastError: "worker missing",
-          });
+          await this.quarantineWakeAndDisableRegistration(wake.id, registration.id, `${wake.summary} (worker missing)`, "worker missing");
           continue;
         }
         if (this.startingWorkerTurns.has(worker.key) || worker.pendingRequest || worker.activeTurnId || worker.status === "running") {
@@ -1880,7 +1880,7 @@ export class SlackCodexWorkersService extends EventEmitter {
             lastError: null,
           });
         } catch (error) {
-          this.recordTransientWakeFailure(wake, `wake_self failure: ${error instanceof Error ? error.message : String(error)}`);
+          await this.recordTransientWakeFailure(registration.id, wake, `wake_self failure: ${error instanceof Error ? error.message : String(error)}`);
         }
         continue;
       }
@@ -1888,11 +1888,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       if (registration.action.kind === "spawn") {
         const workstream = this.store.getWorkstreamById(registration.target.workstreamId);
         if (!workstream) {
-          this.store.updatePendingWake(wake.id, {
-            status: "quarantined",
-            summary: `${wake.summary} (workstream missing)`,
-            lastError: "workstream missing",
-          });
+          await this.quarantineWakeAndDisableRegistration(wake.id, registration.id, `${wake.summary} (workstream missing)`, "workstream missing");
           continue;
         }
         try {
@@ -1923,16 +1919,12 @@ export class SlackCodexWorkersService extends EventEmitter {
             lastError: null,
           });
         } catch (error) {
-          this.recordTransientWakeFailure(wake, `spawn failure: ${error instanceof Error ? error.message : String(error)}`);
+          await this.recordTransientWakeFailure(registration.id, wake, `spawn failure: ${error instanceof Error ? error.message : String(error)}`);
         }
         continue;
       }
 
-      this.store.updatePendingWake(wake.id, {
-        status: "quarantined",
-        summary: `${wake.summary} (invalid action)`,
-        lastError: "invalid action",
-      });
+      await this.quarantineWakeAndDisableRegistration(wake.id, registration.id, `${wake.summary} (invalid action)`, "invalid action");
     }
   }
 
@@ -1960,7 +1952,7 @@ export class SlackCodexWorkersService extends EventEmitter {
     return null;
   }
 
-  private recordTransientWakeFailure(wake: { id: string; attempts: number; summary: string }, detail: string): void {
+  private async recordTransientWakeFailure(registrationId: string, wake: { id: string; attempts: number; summary: string }, detail: string): Promise<void> {
     const nextAttempts = wake.attempts + 1;
     if (nextAttempts >= WAKE_RETRY_MAX_ATTEMPTS) {
       this.store.updatePendingWake(wake.id, {
@@ -1970,6 +1962,7 @@ export class SlackCodexWorkersService extends EventEmitter {
         lastError: detail,
         summary: `${stripWakeStatusSuffix(wake.summary)} (quarantined after ${nextAttempts} attempts: ${detail})`,
       });
+      await this.registrations.disableRegistrationById(registrationId);
       return;
     }
 
@@ -1981,6 +1974,21 @@ export class SlackCodexWorkersService extends EventEmitter {
       lastError: detail,
       summary: `${stripWakeStatusSuffix(wake.summary)} (retry ${nextAttempts}/${WAKE_RETRY_MAX_ATTEMPTS}: ${detail})`,
     });
+  }
+
+  private async quarantineWakeAndDisableRegistration(
+    wakeId: string,
+    registrationId: string,
+    summary: string,
+    lastError: string,
+  ): Promise<void> {
+    this.store.updatePendingWake(wakeId, {
+      status: "quarantined",
+      summary,
+      lastError,
+      nextAttemptAt: null,
+    });
+    await this.registrations.disableRegistrationById(registrationId);
   }
 
   private async createWorkstreamFromThreadArgs(worker: WorkerRecord, args: string[]): Promise<string> {

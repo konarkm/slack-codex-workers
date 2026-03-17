@@ -124,10 +124,12 @@ export class RegistrationManager {
 
   async disableRegistration(ctx: RegistrationContext, registrationId: string): Promise<RegistrationRecord> {
     const current = this.requireAccessibleRegistration(ctx, registrationId);
-    const updated = this.store.disableRegistration(current.id);
-    if (!updated) {
-      throw new Error("Registration not found.");
-    }
+    return (await this.disableRegistrationById(current.id)) ?? current;
+  }
+
+  async disableRegistrationById(registrationId: string): Promise<RegistrationRecord | null> {
+    const updated = this.store.disableRegistration(registrationId);
+    if (!updated) return null;
     await this.refreshProjection(updated.workstreamId);
     return updated;
   }
