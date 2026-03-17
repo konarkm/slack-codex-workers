@@ -25,6 +25,7 @@ export class WebhookIngressServer {
   constructor(
     private readonly config: AppConfig,
     private readonly handler: (input: NormalizedWebhookIngress) => Promise<WebhookIngressResult>,
+    private readonly canAcceptRequest: () => boolean = () => true,
   ) {}
 
   async start(): Promise<void> {
@@ -91,6 +92,9 @@ export class WebhookIngressServer {
   private async normalizeRequest(
     req: IncomingMessage,
   ): Promise<NormalizedWebhookIngress | { status: number; body: Record<string, unknown> }> {
+    if (!this.canAcceptRequest()) {
+      return { status: 503, body: { ok: false, error: "shutting_down" } };
+    }
     if (req.method !== "POST") {
       return { status: 405, body: { ok: false, error: "method_not_allowed" } };
     }
@@ -140,7 +144,7 @@ export class WebhookIngressServer {
 
     const id = typeof parsedBody.id === "string" && parsedBody.id.trim()
       ? parsedBody.id.trim()
-      : createHash("sha256").update(`${source}\n${event}\n${rawBody}`).digest("hex");
+      : createHash("sha256").update(`${source}\n${event}\n${stableJsonStringify(parsedBody)}`).digest("hex");
     const match = extractStringMap(parsedBody.match);
     return {
       source,
@@ -166,8 +170,8 @@ export class WebhookIngressServer {
 
   private extractSecret(req: IncomingMessage): string | null {
     const authHeader = req.headers.authorization;
-    if (typeof authHeader === "string" && authHeader.startsWith("Bearer ")) {
-      const token = authHeader.slice("Bearer ".length).trim();
+    if (typeof authHeader === "string" && /^Bearer /i.test(authHeader)) {
+      const token = authHeader.slice(authHeader.indexOf(" ") + 1).trim();
       if (token) return token;
     }
     const secretHeader = req.headers["x-bridge-webhook-secret"];
@@ -214,4 +218,22 @@ function safeSecretEquals(left: string, right: string): boolean {
     return false;
   }
   return timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function stableJsonStringify(value: unknown): string {
+  return JSON.stringify(sortJsonValue(value));
+}
+
+function sortJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry) => sortJsonValue(entry));
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [key, sortJsonValue(entry)]),
+  );
 }

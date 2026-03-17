@@ -261,6 +261,7 @@ export class Store {
         status TEXT NOT NULL,
         summary TEXT NOT NULL,
         payload_path TEXT,
+        fired_event TEXT,
         due_at TEXT,
         attempts INTEGER NOT NULL DEFAULT 0,
         next_attempt_at TEXT,
@@ -301,8 +302,7 @@ export class Store {
         payload_path TEXT NOT NULL,
         summary TEXT NOT NULL,
         created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        UNIQUE(team_id, source, dedupe_key)
+        updated_at TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS dm_sessions (
@@ -383,12 +383,55 @@ export class Store {
     this.ensureColumn("pending_wakes", "attempts", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("pending_wakes", "next_attempt_at", "TEXT");
     this.ensureColumn("pending_wakes", "last_error", "TEXT");
+    this.ensureColumn("pending_wakes", "fired_event", "TEXT");
     this.ensureColumn("dm_sessions", "channel_id", "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn("dm_sessions", "status", "TEXT NOT NULL DEFAULT 'idle'");
     this.ensureColumn("dm_sessions", "last_error", "TEXT");
     this.ensureColumn("dm_sessions", "last_inbound_message_ts", "TEXT");
     this.ensureColumn("dm_sessions", "pending_request_json", "TEXT");
     this.ensureColumn("inbound_messages", "retryable", "INTEGER NOT NULL DEFAULT 1");
+    this.migrateWebhookEventsTable();
+  }
+
+  private migrateWebhookEventsTable(): void {
+    const row = this.db.prepare(`
+      SELECT sql FROM sqlite_master
+      WHERE type = 'table' AND name = 'webhook_events'
+      LIMIT 1
+    `).get() as { sql?: string } | undefined;
+    const sql = row?.sql ?? "";
+    const usesLegacyConstraint = sql.includes("UNIQUE(team_id, source, dedupe_key)");
+    if (usesLegacyConstraint) {
+      this.db.exec(`
+        ALTER TABLE webhook_events RENAME TO webhook_events_legacy;
+
+        CREATE TABLE webhook_events (
+          id TEXT PRIMARY KEY,
+          team_id TEXT NOT NULL,
+          source TEXT NOT NULL,
+          event TEXT NOT NULL,
+          dedupe_key TEXT NOT NULL,
+          match_json TEXT,
+          payload_path TEXT NOT NULL,
+          summary TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        INSERT INTO webhook_events (
+          id, team_id, source, event, dedupe_key, match_json, payload_path, summary, created_at, updated_at
+        )
+        SELECT
+          id, team_id, source, event, dedupe_key, match_json, payload_path, summary, created_at, updated_at
+        FROM webhook_events_legacy;
+
+        DROP TABLE webhook_events_legacy;
+      `);
+    }
+    this.db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS webhook_events_source_event_dedupe_idx
+      ON webhook_events(team_id, source, event, dedupe_key);
+    `);
   }
 
   private ensureColumn(table: string, column: string, definition: string): void {
@@ -846,8 +889,8 @@ export class Store {
     const updatedAt = input.updatedAt ?? createdAt;
     this.db.prepare(`
       INSERT INTO pending_wakes (
-        id, team_id, registration_id, workstream_id, worker_key, status, summary, payload_path, due_at, attempts, next_attempt_at, last_error, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        id, team_id, registration_id, workstream_id, worker_key, status, summary, payload_path, fired_event, due_at, attempts, next_attempt_at, last_error, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       input.id,
       input.teamId,
@@ -857,6 +900,7 @@ export class Store {
       input.status,
       input.summary,
       input.payloadPath,
+      input.firedEvent,
       input.dueAt,
       input.attempts,
       input.nextAttemptAt,
@@ -875,6 +919,7 @@ export class Store {
         status = ?,
         summary = ?,
         payload_path = ?,
+        fired_event = ?,
         due_at = ?,
         attempts = ?,
         next_attempt_at = ?,
@@ -885,6 +930,7 @@ export class Store {
       Object.hasOwn(patch, "status") ? patch.status : current.status,
       Object.hasOwn(patch, "summary") ? patch.summary : current.summary,
       Object.hasOwn(patch, "payloadPath") ? patch.payloadPath : current.payloadPath,
+      current.firedEvent,
       Object.hasOwn(patch, "dueAt") ? patch.dueAt : current.dueAt,
       Object.hasOwn(patch, "attempts") ? patch.attempts : current.attempts,
       Object.hasOwn(patch, "nextAttemptAt") ? patch.nextAttemptAt : current.nextAttemptAt,
@@ -895,43 +941,79 @@ export class Store {
     return this.getPendingWake(id);
   }
 
-  getWebhookEvent(teamId: string, source: string, dedupeKey: string): WebhookEventRecord | null {
+  getWebhookEvent(teamId: string, source: string, event: string, dedupeKey: string): WebhookEventRecord | null {
     const row = this.db.prepare(`
       SELECT * FROM webhook_events
-      WHERE team_id = ? AND source = ? AND dedupe_key = ?
+      WHERE team_id = ? AND source = ? AND event = ? AND dedupe_key = ?
       LIMIT 1
-    `).get(teamId, source, dedupeKey) as Record<string, unknown> | undefined;
+    `).get(teamId, source, event, dedupeKey) as Record<string, unknown> | undefined;
     return row ? this.toWebhookEvent(row) : null;
   }
 
-  createWebhookEventIfAbsent(
+  createWebhookEventWithPendingWakesIfAbsent(
     input: Omit<WebhookEventRecord, "createdAt" | "updatedAt"> & { createdAt?: string; updatedAt?: string },
+    wakes: Array<Omit<PendingWakeRecord, "createdAt" | "updatedAt"> & { createdAt?: string; updatedAt?: string }>,
   ): { record: WebhookEventRecord; created: boolean } {
     const createdAt = input.createdAt ?? nowIso();
     const updatedAt = input.updatedAt ?? createdAt;
-    const result = this.db.prepare(`
+    let created = false;
+    const insertEvent = this.db.prepare(`
       INSERT OR IGNORE INTO webhook_events (
         id, team_id, source, event, dedupe_key, match_json, payload_path, summary, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      input.id,
-      input.teamId,
-      input.source,
-      input.event,
-      input.dedupeKey,
-      input.match ? JSON.stringify(input.match) : null,
-      input.payloadPath,
-      input.summary,
-      createdAt,
-      updatedAt,
-    );
-    const record = this.getWebhookEvent(input.teamId, input.source, input.dedupeKey);
+    `);
+    const insertWake = this.db.prepare(`
+      INSERT INTO pending_wakes (
+        id, team_id, registration_id, workstream_id, worker_key, status, summary, payload_path, fired_event, due_at, attempts, next_attempt_at, last_error, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const transaction = this.db.transaction(() => {
+      const result = insertEvent.run(
+        input.id,
+        input.teamId,
+        input.source,
+        input.event,
+        input.dedupeKey,
+        input.match ? JSON.stringify(input.match) : null,
+        input.payloadPath,
+        input.summary,
+        createdAt,
+        updatedAt,
+      );
+      created = result.changes > 0;
+      if (!created) {
+        return;
+      }
+      for (const wake of wakes) {
+        const wakeCreatedAt = wake.createdAt ?? createdAt;
+        const wakeUpdatedAt = wake.updatedAt ?? wakeCreatedAt;
+        insertWake.run(
+          wake.id,
+          wake.teamId,
+          wake.registrationId,
+          wake.workstreamId,
+          wake.workerKey,
+          wake.status,
+          wake.summary,
+          wake.payloadPath,
+          wake.firedEvent,
+          wake.dueAt,
+          wake.attempts,
+          wake.nextAttemptAt,
+          wake.lastError,
+          wakeCreatedAt,
+          wakeUpdatedAt,
+        );
+      }
+    });
+    transaction();
+    const record = this.getWebhookEvent(input.teamId, input.source, input.event, input.dedupeKey);
     if (!record) {
-      throw new Error(`Failed to persist webhook event for ${input.source}:${input.dedupeKey}`);
+      throw new Error(`Failed to persist webhook event for ${input.source}:${input.event}:${input.dedupeKey}`);
     }
     return {
       record,
-      created: result.changes > 0,
+      created,
     };
   }
 
@@ -1245,6 +1327,7 @@ export class Store {
       status: String(row.status) as PendingWakeRecord["status"],
       summary: String(row.summary),
       payloadPath: row.payload_path ? String(row.payload_path) : null,
+      firedEvent: row.fired_event ? String(row.fired_event) : null,
       dueAt: row.due_at ? String(row.due_at) : null,
       attempts: Number(row.attempts ?? 0),
       nextAttemptAt: row.next_attempt_at ? String(row.next_attempt_at) : null,

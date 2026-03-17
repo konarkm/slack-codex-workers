@@ -120,4 +120,66 @@ describe("webhook ingress server", () => {
       eventId: "evt-1",
     });
   });
+
+  it("accepts case-insensitive bearer auth and produces stable fallback ids for equivalent JSON", async () => {
+    const handler = vi.fn().mockResolvedValue({
+      duplicate: false,
+      matchedRegistrations: 0,
+      eventId: "evt-1",
+    });
+    const server = new WebhookIngressServer(makeConfig({ webhookBodyMaxBytes: 1024 }), handler);
+    activeServers.push(server);
+    await server.start();
+
+    const first = await fetch(`http://127.0.0.1:${server.getListeningPort()}/webhooks/github`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "bearer secret-github",
+      },
+      body: JSON.stringify({
+        event: "push",
+        payload: { b: 2, a: 1 },
+      }),
+    });
+    const second = await fetch(`http://127.0.0.1:${server.getListeningPort()}/webhooks/github`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer secret-github",
+      },
+      body: JSON.stringify({
+        payload: { a: 1, b: 2 },
+        event: "push",
+      }),
+    });
+
+    expect(first.status).toBe(202);
+    expect(second.status).toBe(202);
+    expect(handler).toHaveBeenCalledTimes(2);
+    expect(handler.mock.calls[0]?.[0].dedupeKey).toBe(handler.mock.calls[1]?.[0].dedupeKey);
+  });
+
+  it("rejects requests while the runtime is shutting down", async () => {
+    const handler = vi.fn();
+    const server = new WebhookIngressServer(
+      makeConfig({ webhookBodyMaxBytes: 1024 }),
+      handler,
+      () => false,
+    );
+    activeServers.push(server);
+    await server.start();
+
+    const response = await fetch(`http://127.0.0.1:${server.getListeningPort()}/webhooks/github`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer secret-github",
+      },
+      body: JSON.stringify({ event: "push" }),
+    });
+
+    expect(response.status).toBe(503);
+    expect(handler).not.toHaveBeenCalled();
+  });
 });

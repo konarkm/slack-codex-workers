@@ -210,6 +210,25 @@ afterEach(async () => {
 });
 
 describe("service lifecycle decisions", () => {
+  it("cleans up partially started dependencies when startup fails", async () => {
+    const { service, slack, codex } = await createService();
+    const webhooks = {
+      start: vi.fn().mockResolvedValue(undefined),
+      stop: vi.fn().mockResolvedValue(undefined),
+    };
+    service.webhooks = webhooks;
+    service.bootstrapWorkstreams = vi.fn().mockRejectedValue(new Error("bootstrap failed"));
+
+    await expect(service.start()).rejects.toThrow("bootstrap failed");
+
+    expect(codex.start).toHaveBeenCalled();
+    expect(slack.start).toHaveBeenCalled();
+    expect(webhooks.start).toHaveBeenCalled();
+    expect(webhooks.stop).toHaveBeenCalled();
+    expect(slack.stop).toHaveBeenCalled();
+    expect(codex.stop).toHaveBeenCalled();
+  });
+
   it("rejects replayed blocked inbound messages without retrying them", async () => {
     const { service, slack, codex, store } = await createService();
     createWorker(service, {
@@ -1011,13 +1030,21 @@ describe("service lifecycle decisions", () => {
 
     const wakes = store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000");
     expect(wakes).toHaveLength(1);
-    expect(wakes[0]).toMatchObject({ status: "delivered" });
+    expect(wakes[0]).toMatchObject({ status: "delivered", firedEvent: "push" });
     expect(wakes[0]?.payloadPath).toContain(path.join(dir, "webhooks", "github"));
     await expect(fs.readFile(wakes[0]!.payloadPath!, "utf8")).resolves.toContain("\"source\": \"github\"");
     expect(codex.startTurnWithResumeFallback).toHaveBeenCalledWith(
       "thread-1",
       expect.objectContaining({
         text: expect.stringContaining("payload_path: "),
+      }),
+      expect.any(Object),
+      expect.any(Object),
+    );
+    expect(codex.startTurnWithResumeFallback).toHaveBeenCalledWith(
+      "thread-1",
+      expect.objectContaining({
+        text: expect.stringContaining("fired_event: push"),
       }),
       expect.any(Object),
       expect.any(Object),
@@ -1079,6 +1106,67 @@ describe("service lifecycle decisions", () => {
     store.close();
   });
 
+  it("does not fan out webhook wakes when source, event, or match fields do not align", async () => {
+    const { service, store } = await createService();
+    createWorker(service, { workstreamId: "T1:root" });
+    store.upsertRegistration({
+      id: "reg-webhook",
+      teamId: "T1",
+      workstreamId: "T1:root",
+      workerKey: "T1:C1:1.000",
+      ownerUserId: "U1",
+      rootOwnerUserId: "U1",
+      description: null,
+      enabled: true,
+      target: {
+        kind: "worker",
+        workstreamId: "T1:root",
+        workerKey: "T1:C1:1.000",
+      },
+      action: { kind: "wake_self" },
+      trigger: {
+        kind: "webhook",
+        source: "github",
+        events: ["push"],
+        match: { repo: "acme/api" },
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    await expect(service.ingestWebhookEvent({
+      source: "stripe",
+      event: "push",
+      dedupeKey: "evt-a",
+      match: { repo: "acme/api" },
+      payload: {},
+      receivedAt: "2026-01-01T00:01:00.000Z",
+      rawBody: "{}",
+    })).resolves.toMatchObject({ duplicate: false, matchedRegistrations: 0 });
+    await expect(service.ingestWebhookEvent({
+      source: "github",
+      event: "pull_request",
+      dedupeKey: "evt-b",
+      match: { repo: "acme/api" },
+      payload: {},
+      receivedAt: "2026-01-01T00:02:00.000Z",
+      rawBody: "{}",
+    })).resolves.toMatchObject({ duplicate: false, matchedRegistrations: 0 });
+    await expect(service.ingestWebhookEvent({
+      source: "github",
+      event: "push",
+      dedupeKey: "evt-c",
+      match: { repo: "other/repo" },
+      payload: {},
+      receivedAt: "2026-01-01T00:03:00.000Z",
+      rawBody: "{}",
+    })).resolves.toMatchObject({ duplicate: false, matchedRegistrations: 0 });
+
+    expect(store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000")).toHaveLength(0);
+    expect(store.listWorkers()).toHaveLength(1);
+    store.close();
+  });
+
   it("spawns new work for matched webhook registrations targeting the workstream", async () => {
     const { service, codex, store, slack } = await createService();
     createWorker(service, { workstreamId: "T1:root" });
@@ -1130,6 +1218,70 @@ describe("service lifecycle decisions", () => {
     );
     expect(store.listWorkers()).toHaveLength(2);
     expect(store.listPendingWakesForScope("T1", "T1:root", null)[0]).toMatchObject({ status: "delivered" });
+    expect(codex.startTurnWithResumeFallback).toHaveBeenCalledWith(
+      "thread-webhook-spawn",
+      expect.objectContaining({
+        text: expect.stringContaining("fired_event: invoice.failed"),
+      }),
+      expect.any(Object),
+      expect.any(Object),
+    );
+    store.close();
+  });
+
+  it("does not disable webhook registrations after bounded transient wake retries", async () => {
+    const { service, codex, store } = await createService();
+    createWorker(service, { workstreamId: "T1:root" });
+    codex.reconcileThreadForSend.mockResolvedValue("idle");
+    codex.startTurnWithResumeFallback.mockRejectedValue(new Error("temporary outage"));
+
+    store.upsertRegistration({
+      id: "reg-webhook",
+      teamId: "T1",
+      workstreamId: "T1:root",
+      workerKey: "T1:C1:1.000",
+      ownerUserId: "U1",
+      rootOwnerUserId: "U1",
+      description: null,
+      enabled: true,
+      target: {
+        kind: "worker",
+        workstreamId: "T1:root",
+        workerKey: "T1:C1:1.000",
+      },
+      action: { kind: "wake_self" },
+      trigger: {
+        kind: "webhook",
+        source: "github",
+        events: ["push"],
+        match: null,
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    await service.ingestWebhookEvent({
+      source: "github",
+      event: "push",
+      dedupeKey: "evt-1",
+      match: null,
+      payload: {},
+      receivedAt: "2026-01-01T00:01:00.000Z",
+      rawBody: "{}",
+    });
+
+    await service.deliverQueuedWakes();
+    const wakeId = store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000")[0]!.id;
+    store.updatePendingWake(wakeId, { nextAttemptAt: null });
+    await service.deliverQueuedWakes();
+    store.updatePendingWake(wakeId, { nextAttemptAt: null });
+    await service.deliverQueuedWakes();
+
+    expect(store.getRegistration("reg-webhook")).toMatchObject({ enabled: true });
+    expect(store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000")[0]).toMatchObject({
+      status: "quarantined",
+      lastError: expect.stringContaining("temporary outage"),
+    });
     store.close();
   });
 

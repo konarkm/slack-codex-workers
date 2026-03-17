@@ -237,9 +237,9 @@ describe("store", () => {
     store.close();
   });
 
-  it("dedupes webhook events by source and dedupe key", async () => {
+  it("dedupes webhook events by source, event, and dedupe key while atomically creating wakes", async () => {
     const { store } = await createStore();
-    const first = store.createWebhookEventIfAbsent({
+    const first = store.createWebhookEventWithPendingWakesIfAbsent({
       id: "evt-1",
       teamId: "T1",
       source: "github",
@@ -248,8 +248,22 @@ describe("store", () => {
       match: { repo: "acme/api" },
       payloadPath: "/tmp/payload-1.json",
       summary: "github/push",
-    });
-    const second = store.createWebhookEventIfAbsent({
+    }, [{
+      id: "wake-1",
+      teamId: "T1",
+      registrationId: "reg-1",
+      workstreamId: "T1:root",
+      workerKey: "worker-1",
+      status: "queued",
+      summary: "webhook github/push fired",
+      payloadPath: "/tmp/payload-1.json",
+      firedEvent: "push",
+      dueAt: "2026-01-01T00:00:00.000Z",
+      attempts: 0,
+      nextAttemptAt: null,
+      lastError: null,
+    }]);
+    const second = store.createWebhookEventWithPendingWakesIfAbsent({
       id: "evt-2",
       teamId: "T1",
       source: "github",
@@ -258,15 +272,41 @@ describe("store", () => {
       match: { repo: "acme/api" },
       payloadPath: "/tmp/payload-2.json",
       summary: "github/push",
-    });
+    }, [{
+      id: "wake-2",
+      teamId: "T1",
+      registrationId: "reg-1",
+      workstreamId: "T1:root",
+      workerKey: "worker-1",
+      status: "queued",
+      summary: "webhook github/push fired",
+      payloadPath: "/tmp/payload-2.json",
+      firedEvent: "push",
+      dueAt: "2026-01-01T00:00:01.000Z",
+      attempts: 0,
+      nextAttemptAt: null,
+      lastError: null,
+    }]);
+    const third = store.createWebhookEventWithPendingWakesIfAbsent({
+      id: "evt-3",
+      teamId: "T1",
+      source: "github",
+      event: "pull_request",
+      dedupeKey: "delivery-1",
+      match: { repo: "acme/api" },
+      payloadPath: "/tmp/payload-3.json",
+      summary: "github/pull_request",
+    }, []);
 
     expect(first.created).toBe(true);
     expect(second.created).toBe(false);
+    expect(third.created).toBe(true);
     expect(second.record).toMatchObject({
       id: "evt-1",
       payloadPath: "/tmp/payload-1.json",
       match: { repo: "acme/api" },
     });
+    expect(store.listPendingWakesForScope("T1", "T1:root", "worker-1")).toHaveLength(1);
     store.close();
   });
 });

@@ -158,6 +158,7 @@ export interface PendingWakeRecord {
   status: "queued" | "delivered" | "failed" | "quarantined";
   summary: string;
   payloadPath: string | null;
+  firedEvent: string | null;
   dueAt: string | null;
   attempts: number;
   nextAttemptAt: string | null;
