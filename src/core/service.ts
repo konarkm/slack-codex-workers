@@ -1434,6 +1434,9 @@ export class SlackCodexWorkersService extends EventEmitter {
       lines.push(`workspace_root: ${this.config.workspaceRoot}`);
       lines.push(`database_path: ${this.config.databasePath}`);
       lines.push(`attachment_storage: ${this.config.attachmentStorageDir}`);
+      lines.push(`webhook_bind: ${this.config.webhookBindHost}:${this.config.webhookPort}`);
+      lines.push(`webhook_public_url: ${buildWebhookPublicUrl(this.config) ?? "(not configured)"}`);
+      lines.push(`webhook_proxy_trust: ${this.config.webhookTrustLoopbackProxy ? "loopback" : "disabled"}`);
       lines.push(`codex_process: ${this.codex.isRunning() ? "running" : "down"}`);
       lines.push(`codex_thread_state: ${codexThreadState}`);
       lines.push(`start_in_flight: ${this.startingWorkerTurns.has(current.key) ? "yes" : "no"}`);
@@ -1465,6 +1468,9 @@ export class SlackCodexWorkersService extends EventEmitter {
       lines.push(`workspace_root: ${this.config.workspaceRoot}`);
       lines.push(`database_path: ${this.config.databasePath}`);
       lines.push(`attachment_storage: ${this.config.attachmentStorageDir}`);
+      lines.push(`webhook_bind: ${this.config.webhookBindHost}:${this.config.webhookPort}`);
+      lines.push(`webhook_public_url: ${buildWebhookPublicUrl(this.config) ?? "(not configured)"}`);
+      lines.push(`webhook_proxy_trust: ${this.config.webhookTrustLoopbackProxy ? "loopback" : "disabled"}`);
       lines.push(`supervisor_restart: ${this.config.supervisorRestartEnabled ? "enabled" : "disabled"}`);
       lines.push(`launch_mode: ${this.config.launchMode}`);
       lines.push(`codex_process: ${this.codex.isRunning() ? "running" : "down"}`);
@@ -3032,7 +3038,9 @@ function formatWebhookMailboxInfo(config: AppConfig, mailbox: WebhookMailboxStat
   const publicUrl = buildWebhookPublicUrl(config);
   return [
     `webhook_public_url: ${publicUrl ?? "(not configured)"}`,
+    `webhook_bind: ${config.webhookBindHost}:${config.webhookPort}`,
     `webhook_path: ${config.webhookPath}`,
+    `webhook_proxy_trust: ${config.webhookTrustLoopbackProxy ? "loopback" : "disabled"}`,
     `webhook_shared_secret: ${mailbox.currentSecret}`,
     `webhook_previous_secret_expires_at: ${mailbox.previousSecretExpiresAt ?? "(none)"}`,
     `auth_header_bearer: Authorization: Bearer ${mailbox.currentSecret}`,

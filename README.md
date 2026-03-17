@@ -129,9 +129,11 @@ Key variables:
 - `SLACK_UPLOAD_MAX_FILES`: max files accepted by one `slack_upload_files` tool call
 - `WORKSPACE_TIMEZONE`: timezone used for cron registrations. Defaults to the host timezone and falls back to `UTC` if invalid
 - `WEBHOOK_PORT`: local port for authenticated webhook ingress. Default: `3014`
+- `WEBHOOK_BIND_HOST`: bind host for webhook ingress. Default: `127.0.0.1`
 - `WEBHOOK_PATH`: base webhook path. Default: `/webhooks`
 - `WEBHOOK_BODY_MAX_BYTES`: max accepted webhook request body size
 - `WEBHOOK_BODY_READ_TIMEOUT_MS`: max time to wait for an authenticated webhook request body before returning `408`. Default: `30000`
+- `WEBHOOK_TRUST_LOOPBACK_PROXY`: when enabled, trust `CF-Connecting-IP` and then `X-Forwarded-For` only if the immediate peer is loopback. Recommended for local `cloudflared` on the same machine.
 - `WEBHOOK_PAYLOAD_STORAGE_DIR`: optional raw webhook payload storage override. Default: `WORKSPACE_ROOT/.slack-workers/bridge/webhooks`
 - `WEBHOOK_SHARED_SECRET`: optional bootstrap secret for the shared webhook mailbox; if unset, the bridge generates and persists one on first boot
 - `WEBHOOK_PREVIOUS_SHARED_SECRET`: optional bootstrap fallback secret accepted during an initial 24-hour overlap window when mailbox state is first created; it is not reapplied after persisted mailbox state exists
@@ -197,12 +199,14 @@ For a supervised production build:
 - `slack_spawn_worker` only targets registered workstream channels.
 - `slack_create_workstream` is available to workers and the admin DM. It is intended to be used after explicit user approval in the conversation, not behind a separate permission layer.
 - `get_webhook_mailbox` returns the shared webhook mailbox URL, current shared secret, accepted auth headers, and the JSON body shape for configuring external systems.
+- `get_webhook_mailbox` also reports the local bind address and whether loopback-proxy trust is enabled.
 - `rotate_webhook_secret` is available only in the admin DM and rotates the organization-wide shared webhook secret while keeping the previous secret valid for 24 hours.
 - `set_heartbeat` only works in a public worker thread and always targets the current worker with `wake_self`.
 - `set_cron` and `set_webhook` default to `target='self'`; `target='workstream'` creates future public work in the current workstream.
 - `set_cron` expects a 5-field numeric cron string and uses `WORKSPACE_TIMEZONE` when evaluating schedules.
 - `list_wake_deliveries` returns runtime wake delivery records in scope, including queued, delivered, failed, and quarantined entries.
 - Webhook ingress listens at `WEBHOOK_PATH`, requires either `Authorization: Bearer <secret>` or `x-bridge-webhook-secret`, rate-limits repeated auth failures per client, times out slow authenticated request bodies, and accepts JSON shaped like `{ source, event, id?, match?, payload? }`.
+- For a local Cloudflare Tunnel deployment, prefer `WEBHOOK_BIND_HOST=127.0.0.1`, set `WEBHOOK_PUBLIC_BASE_URL` to the public hostname, and enable `WEBHOOK_TRUST_LOOPBACK_PROXY=1` so auth throttling can key off Cloudflare-forwarded client IPs only when the immediate peer is local.
 - `/status` and `/health` are available in worker threads and admin DMs. Thread commands report thread-specific state; DM commands report bridge-wide state.
 - Thread `/model` and `/effort` set thread-local overrides. DM `/model` and `/effort` set the global defaults used by any thread that does not have an override.
 - `/workstream-create` is available in worker threads and admin DMs for explicit bridge-owned creation.

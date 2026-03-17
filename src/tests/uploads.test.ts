@@ -30,6 +30,7 @@ function makeConfig(dir: string): AppConfig {
     slackUploadMaxFiles: 10,
     workspaceTimezone: "America/Los_Angeles",
     webhookPort: 3014,
+    webhookBindHost: "127.0.0.1",
     webhookPath: "/webhooks",
     webhookBodyMaxBytes: 256 * 1024,
     webhookBodyReadTimeoutMs: 30_000,
@@ -37,6 +38,7 @@ function makeConfig(dir: string): AppConfig {
     webhookSharedSecret: "secret-shared",
     webhookPreviousSharedSecret: null,
     webhookPublicBaseUrl: null,
+    webhookTrustLoopbackProxy: false,
   };
 }
 

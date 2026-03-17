@@ -34,6 +34,7 @@ const configSchema = z.object({
   slackUploadMaxFiles: z.number().int().positive().default(10),
   workspaceTimezone: z.string().min(1).default(defaultWorkspaceTimezone),
   webhookPort: z.number().int().positive().default(3014),
+  webhookBindHost: z.string().min(1).default("127.0.0.1"),
   webhookPath: z.string().min(1).default(defaultWebhookPath),
   webhookBodyMaxBytes: z.number().int().positive().default(256 * 1024),
   webhookBodyReadTimeoutMs: z.number().int().positive().default(30_000),
@@ -41,6 +42,7 @@ const configSchema = z.object({
   webhookSharedSecret: z.string().min(1).nullable().default(null),
   webhookPreviousSharedSecret: z.string().min(1).nullable().default(null),
   webhookPublicBaseUrl: z.string().min(1).nullable().default(null),
+  webhookTrustLoopbackProxy: z.boolean().default(false),
 });
 
 export type AppConfig = z.infer<typeof configSchema>;
@@ -73,6 +75,7 @@ export function loadConfig(): AppConfig {
     slackUploadMaxFiles: parseNumber(process.env.SLACK_UPLOAD_MAX_FILES, 10),
     workspaceTimezone: resolveConfiguredTimezone(process.env.WORKSPACE_TIMEZONE),
     webhookPort: parseNumber(process.env.WEBHOOK_PORT, 3014),
+    webhookBindHost: parseOptionalString(process.env.WEBHOOK_BIND_HOST) ?? "127.0.0.1",
     webhookPath: normalizeWebhookPath(process.env.WEBHOOK_PATH),
     webhookBodyMaxBytes: parseNumber(process.env.WEBHOOK_BODY_MAX_BYTES, 256 * 1024),
     webhookBodyReadTimeoutMs: parseNumber(process.env.WEBHOOK_BODY_READ_TIMEOUT_MS, 30_000),
@@ -80,6 +83,7 @@ export function loadConfig(): AppConfig {
     webhookSharedSecret: parseOptionalString(process.env.WEBHOOK_SHARED_SECRET),
     webhookPreviousSharedSecret: parseOptionalString(process.env.WEBHOOK_PREVIOUS_SHARED_SECRET),
     webhookPublicBaseUrl: normalizeOptionalBaseUrl(process.env.WEBHOOK_PUBLIC_BASE_URL),
+    webhookTrustLoopbackProxy: parseBoolean(process.env.WEBHOOK_TRUST_LOOPBACK_PROXY, false),
   };
 
   return configSchema.parse(raw);

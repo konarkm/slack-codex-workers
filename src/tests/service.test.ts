@@ -73,6 +73,7 @@ function makeConfig(dir: string, overrides: Partial<AppConfig> = {}): AppConfig 
     slackUploadMaxFiles: 10,
     workspaceTimezone: "America/Los_Angeles",
     webhookPort: nextWebhookPort++,
+    webhookBindHost: "127.0.0.1",
     webhookPath: "/webhooks",
     webhookBodyMaxBytes: 256 * 1024,
     webhookBodyReadTimeoutMs: 30_000,
@@ -80,6 +81,7 @@ function makeConfig(dir: string, overrides: Partial<AppConfig> = {}): AppConfig 
     webhookSharedSecret: "secret-shared",
     webhookPreviousSharedSecret: "secret-previous",
     webhookPublicBaseUrl: "https://hooks.example.test",
+    webhookTrustLoopbackProxy: false,
     ...overrides,
   };
 }
@@ -620,6 +622,9 @@ describe("service lifecycle decisions", () => {
     expect(slack.postThreadReply.mock.calls[0]?.[2]).toContain("global_default_model: gpt-5.5");
     expect(slack.postThreadReply.mock.calls[1]?.[2]).toContain("database_path:");
     expect(slack.postThreadReply.mock.calls[1]?.[2]).toContain("codex_thread_state: idle");
+    expect(slack.postThreadReply.mock.calls[1]?.[2]).toContain("webhook_bind: 127.0.0.1:");
+    expect(slack.postThreadReply.mock.calls[1]?.[2]).toContain("webhook_public_url: https://hooks.example.test/webhooks");
+    expect(slack.postThreadReply.mock.calls[1]?.[2]).toContain("webhook_proxy_trust: disabled");
     store.close();
   });
 
@@ -813,6 +818,8 @@ describe("service lifecycle decisions", () => {
     });
 
     expect(result).toContain("webhook_public_url: https://hooks.example.test/webhooks");
+    expect(result).toContain("webhook_bind: 127.0.0.1:");
+    expect(result).toContain("webhook_proxy_trust: disabled");
     expect(result).toContain("webhook_shared_secret: secret-shared");
     expect(result).toContain("webhook_previous_secret_expires_at:");
     expect(result).toContain("auth_header_bearer: Authorization: Bearer secret-shared");

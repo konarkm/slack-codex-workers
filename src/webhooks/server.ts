@@ -54,15 +54,17 @@ export class WebhookIngressServer {
     await new Promise<void>((resolve, reject) => {
       const server = this.server!;
       server.once("error", reject);
-      server.listen(this.config.webhookPort, () => {
+      server.listen(this.config.webhookPort, this.config.webhookBindHost, () => {
         server.off("error", reject);
         resolve();
       });
     });
     logInfo("Webhook ingress started", {
       webhookPort: this.config.webhookPort,
+      webhookBindHost: this.config.webhookBindHost,
       webhookPath: this.config.webhookPath,
       mailboxConfigured: Boolean(this.getMailboxState()?.currentSecret),
+      webhookTrustLoopbackProxy: this.config.webhookTrustLoopbackProxy,
     });
   }
 
@@ -242,7 +244,18 @@ export class WebhookIngressServer {
   }
 
   private resolveClientKey(req: IncomingMessage): string {
-    return req.socket.remoteAddress ?? "unknown";
+    const remoteAddress = req.socket.remoteAddress ?? "unknown";
+    if (this.config.webhookTrustLoopbackProxy && isLoopbackAddress(remoteAddress)) {
+      const cfConnectingIp = req.headers["cf-connecting-ip"];
+      if (typeof cfConnectingIp === "string" && cfConnectingIp.trim()) {
+        return cfConnectingIp.trim();
+      }
+      const forwardedFor = req.headers["x-forwarded-for"];
+      if (typeof forwardedFor === "string" && forwardedFor.trim()) {
+        return forwardedFor.split(",")[0]!.trim();
+      }
+    }
+    return remoteAddress;
   }
 
   private getAuthBlockUntil(clientKey: string): number {
@@ -359,6 +372,13 @@ function isWebhookShutdownError(error: unknown): boolean {
 
 function stableJsonStringify(value: unknown): string {
   return JSON.stringify(sortJsonValue(value));
+}
+
+function isLoopbackAddress(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  return normalized === "127.0.0.1"
+    || normalized === "::1"
+    || normalized === "::ffff:127.0.0.1";
 }
 
 function sortJsonValue(value: unknown): unknown {

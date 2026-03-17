@@ -39,6 +39,7 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     slackUploadMaxFiles: 10,
     workspaceTimezone: "America/Los_Angeles",
     webhookPort: 0,
+    webhookBindHost: "127.0.0.1",
     webhookPath: "/webhooks",
     webhookBodyMaxBytes: 64,
     webhookBodyReadTimeoutMs: 30_000,
@@ -46,6 +47,7 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     webhookSharedSecret: "secret-shared",
     webhookPreviousSharedSecret: "secret-previous",
     webhookPublicBaseUrl: "https://hooks.example.test",
+    webhookTrustLoopbackProxy: false,
     ...overrides,
   };
 }
@@ -439,6 +441,42 @@ describe("webhook ingress server", () => {
       body: JSON.stringify({ source: "github", event: "push" }),
     });
     expect(badAgain.status).toBe(401);
+  });
+
+  it("uses forwarded client IPs only when loopback proxy trust is enabled", async () => {
+    const handler = vi.fn();
+    const server = new WebhookIngressServer(
+      makeConfig({ webhookBodyMaxBytes: 1024, webhookTrustLoopbackProxy: true }),
+      handler,
+      () => makeMailboxState(),
+    );
+    activeServers.push(server);
+    await server.start();
+
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const response = await fetch(`http://127.0.0.1:${server.getListeningPort()}/webhooks`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: "Bearer wrong-secret",
+          "x-forwarded-for": "198.51.100.10",
+        },
+        body: JSON.stringify({ source: "github", event: "push" }),
+      });
+      expect(response.status).toBe(401);
+    }
+
+    const separateClient = await fetch(`http://127.0.0.1:${server.getListeningPort()}/webhooks`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer wrong-secret",
+        "x-forwarded-for": "198.51.100.11",
+      },
+      body: JSON.stringify({ source: "github", event: "push" }),
+    });
+
+    expect(separateClient.status).toBe(401);
   });
 
   it("times out slow authenticated request bodies", async () => {
