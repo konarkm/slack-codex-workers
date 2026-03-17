@@ -154,12 +154,12 @@ Settled conceptually:
 - `set_webhook(source, events, target, match?, description?)`
 - plus list/get/disable
 
-Open:
+Current implementation contract:
 
-- exact schedule syntax
-- exact `events` representation
-- exact `match` shape
-- whether `description` is optional or effectively expected
+- `schedule` currently uses a standard 5-field cron string
+- `events` is an explicit string list
+- `match` is an optional exact-match string map
+- `description` remains optional
 
 ## 7. Webhook auth/body-limit/idempotency implementation details
 
@@ -172,12 +172,16 @@ Principles are settled:
 - normalize minimally
 - persist raw payloads durably
 
-Open:
+Current implementation contract:
 
-- exact auth configuration model
-- exact idempotency key handling
-- exact file layout for raw payload storage
-- exact retention behavior for payload files
+- auth uses one configured secret per webhook `source`
+- idempotency uses `(team, source, event, dedupe_key)`
+- requests may provide an explicit `id`; otherwise the bridge derives a stable hash from the normalized outer JSON envelope
+- raw payload envelopes are stored under the bridge-owned webhook payload directory grouped by `source` and UTC date
+
+Still open:
+
+- retention behavior for payload files
 
 ## 8. Retention / cleanup
 

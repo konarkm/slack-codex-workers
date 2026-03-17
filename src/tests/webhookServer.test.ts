@@ -58,6 +58,26 @@ describe("webhook ingress server", () => {
     expect(handler).not.toHaveBeenCalled();
   });
 
+  it("still returns auth failure before exposing shutdown state", async () => {
+    const handler = vi.fn();
+    const server = new WebhookIngressServer(
+      makeConfig(),
+      handler,
+      () => false,
+    );
+    activeServers.push(server);
+    await server.start();
+
+    const response = await fetch(`http://127.0.0.1:${server.getListeningPort()}/webhooks/github`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ event: "push" }),
+    });
+
+    expect(response.status).toBe(401);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
   it("enforces the webhook body limit", async () => {
     const handler = vi.fn();
     const server = new WebhookIngressServer(makeConfig(), handler);

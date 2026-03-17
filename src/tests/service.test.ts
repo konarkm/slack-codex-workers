@@ -986,6 +986,7 @@ describe("service lifecycle decisions", () => {
 
   it("fans out matched webhook events into queued self wakes with durable payload pointers", async () => {
     const { dir, service, codex, store } = await createService();
+    service.runtimeStarted = true;
     createWorker(service, { workstreamId: "T1:root" });
     codex.reconcileThreadForSend.mockResolvedValue("idle");
     codex.startTurnWithResumeFallback.mockResolvedValue("turn-webhook");
@@ -1054,6 +1055,7 @@ describe("service lifecycle decisions", () => {
 
   it("dedupes webhook ingress before creating additional wakes", async () => {
     const { service, store } = await createService();
+    service.runtimeStarted = true;
     createWorker(service, { workstreamId: "T1:root" });
 
     store.upsertRegistration({
@@ -1108,6 +1110,7 @@ describe("service lifecycle decisions", () => {
 
   it("does not fan out webhook wakes when source, event, or match fields do not align", async () => {
     const { service, store } = await createService();
+    service.runtimeStarted = true;
     createWorker(service, { workstreamId: "T1:root" });
     store.upsertRegistration({
       id: "reg-webhook",
@@ -1169,6 +1172,7 @@ describe("service lifecycle decisions", () => {
 
   it("spawns new work for matched webhook registrations targeting the workstream", async () => {
     const { service, codex, store, slack } = await createService();
+    service.runtimeStarted = true;
     createWorker(service, { workstreamId: "T1:root" });
     codex.createWorkerThread.mockResolvedValue({ threadId: "thread-webhook-spawn" });
     codex.startTurnWithResumeFallback.mockResolvedValue("turn-webhook-spawn");
@@ -1231,6 +1235,7 @@ describe("service lifecycle decisions", () => {
 
   it("does not disable webhook registrations after bounded transient wake retries", async () => {
     const { service, codex, store } = await createService();
+    service.runtimeStarted = true;
     createWorker(service, { workstreamId: "T1:root" });
     codex.reconcileThreadForSend.mockResolvedValue("idle");
     codex.startTurnWithResumeFallback.mockRejectedValue(new Error("temporary outage"));

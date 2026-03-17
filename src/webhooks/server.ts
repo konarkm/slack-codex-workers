@@ -75,6 +75,10 @@ export class WebhookIngressServer {
         this.respondJson(res, parsed.status, parsed.body);
         return;
       }
+      if (!this.canAcceptRequest()) {
+        this.respondJson(res, 503, { ok: false, error: "shutting_down" });
+        return;
+      }
       const result = await this.handler(parsed);
       this.respondJson(res, 202, {
         ok: true,
@@ -92,9 +96,6 @@ export class WebhookIngressServer {
   private async normalizeRequest(
     req: IncomingMessage,
   ): Promise<NormalizedWebhookIngress | { status: number; body: Record<string, unknown> }> {
-    if (!this.canAcceptRequest()) {
-      return { status: 503, body: { ok: false, error: "shutting_down" } };
-    }
     if (req.method !== "POST") {
       return { status: 405, body: { ok: false, error: "method_not_allowed" } };
     }
@@ -111,6 +112,9 @@ export class WebhookIngressServer {
     const providedSecret = this.extractSecret(req);
     if (!providedSecret || !safeSecretEquals(providedSecret, expectedSecret)) {
       return { status: 401, body: { ok: false, error: "unauthorized" } };
+    }
+    if (!this.canAcceptRequest()) {
+      return { status: 503, body: { ok: false, error: "shutting_down" } };
     }
 
     let rawBody: string;

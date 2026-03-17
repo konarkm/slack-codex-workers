@@ -1881,6 +1881,9 @@ export class SlackCodexWorkersService extends EventEmitter {
     matchedRegistrations: number;
     eventId: string;
   }> {
+    if (!this.runtimeStarted || this.stopping) {
+      throw new Error("Webhook ingress unavailable during shutdown.");
+    }
     const teamId = this.slack.getTeamId() ?? this.config.allowedTeamId ?? "single-workspace";
     const existing = this.store.getWebhookEvent(teamId, input.source, input.event, input.dedupeKey);
     if (existing) {

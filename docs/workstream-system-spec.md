@@ -680,6 +680,11 @@ Thin ingress model:
 5. persist first
 6. then spawn or wake
 
+During shutdown, ingress should remain fail-closed:
+
+- authenticate before exposing lifecycle state
+- reject new authorized requests before persistence once shutdown begins
+
 ### Payload Handling
 
 Normalize only the outer event envelope, not arbitrary provider payloads.
