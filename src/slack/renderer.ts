@@ -19,12 +19,13 @@ export function renderWorklog(items: Iterable<WorklogItem>): string {
   return lines.join("\n");
 }
 
-export function renderFinalMessage(ownerUserId: string, text: string): string {
+export function renderFinalMessage(ownerUserId: string | null | undefined, text: string): string {
   const trimmed = text.trim();
+  const mention = ownerUserId?.trim() ? `<@${ownerUserId.trim()}> ` : "";
   if (!trimmed) {
-    return `<@${ownerUserId}> Done.`;
+    return `${mention}Done.`.trim();
   }
-  return `<@${ownerUserId}> ${trimmed}`;
+  return `${mention}${trimmed}`.trim();
 }
 
 export function renderEventMessage(item: WorklogItem): string {

@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
+import type { AppConfig } from "../config.js";
 import { Store } from "../db/store.js";
+import { validateCronSchedule } from "./cron.js";
 import type {
   PendingWakeRecord,
   RegistrationRecord,
@@ -17,6 +19,7 @@ export interface RegistrationContext {
 
 export class RegistrationManager {
   constructor(
+    private readonly config: AppConfig,
     private readonly store: Store,
     private readonly workstreams: WorkstreamManager,
   ) {}
@@ -58,6 +61,7 @@ export class RegistrationManager {
     input: { registrationId?: string | null; schedule: string; target: "self" | "workstream"; description?: string | null },
   ): Promise<RegistrationRecord> {
     this.ensureUpsertAllowed(ctx, input.registrationId);
+    validateCronSchedule(input.schedule);
     const target = this.resolveTarget(ctx, input.target);
     const action = input.target === "self" ? { kind: "wake_self" as const } : { kind: "spawn" as const };
     const record = this.store.upsertRegistration({
@@ -74,6 +78,7 @@ export class RegistrationManager {
       trigger: {
         kind: "cron",
         schedule: input.schedule,
+        timezone: this.config.workspaceTimezone,
       },
     });
     await this.refreshProjection(record.workstreamId);

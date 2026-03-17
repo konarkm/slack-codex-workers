@@ -9,6 +9,7 @@ loadDotEnv();
 
 const fallbackWorkspaceRoot = process.cwd();
 const defaultStateDir = path.join(fallbackWorkspaceRoot, ".slack-workers", "bridge");
+const defaultWorkspaceTimezone = resolveDefaultTimezone();
 
 const configSchema = z.object({
   slackBotToken: z.string().min(1),
@@ -30,6 +31,7 @@ const configSchema = z.object({
   attachmentRetentionMs: z.number().int().positive().nullable().default(null),
   slackUploadTimeoutMs: z.number().int().positive().default(600_000),
   slackUploadMaxFiles: z.number().int().positive().default(10),
+  workspaceTimezone: z.string().min(1).default(defaultWorkspaceTimezone),
 });
 
 export type AppConfig = z.infer<typeof configSchema>;
@@ -60,6 +62,7 @@ export function loadConfig(): AppConfig {
     attachmentRetentionMs: parseNullableNumber(process.env.ATTACHMENT_RETENTION_MS, null),
     slackUploadTimeoutMs: parseNumber(process.env.SLACK_UPLOAD_TIMEOUT_MS, 600_000),
     slackUploadMaxFiles: parseNumber(process.env.SLACK_UPLOAD_MAX_FILES, 10),
+    workspaceTimezone: resolveConfiguredTimezone(process.env.WORKSPACE_TIMEZONE),
   };
 
   return configSchema.parse(raw);
@@ -118,6 +121,25 @@ function parseBoolean(value: string | undefined, fallback: boolean): boolean {
 function parseLaunchMode(value: string | undefined): "dev" | "prod" {
   const normalized = value?.trim().toLowerCase();
   return normalized === "prod" ? "prod" : "dev";
+}
+
+function resolveConfiguredTimezone(value: string | undefined): string {
+  const candidate = value?.trim() || defaultWorkspaceTimezone;
+  return validateTimezone(candidate);
+}
+
+function resolveDefaultTimezone(): string {
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  return validateTimezone(timezone || "UTC");
+}
+
+function validateTimezone(value: string): string {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value }).format(new Date());
+    return value;
+  } catch {
+    return "UTC";
+  }
 }
 
 export const DEFAULT_EFFORTS: ReasoningEffort[] = ["minimal", "low", "medium", "high", "xhigh"];

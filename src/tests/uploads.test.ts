@@ -28,6 +28,7 @@ function makeConfig(dir: string): AppConfig {
     attachmentRetentionMs: null,
     slackUploadTimeoutMs: 600_000,
     slackUploadMaxFiles: 10,
+    workspaceTimezone: "America/Los_Angeles",
   };
 }
 

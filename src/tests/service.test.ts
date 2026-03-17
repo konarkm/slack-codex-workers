@@ -69,6 +69,7 @@ function makeConfig(dir: string): AppConfig {
     attachmentRetentionMs: null,
     slackUploadTimeoutMs: 600_000,
     slackUploadMaxFiles: 10,
+    workspaceTimezone: "America/Los_Angeles",
   };
 }
 
@@ -900,7 +901,7 @@ describe("service lifecycle decisions", () => {
         workerKey: "T1:C1:1.000",
       },
       action: { kind: "wake_self" },
-      trigger: { kind: "cron", schedule: "* * * * *" },
+      trigger: { kind: "cron", schedule: "* * * * *", timezone: "America/Los_Angeles" },
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:00.000Z",
     });
@@ -941,7 +942,7 @@ describe("service lifecycle decisions", () => {
         workerKey: null,
       },
       action: { kind: "spawn" },
-      trigger: { kind: "cron", schedule: "* * * * *" },
+      trigger: { kind: "cron", schedule: "* * * * *", timezone: "America/Los_Angeles" },
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:00.000Z",
     });
@@ -956,6 +957,132 @@ describe("service lifecycle decisions", () => {
     );
     expect(store.listWorkers()).toHaveLength(2);
     expect(store.listPendingWakesForScope("T1", "T1:root", null)[0]).toMatchObject({ status: "delivered" });
+    store.close();
+  });
+
+  it("coalesces missed heartbeat runs instead of draining backlog", async () => {
+    const { service, codex, store } = await createService();
+    createWorker(service, { workstreamId: "T1:root" });
+    codex.reconcileThreadForSend.mockResolvedValue("idle");
+    codex.startTurnWithResumeFallback.mockResolvedValue("turn-heartbeat");
+
+    store.upsertRegistration({
+      id: "reg-heartbeat",
+      teamId: "T1",
+      workstreamId: "T1:root",
+      workerKey: "T1:C1:1.000",
+      ownerUserId: "U1",
+      rootOwnerUserId: "U1",
+      description: "Catch up once",
+      enabled: true,
+      target: {
+        kind: "worker",
+        workstreamId: "T1:root",
+        workerKey: "T1:C1:1.000",
+      },
+      action: { kind: "wake_self" },
+      trigger: { kind: "heartbeat", intervalMinutes: 1 },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    await service.enqueueDueRegistrationWakes();
+    await service.deliverQueuedWakes();
+    store.updateWorkerState("T1:C1:1.000", { activeTurnId: null, status: "idle" });
+    await service.enqueueDueRegistrationWakes();
+
+    expect(store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000")).toHaveLength(1);
+    store.close();
+  });
+
+  it("isolates invalid cron registrations without poisoning the queue", async () => {
+    const { service, store } = await createService();
+    createWorker(service, { workstreamId: "T1:root" });
+
+    store.upsertRegistration({
+      id: "reg-bad-cron",
+      teamId: "T1",
+      workstreamId: "T1:root",
+      workerKey: "T1:C1:1.000",
+      ownerUserId: "U1",
+      rootOwnerUserId: "U1",
+      description: null,
+      enabled: true,
+      target: {
+        kind: "worker",
+        workstreamId: "T1:root",
+        workerKey: "T1:C1:1.000",
+      },
+      action: { kind: "wake_self" },
+      trigger: { kind: "cron", schedule: "bad cron", timezone: "America/Los_Angeles" },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    store.upsertRegistration({
+      id: "reg-heartbeat",
+      teamId: "T1",
+      workstreamId: "T1:root",
+      workerKey: "T1:C1:1.000",
+      ownerUserId: "U1",
+      rootOwnerUserId: "U1",
+      description: null,
+      enabled: true,
+      target: {
+        kind: "worker",
+        workstreamId: "T1:root",
+        workerKey: "T1:C1:1.000",
+      },
+      action: { kind: "wake_self" },
+      trigger: { kind: "heartbeat", intervalMinutes: 1 },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    await service.enqueueDueRegistrationWakes();
+    await service.enqueueDueRegistrationWakes();
+
+    const wakes = store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000");
+    expect(wakes.filter((wake: any) => wake.summary.startsWith("[config error]"))).toHaveLength(1);
+    expect(wakes.some((wake: any) => wake.status === "queued")).toBe(true);
+    store.close();
+  });
+
+  it("prioritizes queued restarts over scheduled wake delivery at idle", async () => {
+    const { service, codex, store } = await createService();
+    createDmSession(service);
+    createWorker(service, { workstreamId: "T1:root" });
+    store.setPendingRestart({
+      target: "codex",
+      teamId: "T1",
+      userId: "U-admin",
+      channelId: "D1",
+      requestedAt: "2026-03-12T12:00:00.000Z",
+    });
+    store.upsertRegistration({
+      id: "reg-heartbeat",
+      teamId: "T1",
+      workstreamId: "T1:root",
+      workerKey: "T1:C1:1.000",
+      ownerUserId: "U1",
+      rootOwnerUserId: "U1",
+      description: null,
+      enabled: true,
+      target: {
+        kind: "worker",
+        workstreamId: "T1:root",
+        workerKey: "T1:C1:1.000",
+      },
+      action: { kind: "wake_self" },
+      trigger: { kind: "heartbeat", intervalMinutes: 1 },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    await service.processRegistrationLoop();
+
+    expect(codex.restart).toHaveBeenCalledTimes(1);
+    expect(codex.startTurnWithResumeFallback).not.toHaveBeenCalled();
+    expect(store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000")).toHaveLength(0);
     store.close();
   });
 

@@ -86,6 +86,8 @@ export class SlackCodexWorkersService extends EventEmitter {
   private readonly startingDmTurns = new Map<string, Promise<string>>();
   private registrationPollTimer: NodeJS.Timeout | null = null;
   private processingRegistrationLoop = false;
+  private currentRegistrationLoopPromise: Promise<void> | null = null;
+  private stopping = false;
   private executingQueuedRestart = false;
 
   constructor(private readonly config: AppConfig) {
@@ -94,7 +96,7 @@ export class SlackCodexWorkersService extends EventEmitter {
     this.codex = new CodexClient(config.codexBin, config.workspaceRoot);
     this.slack = new SlackGateway(config);
     this.workstreams = new WorkstreamManager(config, this.store);
-    this.registrations = new RegistrationManager(this.store, this.workstreams);
+    this.registrations = new RegistrationManager(config, this.store, this.workstreams);
     this.codex.registerDynamicToolHandlers({
       listChannels: async (args, ctx) => this.handleListChannelsTool(args.query ?? "", ctx),
       spawnWorker: async (args, ctx) => this.handleSpawnWorkerTool(args, ctx),
@@ -112,6 +114,7 @@ export class SlackCodexWorkersService extends EventEmitter {
   }
 
   async start(): Promise<void> {
+    this.stopping = false;
     await this.codex.start();
     this.registerSlackHandlers();
     await this.slack.start();
@@ -131,6 +134,7 @@ export class SlackCodexWorkersService extends EventEmitter {
   }
 
   async stop(): Promise<void> {
+    this.stopping = true;
     for (const timer of this.blockedTurnPolls.values()) {
       clearTimeout(timer);
     }
@@ -140,6 +144,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       clearTimeout(this.registrationPollTimer);
       this.registrationPollTimer = null;
     }
+    await this.currentRegistrationLoopPromise;
     await this.slack.stop();
     await this.codex.stop();
     this.store.close();
@@ -1028,8 +1033,8 @@ export class SlackCodexWorkersService extends EventEmitter {
           ? STATUS_REACTIONS.interrupted
           : STATUS_REACTIONS.failed,
     );
-    await this.processRegistrationLoop();
     await this.maybeExecuteQueuedRestart();
+    await this.processRegistrationLoop();
   }
 
   private async onDmAgentDelta(teamId: string, userId: string, itemId: string, delta: string): Promise<void> {
@@ -1109,8 +1114,8 @@ export class SlackCodexWorkersService extends EventEmitter {
         );
       });
     }
-    await this.processRegistrationLoop();
     await this.maybeExecuteQueuedRestart();
+    await this.processRegistrationLoop();
   }
 
   private getRenderState(key: string): RenderSessionState {
@@ -1370,6 +1375,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       `thread_effort_override: ${current.settings.effort ?? "(none)"}`,
       `global_default_model: ${defaults.model ?? "(unset)"}`,
       `global_default_effort: ${defaults.effort ?? "(unset)"}`,
+      `workspace_timezone: ${this.config.workspaceTimezone}`,
       `pending_request: ${current.pendingRequest ? current.pendingRequest.kind : "(none)"}`,
       `last_inbound_ts: ${current.lastInboundMessageTs ?? "(none)"}`,
       `last_error: ${current.lastError ?? "(none)"}`,
@@ -1401,6 +1407,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       `dm_active_turn: ${current.activeTurnId ?? "(none)"}`,
       `global_default_model: ${defaults.model ?? "(unset)"}`,
       `global_default_effort: ${defaults.effort ?? "(unset)"}`,
+      `workspace_timezone: ${this.config.workspaceTimezone}`,
       `workers_active: ${this.store.listWorkersWithActiveTurns().length}`,
       `workers_blocked_or_recovery_required: ${blockedWorkers}`,
       `queued_restart: ${pendingRestart ? `${pendingRestart.target} @ ${pendingRestart.requestedAt}` : "(none)"}`,
@@ -1747,6 +1754,7 @@ export class SlackCodexWorkersService extends EventEmitter {
   }
 
   private scheduleRegistrationLoop(delayMs = REGISTRATION_POLL_INTERVAL_MS): void {
+    if (this.stopping) return;
     if (this.registrationPollTimer) {
       clearTimeout(this.registrationPollTimer);
     }
@@ -1756,15 +1764,30 @@ export class SlackCodexWorkersService extends EventEmitter {
   }
 
   private async processRegistrationLoop(): Promise<void> {
-    if (this.processingRegistrationLoop) return;
+    if (this.processingRegistrationLoop) return this.currentRegistrationLoopPromise ?? Promise.resolve();
     this.processingRegistrationLoop = true;
-    try {
-      await this.enqueueDueRegistrationWakes();
-      await this.deliverQueuedWakes();
-    } finally {
-      this.processingRegistrationLoop = false;
-      this.scheduleRegistrationLoop();
-    }
+    this.currentRegistrationLoopPromise = (async () => {
+      try {
+        if (this.stopping) return;
+        if (this.store.getPendingRestart() && this.isRuntimeIdle()) {
+          await this.maybeExecuteQueuedRestart();
+          return;
+        }
+        await this.enqueueDueRegistrationWakes();
+        if (this.store.getPendingRestart() && this.isRuntimeIdle()) {
+          await this.maybeExecuteQueuedRestart();
+          return;
+        }
+        await this.deliverQueuedWakes();
+      } finally {
+        this.processingRegistrationLoop = false;
+        this.currentRegistrationLoopPromise = null;
+        if (!this.stopping) {
+          this.scheduleRegistrationLoop();
+        }
+      }
+    })();
+    return this.currentRegistrationLoopPromise;
   }
 
   private async enqueueDueRegistrationWakes(): Promise<void> {
@@ -1774,7 +1797,25 @@ export class SlackCodexWorkersService extends EventEmitter {
       if (!registration.enabled) continue;
       const latestWake = this.store.getLatestPendingWakeForRegistration(registration.id);
       if (latestWake?.status === "queued") continue;
-      const dueAt = this.resolveRegistrationDueAt(registration, latestWake?.createdAt ?? null, now);
+      if (isPermanentInvalidConfigWake(latestWake, registration.updatedAt)) continue;
+      let dueAt: string | null;
+      try {
+        dueAt = this.resolveRegistrationDueAt(registration, latestWake ?? null, now);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.store.createPendingWake({
+          id: `wake-${randomUUID().slice(0, 8)}`,
+          teamId: registration.teamId,
+          registrationId: registration.id,
+          workstreamId: registration.workstreamId,
+          workerKey: registration.workerKey,
+          status: "failed",
+          summary: `[config error] ${message}`,
+          payloadPath: null,
+          dueAt: null,
+        });
+        continue;
+      }
       if (!dueAt) continue;
       this.store.createPendingWake({
         id: `wake-${randomUUID().slice(0, 8)}`,
@@ -1877,7 +1918,8 @@ export class SlackCodexWorkersService extends EventEmitter {
     }
   }
 
-  private resolveRegistrationDueAt(registration: RegistrationRecord, baselineIso: string | null, nowMs: number): string | null {
+  private resolveRegistrationDueAt(registration: RegistrationRecord, latestWake: { status: string; updatedAt: string } | null, nowMs: number): string | null {
+    const baselineIso = latestWake?.status === "queued" ? null : latestWake?.updatedAt ?? null;
     const baseline = baselineIso ? new Date(baselineIso) : new Date(registration.createdAt);
     if (Number.isNaN(baseline.getTime())) return null;
 
@@ -1888,7 +1930,12 @@ export class SlackCodexWorkersService extends EventEmitter {
     }
 
     if (registration.trigger.kind === "cron") {
-      const latest = findLatestMatchingCronMinute(registration.trigger.schedule, baseline, new Date(nowMs));
+      const latest = findLatestMatchingCronMinute(
+        registration.trigger.schedule,
+        registration.trigger.timezone || this.config.workspaceTimezone,
+        baseline,
+        new Date(nowMs),
+      );
       return latest ? latest.toISOString() : null;
     }
 
@@ -2585,6 +2632,15 @@ function safeJson(value: string): unknown | null {
   }
 }
 
+function isPermanentInvalidConfigWake(
+  wake: { status: string; summary: string; updatedAt: string } | null,
+  registrationUpdatedAt: string,
+): boolean {
+  if (!wake || wake.status !== "failed") return false;
+  if (!wake.summary.startsWith("[config error]")) return false;
+  return wake.updatedAt >= registrationUpdatedAt;
+}
+
 function formatRegistrationSummary(registration: RegistrationRecord): string {
   return [
     `Saved registration ${registration.id}.`,
@@ -2604,10 +2660,22 @@ function buildWakeTurnInput(registration: RegistrationRecord, wake: { id: string
     `wake_id: ${wake.id}`,
     `trigger: ${registration.trigger.kind}`,
     `action: ${registration.action.kind}`,
+    `target: ${registration.target.kind}${registration.target.workerKey ? `:${registration.target.workerKey}` : `:${registration.target.workstreamId}`}`,
     `fired_at: ${wake.createdAt}`,
   ];
   if (registration.trigger.kind === "heartbeat") {
     details.push(`interval_minutes: ${registration.trigger.intervalMinutes}`);
+  }
+  if (registration.trigger.kind === "cron") {
+    details.push(`schedule: ${registration.trigger.schedule}`);
+    details.push(`timezone: ${registration.trigger.timezone}`);
+  }
+  if (registration.trigger.kind === "webhook") {
+    details.push(`source: ${registration.trigger.source}`);
+    details.push(`events: ${registration.trigger.events.join(",")}`);
+    if (registration.trigger.match) {
+      details.push(`match: ${JSON.stringify(registration.trigger.match)}`);
+    }
   }
   if (wake.dueAt) {
     details.push(`due_at: ${wake.dueAt}`);

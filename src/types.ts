@@ -118,6 +118,7 @@ export interface HeartbeatRegistrationTrigger {
 export interface CronRegistrationTrigger {
   kind: "cron";
   schedule: string;
+  timezone: string;
 }
 
 export interface WebhookRegistrationTrigger {

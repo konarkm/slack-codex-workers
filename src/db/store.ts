@@ -122,7 +122,7 @@ function parseRegistrationAction(value: string | null | undefined): Registration
 
 function parseRegistrationTrigger(value: string | null | undefined): RegistrationTrigger {
   if (!value) {
-    return { kind: "cron", schedule: "" };
+    return { kind: "cron", schedule: "", timezone: "UTC" };
   }
   try {
     const parsed = JSON.parse(value) as Record<string, unknown>;
@@ -149,9 +149,10 @@ function parseRegistrationTrigger(value: string | null | undefined): Registratio
     return {
       kind: "cron",
       schedule: typeof parsed.schedule === "string" ? parsed.schedule : "",
+      timezone: typeof parsed.timezone === "string" ? parsed.timezone : "UTC",
     };
   } catch {
-    return { kind: "cron", schedule: "" };
+    return { kind: "cron", schedule: "", timezone: "UTC" };
   }
 }
 
@@ -713,6 +714,11 @@ export class Store {
     const current = this.getRegistration(input.id);
     const createdAt = current?.createdAt ?? input.createdAt ?? nowIso();
     const updatedAt = input.updatedAt ?? nowIso();
+    const derivedTarget = {
+      kind: input.target.workerKey ? "worker" as const : "workstream" as const,
+      workstreamId: input.target.workstreamId,
+      workerKey: input.target.workerKey ?? null,
+    };
     this.db.prepare(`
       INSERT INTO registrations (
         id, team_id, workstream_id, worker_key, owner_user_id, root_owner_user_id, description, enabled, target_json, action_json, trigger_json, created_at, updated_at
@@ -731,13 +737,13 @@ export class Store {
     `).run(
       input.id,
       input.teamId,
-      input.workstreamId,
-      input.workerKey,
+      derivedTarget.workstreamId,
+      derivedTarget.workerKey,
       input.ownerUserId,
       input.rootOwnerUserId,
       input.description,
       input.enabled ? 1 : 0,
-      JSON.stringify(input.target),
+      JSON.stringify(derivedTarget),
       JSON.stringify(input.action),
       JSON.stringify(input.trigger),
       createdAt,
@@ -779,7 +785,7 @@ export class Store {
     const row = this.db.prepare(`
       SELECT * FROM pending_wakes
       WHERE registration_id = ?
-      ORDER BY created_at DESC, id DESC
+      ORDER BY updated_at DESC, created_at DESC, id DESC
       LIMIT 1
     `).get(registrationId) as Record<string, unknown> | undefined;
     return row ? this.toPendingWake(row) : null;
@@ -1118,16 +1124,22 @@ export class Store {
   }
 
   private toRegistration(row: Record<string, unknown>): RegistrationRecord {
+    const workstreamId = String(row.workstream_id);
+    const workerKey = row.worker_key ? String(row.worker_key) : null;
     return {
       id: String(row.id),
       teamId: String(row.team_id),
-      workstreamId: String(row.workstream_id),
-      workerKey: row.worker_key ? String(row.worker_key) : null,
+      workstreamId,
+      workerKey,
       ownerUserId: String(row.owner_user_id ?? ""),
       rootOwnerUserId: String(row.root_owner_user_id ?? ""),
       description: row.description ? String(row.description) : null,
       enabled: Boolean(row.enabled),
-      target: parseRegistrationTarget(typeof row.target_json === "string" ? row.target_json : null),
+      target: {
+        kind: workerKey ? "worker" : "workstream",
+        workstreamId,
+        workerKey,
+      },
       action: parseRegistrationAction(typeof row.action_json === "string" ? row.action_json : null),
       trigger: parseRegistrationTrigger(typeof row.trigger_json === "string" ? row.trigger_json : null),
       createdAt: String(row.created_at),

@@ -16,6 +16,10 @@ describe("renderer", () => {
     expect(renderFinalMessage("U123", "Done")).toBe("<@U123> Done");
   });
 
+  it("renders final messages without a mention when no owner exists", () => {
+    expect(renderFinalMessage("", "Done")).toBe("Done");
+  });
+
   it("appends file notes", () => {
     expect(appendFileNotes("hi", ["a.pdf at /tmp/a.pdf"])).toContain("Attached files:");
   });

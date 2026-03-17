@@ -200,4 +200,40 @@ describe("store", () => {
     expect(store.getRegistration("reg-1")).toMatchObject({ enabled: false });
     store.close();
   });
+
+  it("derives registration scope columns from the target payload", async () => {
+    const { store } = await createStore();
+    store.upsertRegistration({
+      id: "reg-2",
+      teamId: "T1",
+      workstreamId: "wrong",
+      workerKey: "wrong-worker",
+      ownerUserId: "U1",
+      rootOwnerUserId: "U1",
+      description: null,
+      enabled: true,
+      target: {
+        kind: "workstream",
+        workstreamId: "T1:root",
+        workerKey: null,
+      },
+      action: { kind: "spawn" },
+      trigger: {
+        kind: "cron",
+        schedule: "* * * * *",
+        timezone: "UTC",
+      },
+    });
+
+    expect(store.getRegistration("reg-2")).toMatchObject({
+      workstreamId: "T1:root",
+      workerKey: null,
+      target: {
+        kind: "workstream",
+        workstreamId: "T1:root",
+        workerKey: null,
+      },
+    });
+    store.close();
+  });
 });
