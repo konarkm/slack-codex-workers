@@ -19,6 +19,7 @@ import type {
   RuntimeSettings,
   SessionStatus,
   TeamDefaults,
+  WebhookEventRecord,
   WorkstreamRecord,
   WorkerIdentity,
   WorkerRecord,
@@ -159,6 +160,20 @@ function parseRegistrationTrigger(value: string | null | undefined): Registratio
   }
 }
 
+function parseStringMap(value: string | null | undefined): Record<string, string> | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+    const entries = Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string");
+    return entries.length > 0 ? Object.fromEntries(entries) : null;
+  } catch {
+    return null;
+  }
+}
+
 export class Store {
   private readonly db: Database.Database;
 
@@ -274,6 +289,20 @@ export class Store {
         last_error TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS webhook_events (
+        id TEXT PRIMARY KEY,
+        team_id TEXT NOT NULL,
+        source TEXT NOT NULL,
+        event TEXT NOT NULL,
+        dedupe_key TEXT NOT NULL,
+        match_json TEXT,
+        payload_path TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(team_id, source, dedupe_key)
       );
 
       CREATE TABLE IF NOT EXISTS dm_sessions (
@@ -866,6 +895,46 @@ export class Store {
     return this.getPendingWake(id);
   }
 
+  getWebhookEvent(teamId: string, source: string, dedupeKey: string): WebhookEventRecord | null {
+    const row = this.db.prepare(`
+      SELECT * FROM webhook_events
+      WHERE team_id = ? AND source = ? AND dedupe_key = ?
+      LIMIT 1
+    `).get(teamId, source, dedupeKey) as Record<string, unknown> | undefined;
+    return row ? this.toWebhookEvent(row) : null;
+  }
+
+  createWebhookEventIfAbsent(
+    input: Omit<WebhookEventRecord, "createdAt" | "updatedAt"> & { createdAt?: string; updatedAt?: string },
+  ): { record: WebhookEventRecord; created: boolean } {
+    const createdAt = input.createdAt ?? nowIso();
+    const updatedAt = input.updatedAt ?? createdAt;
+    const result = this.db.prepare(`
+      INSERT OR IGNORE INTO webhook_events (
+        id, team_id, source, event, dedupe_key, match_json, payload_path, summary, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      input.id,
+      input.teamId,
+      input.source,
+      input.event,
+      input.dedupeKey,
+      input.match ? JSON.stringify(input.match) : null,
+      input.payloadPath,
+      input.summary,
+      createdAt,
+      updatedAt,
+    );
+    const record = this.getWebhookEvent(input.teamId, input.source, input.dedupeKey);
+    if (!record) {
+      throw new Error(`Failed to persist webhook event for ${input.source}:${input.dedupeKey}`);
+    }
+    return {
+      record,
+      created: result.changes > 0,
+    };
+  }
+
   getPendingWorkerShell(id: string): PendingWorkerShellRecord | null {
     const row = this.db.prepare("SELECT * FROM pending_worker_shells WHERE id = ?").get(id) as Record<string, unknown> | undefined;
     return row ? this.toPendingWorkerShell(row) : null;
@@ -1204,6 +1273,21 @@ export class Store {
       status: String(row.status) as PendingWorkerShellRecord["status"],
       appThreadId: row.app_thread_id ? String(row.app_thread_id) : null,
       lastError: row.last_error ? String(row.last_error) : null,
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+    };
+  }
+
+  private toWebhookEvent(row: Record<string, unknown>): WebhookEventRecord {
+    return {
+      id: String(row.id),
+      teamId: String(row.team_id),
+      source: String(row.source),
+      event: String(row.event),
+      dedupeKey: String(row.dedupe_key),
+      match: parseStringMap(typeof row.match_json === "string" ? row.match_json : null),
+      payloadPath: String(row.payload_path),
+      summary: String(row.summary),
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
     };

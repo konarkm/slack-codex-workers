@@ -236,4 +236,37 @@ describe("store", () => {
     });
     store.close();
   });
+
+  it("dedupes webhook events by source and dedupe key", async () => {
+    const { store } = await createStore();
+    const first = store.createWebhookEventIfAbsent({
+      id: "evt-1",
+      teamId: "T1",
+      source: "github",
+      event: "push",
+      dedupeKey: "delivery-1",
+      match: { repo: "acme/api" },
+      payloadPath: "/tmp/payload-1.json",
+      summary: "github/push",
+    });
+    const second = store.createWebhookEventIfAbsent({
+      id: "evt-2",
+      teamId: "T1",
+      source: "github",
+      event: "push",
+      dedupeKey: "delivery-1",
+      match: { repo: "acme/api" },
+      payloadPath: "/tmp/payload-2.json",
+      summary: "github/push",
+    });
+
+    expect(first.created).toBe(true);
+    expect(second.created).toBe(false);
+    expect(second.record).toMatchObject({
+      id: "evt-1",
+      payloadPath: "/tmp/payload-1.json",
+      match: { repo: "acme/api" },
+    });
+    store.close();
+  });
 });

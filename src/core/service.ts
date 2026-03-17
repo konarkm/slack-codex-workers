@@ -1,5 +1,7 @@
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
 import { DEFAULT_EFFORTS, type AppConfig } from "../config.js";
 import { parseSlashCommand, helpText, normalizeEffort } from "./commands.js";
 import {
@@ -19,6 +21,7 @@ import { SlackGateway, type SlackUploadedFile } from "../slack/slackGateway.js";
 import { validateSlackUploadFiles } from "../slack/uploads.js";
 import { assignWorkerIdentity } from "../slack/workerIdentity.js";
 import { WorkstreamManager, buildRequestTitle, formatWorkstreamAddress } from "../workstreams/manager.js";
+import { WebhookIngressServer, type NormalizedWebhookIngress } from "../webhooks/server.js";
 import type {
   DmSessionRecord,
   InboundMessageKind,
@@ -33,6 +36,7 @@ import type {
   SessionStatus,
   SlackMessageContext,
   TurnInput,
+  WebhookEventRecord,
   WorkstreamRecord,
   WorkerRecord,
   WorklogItem,
@@ -78,6 +82,7 @@ export class SlackCodexWorkersService extends EventEmitter {
   private readonly slack: SlackGateway;
   private readonly workstreams: WorkstreamManager;
   private readonly registrations: RegistrationManager;
+  private readonly webhooks: WebhookIngressServer;
   private readonly renderState = new Map<string, RenderSessionState>();
   private readonly slackWriteQueues = new Map<string, Promise<unknown>>();
   private readonly pendingInteractiveRequests = new Map<string, InteractiveRequest>();
@@ -90,6 +95,7 @@ export class SlackCodexWorkersService extends EventEmitter {
   private currentRegistrationLoopPromise: Promise<void> | null = null;
   private stopping = false;
   private executingQueuedRestart = false;
+  private runtimeStarted = false;
 
   constructor(private readonly config: AppConfig) {
     super();
@@ -98,6 +104,7 @@ export class SlackCodexWorkersService extends EventEmitter {
     this.slack = new SlackGateway(config);
     this.workstreams = new WorkstreamManager(config, this.store);
     this.registrations = new RegistrationManager(config, this.store, this.workstreams);
+    this.webhooks = new WebhookIngressServer(config, async (input) => this.ingestWebhookEvent(input));
     this.codex.registerDynamicToolHandlers({
       listChannels: async (args, ctx) => this.handleListChannelsTool(args.query ?? "", ctx),
       spawnWorker: async (args, ctx) => this.handleSpawnWorkerTool(args, ctx),
@@ -119,11 +126,13 @@ export class SlackCodexWorkersService extends EventEmitter {
     await this.codex.start();
     this.registerSlackHandlers();
     await this.slack.start();
+    await this.webhooks.start();
     await this.bootstrapWorkstreams();
     await this.postPendingRestartNotice();
     this.store.resetInterruptedInboundMessages();
     await this.reconcilePersistedRuntimeState();
     await this.replayPendingInboundMessages();
+    this.runtimeStarted = true;
     this.scheduleRegistrationLoop(0);
     logInfo("Slack Codex Workers ready");
   }
@@ -136,6 +145,7 @@ export class SlackCodexWorkersService extends EventEmitter {
 
   async stop(): Promise<void> {
     this.stopping = true;
+    this.runtimeStarted = false;
     for (const timer of this.blockedTurnPolls.values()) {
       clearTimeout(timer);
     }
@@ -146,6 +156,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       this.registrationPollTimer = null;
     }
     await this.currentRegistrationLoopPromise;
+    await this.webhooks.stop();
     await this.slack.stop();
     await this.codex.stop();
     this.store.close();
@@ -1770,7 +1781,7 @@ export class SlackCodexWorkersService extends EventEmitter {
   }
 
   private scheduleRegistrationLoop(delayMs = REGISTRATION_POLL_INTERVAL_MS): void {
-    if (this.stopping) return;
+    if (this.stopping || !this.runtimeStarted) return;
     if (this.registrationPollTimer) {
       clearTimeout(this.registrationPollTimer);
     }
@@ -1852,6 +1863,116 @@ export class SlackCodexWorkersService extends EventEmitter {
         lastError: null,
       });
     }
+  }
+
+  private async ingestWebhookEvent(input: NormalizedWebhookIngress): Promise<{
+    duplicate: boolean;
+    matchedRegistrations: number;
+    eventId: string;
+  }> {
+    const teamId = this.slack.getTeamId() ?? this.config.allowedTeamId ?? "single-workspace";
+    const existing = this.store.getWebhookEvent(teamId, input.source, input.dedupeKey);
+    if (existing) {
+      return {
+        duplicate: true,
+        matchedRegistrations: 0,
+        eventId: existing.id,
+      };
+    }
+    const payloadPath = await this.writeWebhookPayload(input);
+    let persisted: { record: WebhookEventRecord; created: boolean };
+    try {
+      persisted = this.store.createWebhookEventIfAbsent({
+        id: `evt-${randomUUID().slice(0, 8)}`,
+        teamId,
+        source: input.source,
+        event: input.event,
+        dedupeKey: input.dedupeKey,
+        match: input.match,
+        payloadPath,
+        summary: `${input.source}/${input.event}`,
+      });
+    } catch (error) {
+      await fs.rm(payloadPath, { force: true }).catch(() => undefined);
+      throw error;
+    }
+
+    if (!persisted.created) {
+      await fs.rm(payloadPath, { force: true }).catch(() => undefined);
+      return {
+        duplicate: true,
+        matchedRegistrations: 0,
+        eventId: persisted.record.id,
+      };
+    }
+
+    const registrations = this.store
+      .listRegistrationsForTeam(teamId)
+      .filter((registration) => this.matchesWebhookRegistration(registration, input));
+    for (const registration of registrations) {
+      this.store.createPendingWake({
+        id: `wake-${randomUUID().slice(0, 8)}`,
+        teamId: registration.teamId,
+        registrationId: registration.id,
+        workstreamId: registration.workstreamId,
+        workerKey: registration.workerKey,
+        status: "queued",
+        summary: `webhook ${input.source}/${input.event} fired for ${registration.id}`,
+        payloadPath: persisted.record.payloadPath,
+        dueAt: input.receivedAt,
+        attempts: 0,
+        nextAttemptAt: null,
+        lastError: null,
+      });
+    }
+    if (registrations.length > 0) {
+      this.scheduleRegistrationLoop(0);
+    }
+    return {
+      duplicate: false,
+      matchedRegistrations: registrations.length,
+      eventId: persisted.record.id,
+    };
+  }
+
+  private matchesWebhookRegistration(registration: RegistrationRecord, input: NormalizedWebhookIngress): boolean {
+    if (!registration.enabled || registration.trigger.kind !== "webhook") {
+      return false;
+    }
+    if (registration.trigger.source !== input.source) {
+      return false;
+    }
+    if (!registration.trigger.events.includes(input.event)) {
+      return false;
+    }
+    if (!registration.trigger.match) {
+      return true;
+    }
+    for (const [key, expected] of Object.entries(registration.trigger.match)) {
+      if (input.match?.[key] !== expected) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private async writeWebhookPayload(input: NormalizedWebhookIngress): Promise<string> {
+    const date = input.receivedAt.slice(0, 10);
+    const targetDir = path.join(this.config.webhookPayloadStorageDir, input.source, date);
+    await fs.mkdir(targetDir, { recursive: true });
+    const dedupeSlug = input.dedupeKey.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 32) || "event";
+    const filePath = path.join(targetDir, `${Date.now()}-${randomUUID().slice(0, 8)}-${dedupeSlug}.json`);
+    const envelope = {
+      source: input.source,
+      event: input.event,
+      id: input.dedupeKey,
+      match: input.match,
+      receivedAt: input.receivedAt,
+      payload: input.payload,
+      rawBody: input.rawBody,
+    };
+    await fs.writeFile(filePath, `${JSON.stringify(envelope, null, 2)}\n`);
+    return filePath;
   }
 
   private async deliverQueuedWakes(): Promise<void> {
@@ -2722,7 +2843,10 @@ function formatRegistrationLine(registration: RegistrationRecord): string {
   return `${registration.id} [${registration.enabled ? "enabled" : "disabled"}] ${registration.trigger.kind} -> ${registration.action.kind} (${target})`;
 }
 
-function buildWakeTurnInput(registration: RegistrationRecord, wake: { id: string; createdAt: string; dueAt: string | null; summary: string }): TurnInput {
+function buildWakeTurnInput(
+  registration: RegistrationRecord,
+  wake: { id: string; createdAt: string; dueAt: string | null; summary: string; payloadPath?: string | null },
+): TurnInput {
   const details: string[] = [
     "[system wake event]",
     `registration_id: ${registration.id}`,
@@ -2748,6 +2872,9 @@ function buildWakeTurnInput(registration: RegistrationRecord, wake: { id: string
   }
   if (wake.dueAt) {
     details.push(`due_at: ${wake.dueAt}`);
+  }
+  if (wake.payloadPath) {
+    details.push(`payload_path: ${wake.payloadPath}`);
   }
   if (registration.description) {
     details.push(`description: ${registration.description}`);

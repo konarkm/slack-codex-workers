@@ -70,6 +70,11 @@ function makeConfig(dir: string): AppConfig {
     slackUploadTimeoutMs: 600_000,
     slackUploadMaxFiles: 10,
     workspaceTimezone: "America/Los_Angeles",
+    webhookPort: 3014,
+    webhookPath: "/webhooks",
+    webhookBodyMaxBytes: 256 * 1024,
+    webhookPayloadStorageDir: path.join(dir, "webhooks"),
+    webhookSourceSecrets: { github: "secret-github", stripe: "secret-stripe" },
   };
 }
 
@@ -953,6 +958,174 @@ describe("service lifecycle decisions", () => {
     expect(slack.postTopLevelMessage).toHaveBeenCalledWith(
       "C1",
       expect.stringContaining("Scheduled work: Daily digest"),
+      expect.anything(),
+    );
+    expect(store.listWorkers()).toHaveLength(2);
+    expect(store.listPendingWakesForScope("T1", "T1:root", null)[0]).toMatchObject({ status: "delivered" });
+    store.close();
+  });
+
+  it("fans out matched webhook events into queued self wakes with durable payload pointers", async () => {
+    const { dir, service, codex, store } = await createService();
+    createWorker(service, { workstreamId: "T1:root" });
+    codex.reconcileThreadForSend.mockResolvedValue("idle");
+    codex.startTurnWithResumeFallback.mockResolvedValue("turn-webhook");
+
+    store.upsertRegistration({
+      id: "reg-webhook",
+      teamId: "T1",
+      workstreamId: "T1:root",
+      workerKey: "T1:C1:1.000",
+      ownerUserId: "U1",
+      rootOwnerUserId: "U1",
+      description: "Review GitHub pushes",
+      enabled: true,
+      target: {
+        kind: "worker",
+        workstreamId: "T1:root",
+        workerKey: "T1:C1:1.000",
+      },
+      action: { kind: "wake_self" },
+      trigger: {
+        kind: "webhook",
+        source: "github",
+        events: ["push"],
+        match: { repo: "acme/api" },
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    const result = await service.ingestWebhookEvent({
+      source: "github",
+      event: "push",
+      dedupeKey: "evt-1",
+      match: { repo: "acme/api" },
+      payload: { ref: "refs/heads/main", commits: 3 },
+      receivedAt: "2026-01-01T00:01:00.000Z",
+      rawBody: "{\"event\":\"push\"}",
+    });
+
+    expect(result).toMatchObject({ duplicate: false, matchedRegistrations: 1 });
+    await service.deliverQueuedWakes();
+
+    const wakes = store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000");
+    expect(wakes).toHaveLength(1);
+    expect(wakes[0]).toMatchObject({ status: "delivered" });
+    expect(wakes[0]?.payloadPath).toContain(path.join(dir, "webhooks", "github"));
+    await expect(fs.readFile(wakes[0]!.payloadPath!, "utf8")).resolves.toContain("\"source\": \"github\"");
+    expect(codex.startTurnWithResumeFallback).toHaveBeenCalledWith(
+      "thread-1",
+      expect.objectContaining({
+        text: expect.stringContaining("payload_path: "),
+      }),
+      expect.any(Object),
+      expect.any(Object),
+    );
+    store.close();
+  });
+
+  it("dedupes webhook ingress before creating additional wakes", async () => {
+    const { service, store } = await createService();
+    createWorker(service, { workstreamId: "T1:root" });
+
+    store.upsertRegistration({
+      id: "reg-webhook",
+      teamId: "T1",
+      workstreamId: "T1:root",
+      workerKey: "T1:C1:1.000",
+      ownerUserId: "U1",
+      rootOwnerUserId: "U1",
+      description: null,
+      enabled: true,
+      target: {
+        kind: "worker",
+        workstreamId: "T1:root",
+        workerKey: "T1:C1:1.000",
+      },
+      action: { kind: "wake_self" },
+      trigger: {
+        kind: "webhook",
+        source: "github",
+        events: ["push"],
+        match: null,
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    const first = await service.ingestWebhookEvent({
+      source: "github",
+      event: "push",
+      dedupeKey: "evt-1",
+      match: null,
+      payload: { seq: 1 },
+      receivedAt: "2026-01-01T00:01:00.000Z",
+      rawBody: "{\"event\":\"push\",\"id\":\"evt-1\"}",
+    });
+    const second = await service.ingestWebhookEvent({
+      source: "github",
+      event: "push",
+      dedupeKey: "evt-1",
+      match: null,
+      payload: { seq: 2 },
+      receivedAt: "2026-01-01T00:02:00.000Z",
+      rawBody: "{\"event\":\"push\",\"id\":\"evt-1\"}",
+    });
+
+    expect(first).toMatchObject({ duplicate: false, matchedRegistrations: 1 });
+    expect(second).toMatchObject({ duplicate: true, matchedRegistrations: 0 });
+    expect(store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000")).toHaveLength(1);
+    store.close();
+  });
+
+  it("spawns new work for matched webhook registrations targeting the workstream", async () => {
+    const { service, codex, store, slack } = await createService();
+    createWorker(service, { workstreamId: "T1:root" });
+    codex.createWorkerThread.mockResolvedValue({ threadId: "thread-webhook-spawn" });
+    codex.startTurnWithResumeFallback.mockResolvedValue("turn-webhook-spawn");
+
+    store.upsertRegistration({
+      id: "reg-webhook-spawn",
+      teamId: "T1",
+      workstreamId: "T1:root",
+      workerKey: null,
+      ownerUserId: "U1",
+      rootOwnerUserId: "U1",
+      description: "Triage incoming incidents",
+      enabled: true,
+      target: {
+        kind: "workstream",
+        workstreamId: "T1:root",
+        workerKey: null,
+      },
+      action: { kind: "spawn" },
+      trigger: {
+        kind: "webhook",
+        source: "stripe",
+        events: ["invoice.failed"],
+        match: { account: "acct_123" },
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    const result = await service.ingestWebhookEvent({
+      source: "stripe",
+      event: "invoice.failed",
+      dedupeKey: "evt-stripe-1",
+      match: { account: "acct_123" },
+      payload: { invoiceId: "in_123" },
+      receivedAt: "2026-01-01T00:03:00.000Z",
+      rawBody: "{\"event\":\"invoice.failed\"}",
+    });
+
+    expect(result).toMatchObject({ duplicate: false, matchedRegistrations: 1 });
+    await service.deliverQueuedWakes();
+
+    expect(slack.postTopLevelMessage).toHaveBeenCalledWith(
+      "C1",
+      expect.stringContaining("Scheduled work: Triage incoming incidents"),
       expect.anything(),
     );
     expect(store.listWorkers()).toHaveLength(2);

@@ -166,6 +166,19 @@ export interface PendingWakeRecord {
   updatedAt: string;
 }
 
+export interface WebhookEventRecord {
+  id: string;
+  teamId: string;
+  source: string;
+  event: string;
+  dedupeKey: string;
+  match: Record<string, string> | null;
+  payloadPath: string;
+  summary: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface PendingWorkerShellSource {
   sourceKind: string;
   sourceSummary: string;

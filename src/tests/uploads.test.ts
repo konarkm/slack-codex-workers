@@ -29,6 +29,11 @@ function makeConfig(dir: string): AppConfig {
     slackUploadTimeoutMs: 600_000,
     slackUploadMaxFiles: 10,
     workspaceTimezone: "America/Los_Angeles",
+    webhookPort: 3014,
+    webhookPath: "/webhooks",
+    webhookBodyMaxBytes: 256 * 1024,
+    webhookPayloadStorageDir: path.join(dir, "webhooks"),
+    webhookSourceSecrets: { github: "secret-github" },
   };
 }
 

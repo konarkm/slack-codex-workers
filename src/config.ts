@@ -10,6 +10,7 @@ loadDotEnv();
 const fallbackWorkspaceRoot = process.cwd();
 const defaultStateDir = path.join(fallbackWorkspaceRoot, ".slack-workers", "bridge");
 const defaultWorkspaceTimezone = resolveDefaultTimezone();
+const defaultWebhookPath = "/webhooks";
 
 const configSchema = z.object({
   slackBotToken: z.string().min(1),
@@ -32,6 +33,11 @@ const configSchema = z.object({
   slackUploadTimeoutMs: z.number().int().positive().default(600_000),
   slackUploadMaxFiles: z.number().int().positive().default(10),
   workspaceTimezone: z.string().min(1).default(defaultWorkspaceTimezone),
+  webhookPort: z.number().int().positive().default(3014),
+  webhookPath: z.string().min(1).default(defaultWebhookPath),
+  webhookBodyMaxBytes: z.number().int().positive().default(256 * 1024),
+  webhookPayloadStorageDir: z.string().min(1).default(path.join(defaultStateDir, "webhooks")),
+  webhookSourceSecrets: z.record(z.string(), z.string().min(1)).default({}),
 });
 
 export type AppConfig = z.infer<typeof configSchema>;
@@ -63,6 +69,11 @@ export function loadConfig(): AppConfig {
     slackUploadTimeoutMs: parseNumber(process.env.SLACK_UPLOAD_TIMEOUT_MS, 600_000),
     slackUploadMaxFiles: parseNumber(process.env.SLACK_UPLOAD_MAX_FILES, 10),
     workspaceTimezone: resolveConfiguredTimezone(process.env.WORKSPACE_TIMEZONE),
+    webhookPort: parseNumber(process.env.WEBHOOK_PORT, 3014),
+    webhookPath: normalizeWebhookPath(process.env.WEBHOOK_PATH),
+    webhookBodyMaxBytes: parseNumber(process.env.WEBHOOK_BODY_MAX_BYTES, 256 * 1024),
+    webhookPayloadStorageDir: process.env.WEBHOOK_PAYLOAD_STORAGE_DIR ?? path.join(stateDir, "webhooks"),
+    webhookSourceSecrets: parseWebhookSourceSecrets(process.env.WEBHOOK_SOURCE_SECRETS),
   };
 
   return configSchema.parse(raw);
@@ -131,6 +142,32 @@ function resolveConfiguredTimezone(value: string | undefined): string {
 function resolveDefaultTimezone(): string {
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   return validateTimezone(timezone || "UTC");
+}
+
+function normalizeWebhookPath(value: string | undefined): string {
+  const trimmed = value?.trim() || defaultWebhookPath;
+  const normalized = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+  return normalized.length > 1 ? normalized.replace(/\/+$/, "") : normalized;
+}
+
+function parseWebhookSourceSecrets(value: string | undefined): Record<string, string> {
+  if (!value?.trim()) {
+    return {};
+  }
+  return Object.fromEntries(
+    value
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0)
+      .map((entry) => {
+        const separatorIndex = entry.indexOf("=");
+        if (separatorIndex <= 0 || separatorIndex === entry.length - 1) {
+          throw new Error(`Invalid WEBHOOK_SOURCE_SECRETS entry: ${entry}`);
+        }
+        return [entry.slice(0, separatorIndex).trim(), entry.slice(separatorIndex + 1).trim()];
+      })
+      .filter((entry) => entry[0].length > 0 && entry[1].length > 0),
+  );
 }
 
 function validateTimezone(value: string): string {
