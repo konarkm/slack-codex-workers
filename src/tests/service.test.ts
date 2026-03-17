@@ -1120,13 +1120,55 @@ describe("service lifecycle decisions", () => {
     let wakes = store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000");
     expect(wakes).toHaveLength(1);
     expect(wakes[0]).toMatchObject({ status: "queued" });
-    expect(wakes[0]?.summary).toContain("retrying after wake_self failure");
+    expect(wakes[0]?.summary).toContain("retry 1/3");
 
+    store.updatePendingWake(wakes[0]!.id, { nextAttemptAt: "2000-01-01T00:00:00.000Z" });
     await service.deliverQueuedWakes();
 
     wakes = store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000");
     expect(wakes[0]).toMatchObject({ status: "delivered" });
     expect(codex.startTurnWithResumeFallback).toHaveBeenCalledTimes(2);
+    store.close();
+  });
+
+  it("quarantines a wake after repeated transient failures", async () => {
+    const { service, codex, store } = await createService();
+    createWorker(service, { workstreamId: "T1:root" });
+    codex.reconcileThreadForSend.mockResolvedValue("idle");
+    codex.startTurnWithResumeFallback.mockRejectedValue(new Error("still broken"));
+
+    store.upsertRegistration({
+      id: "reg-heartbeat",
+      teamId: "T1",
+      workstreamId: "T1:root",
+      workerKey: "T1:C1:1.000",
+      ownerUserId: "U1",
+      rootOwnerUserId: "U1",
+      description: null,
+      enabled: true,
+      target: {
+        kind: "worker",
+        workstreamId: "T1:root",
+        workerKey: "T1:C1:1.000",
+      },
+      action: { kind: "wake_self" },
+      trigger: { kind: "heartbeat", intervalMinutes: 1 },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    await service.enqueueDueRegistrationWakes();
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const wake = store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000")[0]!;
+      if (wake.nextAttemptAt) {
+        store.updatePendingWake(wake.id, { nextAttemptAt: "2000-01-01T00:00:00.000Z" });
+      }
+      await service.deliverQueuedWakes();
+    }
+
+    const wake = store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000")[0]!;
+    expect(wake).toMatchObject({ status: "quarantined", attempts: 3 });
+    expect(wake.summary).toContain("quarantined");
     store.close();
   });
 
@@ -1166,12 +1208,47 @@ describe("service lifecycle decisions", () => {
     expect(wakes[0]).toMatchObject({ status: "queued" });
     expect(slack.postTopLevelMessage).toHaveBeenCalledTimes(1);
 
+    store.updatePendingWake(wakes[0]!.id, { nextAttemptAt: "2000-01-01T00:00:00.000Z" });
     await service.deliverQueuedWakes();
 
     wakes = store.listPendingWakesForScope("T1", "T1:root", null);
     expect(wakes[0]).toMatchObject({ status: "delivered" });
     expect(slack.postTopLevelMessage).toHaveBeenCalledTimes(1);
     expect(store.listWorkers()).toHaveLength(2);
+    store.close();
+  });
+
+  it("quarantines invalid persisted registration actions instead of spawning", async () => {
+    const { service, store, slack } = await createService();
+    createWorker(service, { workstreamId: "T1:root" });
+    store.upsertRegistration({
+      id: "reg-invalid",
+      teamId: "T1",
+      workstreamId: "T1:root",
+      workerKey: null,
+      ownerUserId: "U1",
+      rootOwnerUserId: "U1",
+      description: "Bad config",
+      enabled: true,
+      target: {
+        kind: "workstream",
+        workstreamId: "T1:root",
+        workerKey: null,
+      },
+      action: { kind: "spawn" },
+      trigger: { kind: "cron", schedule: "* * * * *", timezone: "America/Los_Angeles" },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    (store as any).db.prepare("UPDATE registrations SET action_json = ? WHERE id = ?").run("{bad json", "reg-invalid");
+
+    await service.enqueueDueRegistrationWakes();
+    await service.deliverQueuedWakes();
+
+    const wake = store.listPendingWakesForScope("T1", "T1:root", null)[0]!;
+    expect(wake).toMatchObject({ status: "quarantined" });
+    expect(wake.summary).toContain("invalid action");
+    expect(slack.postTopLevelMessage).not.toHaveBeenCalled();
     store.close();
   });
 

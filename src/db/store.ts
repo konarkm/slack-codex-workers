@@ -110,13 +110,16 @@ function parseRegistrationTarget(value: string | null | undefined): Registration
 
 function parseRegistrationAction(value: string | null | undefined): RegistrationAction {
   if (!value) {
-    return { kind: "spawn" };
+    return { kind: "invalid" };
   }
   try {
     const parsed = JSON.parse(value) as Partial<RegistrationAction>;
-    return { kind: parsed.kind === "wake_self" ? "wake_self" : "spawn" };
+    if (parsed.kind === "wake_self" || parsed.kind === "spawn") {
+      return { kind: parsed.kind };
+    }
+    return { kind: "invalid" };
   } catch {
-    return { kind: "spawn" };
+    return { kind: "invalid" };
   }
 }
 
@@ -244,6 +247,9 @@ export class Store {
         summary TEXT NOT NULL,
         payload_path TEXT,
         due_at TEXT,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at TEXT,
+        last_error TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -345,6 +351,9 @@ export class Store {
     this.ensureColumn("workers", "request_item_path", "TEXT");
     this.ensureColumn("registrations", "owner_user_id", "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn("registrations", "root_owner_user_id", "TEXT NOT NULL DEFAULT ''");
+    this.ensureColumn("pending_wakes", "attempts", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("pending_wakes", "next_attempt_at", "TEXT");
+    this.ensureColumn("pending_wakes", "last_error", "TEXT");
     this.ensureColumn("dm_sessions", "channel_id", "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn("dm_sessions", "status", "TEXT NOT NULL DEFAULT 'idle'");
     this.ensureColumn("dm_sessions", "last_error", "TEXT");
@@ -795,8 +804,9 @@ export class Store {
     const rows = this.db.prepare(`
       SELECT * FROM pending_wakes
       WHERE status = 'queued'
+        AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
       ORDER BY created_at ASC, id ASC
-    `).all() as Record<string, unknown>[];
+    `).all(nowIso()) as Record<string, unknown>[];
     return rows.map((row) => this.toPendingWake(row));
   }
 
@@ -807,8 +817,8 @@ export class Store {
     const updatedAt = input.updatedAt ?? createdAt;
     this.db.prepare(`
       INSERT INTO pending_wakes (
-        id, team_id, registration_id, workstream_id, worker_key, status, summary, payload_path, due_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        id, team_id, registration_id, workstream_id, worker_key, status, summary, payload_path, due_at, attempts, next_attempt_at, last_error, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       input.id,
       input.teamId,
@@ -819,13 +829,16 @@ export class Store {
       input.summary,
       input.payloadPath,
       input.dueAt,
+      input.attempts,
+      input.nextAttemptAt,
+      input.lastError,
       createdAt,
       updatedAt,
     );
     return this.getPendingWake(input.id)!;
   }
 
-  updatePendingWake(id: string, patch: Partial<Pick<PendingWakeRecord, "status" | "summary" | "payloadPath" | "dueAt">>): PendingWakeRecord | null {
+  updatePendingWake(id: string, patch: Partial<Pick<PendingWakeRecord, "status" | "summary" | "payloadPath" | "dueAt" | "attempts" | "nextAttemptAt" | "lastError">>): PendingWakeRecord | null {
     const current = this.getPendingWake(id);
     if (!current) return null;
     this.db.prepare(`
@@ -834,6 +847,9 @@ export class Store {
         summary = ?,
         payload_path = ?,
         due_at = ?,
+        attempts = ?,
+        next_attempt_at = ?,
+        last_error = ?,
         updated_at = ?
       WHERE id = ?
     `).run(
@@ -841,6 +857,9 @@ export class Store {
       Object.hasOwn(patch, "summary") ? patch.summary : current.summary,
       Object.hasOwn(patch, "payloadPath") ? patch.payloadPath : current.payloadPath,
       Object.hasOwn(patch, "dueAt") ? patch.dueAt : current.dueAt,
+      Object.hasOwn(patch, "attempts") ? patch.attempts : current.attempts,
+      Object.hasOwn(patch, "nextAttemptAt") ? patch.nextAttemptAt : current.nextAttemptAt,
+      Object.hasOwn(patch, "lastError") ? patch.lastError : current.lastError,
       nowIso(),
       id,
     );
@@ -1158,6 +1177,9 @@ export class Store {
       summary: String(row.summary),
       payloadPath: row.payload_path ? String(row.payload_path) : null,
       dueAt: row.due_at ? String(row.due_at) : null,
+      attempts: Number(row.attempts ?? 0),
+      nextAttemptAt: row.next_attempt_at ? String(row.next_attempt_at) : null,
+      lastError: row.last_error ? String(row.last_error) : null,
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
     };

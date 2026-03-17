@@ -63,6 +63,7 @@ interface DmCommandResult {
 const BLOCKED_RUNNING_TURN_POLL_INTERVAL_MS = 2_000;
 const BLOCKED_RUNNING_TURN_POLL_WINDOW_MS = 30_000;
 const REGISTRATION_POLL_INTERVAL_MS = 5_000;
+const WAKE_RETRY_MAX_ATTEMPTS = 3;
 const STATUS_REACTIONS = {
   seen: "eyes",
   running: "hourglass_flowing_sand",
@@ -1809,10 +1810,13 @@ export class SlackCodexWorkersService extends EventEmitter {
           registrationId: registration.id,
           workstreamId: registration.workstreamId,
           workerKey: registration.workerKey,
-          status: "failed",
+          status: "quarantined",
           summary: `[config error] ${message}`,
           payloadPath: null,
           dueAt: null,
+          attempts: 0,
+          nextAttemptAt: null,
+          lastError: message,
         });
         continue;
       }
@@ -1827,6 +1831,9 @@ export class SlackCodexWorkersService extends EventEmitter {
         summary: `${registration.trigger.kind} fired for ${registration.id}`,
         payloadPath: null,
         dueAt: dueAt,
+        attempts: 0,
+        nextAttemptAt: null,
+        lastError: null,
       });
     }
   }
@@ -1834,7 +1841,8 @@ export class SlackCodexWorkersService extends EventEmitter {
   private async deliverQueuedWakes(): Promise<void> {
     const wakes = this.store.listQueuedPendingWakes();
     for (const wake of wakes) {
-      if (this.store.getPendingRestart() && this.isRuntimeIdle()) {
+      if (this.stopping) return;
+      if (this.store.getPendingRestart()) {
         await this.maybeExecuteQueuedRestart();
         return;
       }
@@ -1850,8 +1858,9 @@ export class SlackCodexWorkersService extends EventEmitter {
         let worker = this.store.getWorkerByKey(registration.workerKey);
         if (!worker) {
           this.store.updatePendingWake(wake.id, {
-            status: "failed",
+            status: "quarantined",
             summary: `${wake.summary} (worker missing)`,
+            lastError: "worker missing",
           });
           continue;
         }
@@ -1859,7 +1868,7 @@ export class SlackCodexWorkersService extends EventEmitter {
           continue;
         }
         worker = await this.prepareWorkerForSend(worker);
-        if (worker.pendingRequest || worker.activeTurnId || worker.status === "running" || isManuallyBlockedStatus(worker.status)) {
+        if (this.stopping || worker.pendingRequest || worker.activeTurnId || worker.status === "running" || isManuallyBlockedStatus(worker.status)) {
           continue;
         }
         try {
@@ -1867,13 +1876,11 @@ export class SlackCodexWorkersService extends EventEmitter {
           this.store.updatePendingWake(wake.id, {
             status: "delivered",
             summary: `${wake.summary} (delivered)`,
+            nextAttemptAt: null,
+            lastError: null,
           });
         } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          this.store.updatePendingWake(wake.id, {
-            status: "queued",
-            summary: `${stripWakeStatusSuffix(wake.summary)} (retrying after wake_self failure: ${message})`,
-          });
+          this.recordTransientWakeFailure(wake, `wake_self failure: ${error instanceof Error ? error.message : String(error)}`);
         }
         continue;
       }
@@ -1882,12 +1889,14 @@ export class SlackCodexWorkersService extends EventEmitter {
         const workstream = this.store.getWorkstreamById(registration.target.workstreamId);
         if (!workstream) {
           this.store.updatePendingWake(wake.id, {
-            status: "failed",
+            status: "quarantined",
             summary: `${wake.summary} (workstream missing)`,
+            lastError: "workstream missing",
           });
           continue;
         }
         try {
+          if (this.stopping) return;
           await this.spawnWorkerIntoWorkstream({
             workstream,
             channelId: workstream.channelId,
@@ -1910,15 +1919,20 @@ export class SlackCodexWorkersService extends EventEmitter {
           this.store.updatePendingWake(wake.id, {
             status: "delivered",
             summary: `${wake.summary} (spawned)`,
+            nextAttemptAt: null,
+            lastError: null,
           });
         } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          this.store.updatePendingWake(wake.id, {
-            status: "queued",
-            summary: `${stripWakeStatusSuffix(wake.summary)} (retrying after spawn failure: ${message})`,
-          });
+          this.recordTransientWakeFailure(wake, `spawn failure: ${error instanceof Error ? error.message : String(error)}`);
         }
+        continue;
       }
+
+      this.store.updatePendingWake(wake.id, {
+        status: "quarantined",
+        summary: `${wake.summary} (invalid action)`,
+        lastError: "invalid action",
+      });
     }
   }
 
@@ -1944,6 +1958,29 @@ export class SlackCodexWorkersService extends EventEmitter {
     }
 
     return null;
+  }
+
+  private recordTransientWakeFailure(wake: { id: string; attempts: number; summary: string }, detail: string): void {
+    const nextAttempts = wake.attempts + 1;
+    if (nextAttempts >= WAKE_RETRY_MAX_ATTEMPTS) {
+      this.store.updatePendingWake(wake.id, {
+        status: "quarantined",
+        attempts: nextAttempts,
+        nextAttemptAt: null,
+        lastError: detail,
+        summary: `${stripWakeStatusSuffix(wake.summary)} (quarantined after ${nextAttempts} attempts: ${detail})`,
+      });
+      return;
+    }
+
+    const backoffMs = nextAttempts * REGISTRATION_POLL_INTERVAL_MS;
+    this.store.updatePendingWake(wake.id, {
+      status: "queued",
+      attempts: nextAttempts,
+      nextAttemptAt: new Date(Date.now() + backoffMs).toISOString(),
+      lastError: detail,
+      summary: `${stripWakeStatusSuffix(wake.summary)} (retry ${nextAttempts}/${WAKE_RETRY_MAX_ATTEMPTS}: ${detail})`,
+    });
   }
 
   private async createWorkstreamFromThreadArgs(worker: WorkerRecord, args: string[]): Promise<string> {
@@ -2640,7 +2677,7 @@ function isPermanentInvalidConfigWake(
   wake: { status: string; summary: string; updatedAt: string } | null,
   registrationUpdatedAt: string,
 ): boolean {
-  if (!wake || wake.status !== "failed") return false;
+  if (!wake || wake.status !== "quarantined") return false;
   if (!wake.summary.startsWith("[config error]")) return false;
   return wake.updatedAt >= registrationUpdatedAt;
 }

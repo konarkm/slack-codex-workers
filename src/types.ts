@@ -98,7 +98,7 @@ export interface WorkstreamRecord {
 }
 
 export type RegistrationTargetKind = "worker" | "workstream";
-export type RegistrationActionKind = "wake_self" | "spawn";
+export type RegistrationActionKind = "wake_self" | "spawn" | "invalid";
 
 export interface RegistrationTarget {
   kind: RegistrationTargetKind;
@@ -155,10 +155,13 @@ export interface PendingWakeRecord {
   registrationId: string;
   workstreamId: string;
   workerKey: string | null;
-  status: "queued" | "delivered" | "failed";
+  status: "queued" | "delivered" | "failed" | "quarantined";
   summary: string;
   payloadPath: string | null;
   dueAt: string | null;
+  attempts: number;
+  nextAttemptAt: string | null;
+  lastError: string | null;
   createdAt: string;
   updatedAt: string;
 }
