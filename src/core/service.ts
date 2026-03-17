@@ -68,6 +68,7 @@ const BLOCKED_RUNNING_TURN_POLL_INTERVAL_MS = 2_000;
 const BLOCKED_RUNNING_TURN_POLL_WINDOW_MS = 30_000;
 const REGISTRATION_POLL_INTERVAL_MS = 5_000;
 const WAKE_RETRY_MAX_ATTEMPTS = 3;
+const webhookShutdownErrorCode = "WEBHOOK_SHUTDOWN";
 const STATUS_REACTIONS = {
   seen: "eyes",
   running: "hourglass_flowing_sand",
@@ -120,7 +121,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       disableRegistration: async (args, ctx) => this.handleDisableRegistrationTool(args, ctx),
       listRegistrations: async (ctx) => this.handleListRegistrationsTool(ctx),
       getRegistration: async (args, ctx) => this.handleGetRegistrationTool(args, ctx),
-      listPendingWakes: async (ctx) => this.handleListPendingWakesTool(ctx),
+      listWakeDeliveries: async (ctx) => this.handleListWakeDeliveriesTool(ctx),
     });
     this.codex.registerInteractiveRequestHandler(async (request) => this.handleInteractiveRequest(request));
   }
@@ -1763,11 +1764,11 @@ export class SlackCodexWorkersService extends EventEmitter {
     return JSON.stringify(registration, null, 2);
   }
 
-  private async handleListPendingWakesTool(ctx: DynamicToolHandlerContext): Promise<string> {
+  private async handleListWakeDeliveriesTool(ctx: DynamicToolHandlerContext): Promise<string> {
     const context = this.requireRegistrationContext(ctx);
-    const wakes = this.registrations.listPendingWakes(context);
+    const wakes = this.registrations.listWakeDeliveries(context);
     if (wakes.length === 0) {
-      return "No pending wakes in the current worker/workstream scope.";
+      return "No wake deliveries in the current worker/workstream scope.";
     }
     return wakes.map((wake) => `${wake.id} ${wake.status} ${wake.summary}`).join("\n");
   }
@@ -1882,7 +1883,7 @@ export class SlackCodexWorkersService extends EventEmitter {
     eventId: string;
   }> {
     if (!this.runtimeStarted || this.stopping) {
-      throw new Error("Webhook ingress unavailable during shutdown.");
+      throw shutdownWebhookIngressError();
     }
     const teamId = this.slack.getTeamId() ?? this.config.allowedTeamId ?? "single-workspace";
     const existing = this.store.getWebhookEvent(teamId, input.source, input.event, input.dedupeKey);
@@ -1971,7 +1972,12 @@ export class SlackCodexWorkersService extends EventEmitter {
 
   private async writeWebhookPayload(input: NormalizedWebhookIngress): Promise<string> {
     const date = input.receivedAt.slice(0, 10);
-    const targetDir = path.join(this.config.webhookPayloadStorageDir, input.source, date);
+    const rootDir = path.resolve(this.config.webhookPayloadStorageDir);
+    const targetDir = path.resolve(rootDir, input.source, date);
+    const relativeTarget = path.relative(rootDir, targetDir);
+    if (relativeTarget.startsWith("..") || path.isAbsolute(relativeTarget)) {
+      throw new Error(`Invalid webhook source path: ${input.source}`);
+    }
     await fs.mkdir(targetDir, { recursive: true });
     const dedupeSlug = input.dedupeKey.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 32) || "event";
     const filePath = path.join(targetDir, `${Date.now()}-${randomUUID().slice(0, 8)}-${dedupeSlug}.json`);
@@ -2920,6 +2926,12 @@ function buildScheduledSpawnTitle(registration: RegistrationRecord): string {
     return `Scheduled work: ${registration.description.trim()}`;
   }
   return `Scheduled work (${registration.trigger.kind})`;
+}
+
+function shutdownWebhookIngressError(): Error & { code: string } {
+  const error = new Error("Webhook ingress unavailable during shutdown.") as Error & { code: string };
+  error.code = webhookShutdownErrorCode;
+  return error;
 }
 
 function describeEffectiveSetting(threadValue: string | null, defaultValue: string | null): string {

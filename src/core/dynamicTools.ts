@@ -10,7 +10,7 @@ export const slackSetWebhookToolName = "set_webhook";
 export const slackDisableRegistrationToolName = "disable_registration";
 export const slackListRegistrationsToolName = "list_registrations";
 export const slackGetRegistrationToolName = "get_registration";
-export const slackListPendingWakesToolName = "list_pending_wakes";
+export const slackListWakeDeliveriesToolName = "list_wake_deliveries";
 
 export const workerDynamicTools = [
   {
@@ -175,9 +175,9 @@ export const workerDynamicTools = [
     },
   },
   {
-    name: slackListPendingWakesToolName,
+    name: slackListWakeDeliveriesToolName,
     description:
-      "List queued wake deliveries in the current worker/workstream scope.",
+      "List wake delivery records in the current worker/workstream scope, including queued, delivered, failed, and quarantined executions.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -260,7 +260,7 @@ export const workerDeveloperInstructions = [
   "Use normal assistant messages to communicate substantive progress. Raw reasoning is not shown to the human.",
   "Use slack_spawn_worker only for distinct user-facing child tasks that should live as their own top-level Slack thread. Do not use it for internal subagents or minor follow-ups.",
   "Use slack_create_workstream only after the human has explicitly approved creating a new workstream in the current conversation. This is conversational/tool guidance, not a separate permission layer.",
-  "Use set_heartbeat, set_cron, set_webhook, disable_registration, list_registrations, get_registration, and list_pending_wakes to manage durable wakeup registrations for the current worker/workstream when you need ongoing automation.",
+  "Use set_heartbeat, set_cron, set_webhook, disable_registration, list_registrations, get_registration, and list_wake_deliveries to manage durable wakeup registrations and inspect wake execution history for the current worker/workstream when you need ongoing automation.",
   "Use slack_upload_files when you need to share one or more existing local files into the current Slack thread. Only upload files that materially help the user.",
   "If you create a child worker, it is fire-and-forget. Do not wait on the child unless the human explicitly asks you to.",
   "Keep progress clear and concise because the client streams your interleaved assistant messages into the Slack thread.",

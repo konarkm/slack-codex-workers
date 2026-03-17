@@ -142,7 +142,7 @@ export class RegistrationManager {
     return this.store.listRegistrationsForScope(ctx.teamId, ctx.workstream.id, ctx.worker?.key ?? null);
   }
 
-  listPendingWakes(ctx: RegistrationContext): PendingWakeRecord[] {
+  listWakeDeliveries(ctx: RegistrationContext): PendingWakeRecord[] {
     return this.store.listPendingWakesForScope(ctx.teamId, ctx.workstream.id, ctx.worker?.key ?? null);
   }
 

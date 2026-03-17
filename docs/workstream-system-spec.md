@@ -605,7 +605,7 @@ The first-class bridge tool surface is:
 - `disable_registration(...)`
 - `list_registrations(...)`
 - `get_registration(...)`
-- `list_pending_wakes()`
+- `list_wake_deliveries()`
 
 ### Registration Shape
 
@@ -661,7 +661,7 @@ Queued wakes are canonical bridge-global runtime state.
 
 They are not a second local event store.
 
-Workers should be able to inspect registrations and queued wakes, but not mutate/clear the queue directly in the first version.
+Workers should be able to inspect registrations and wake delivery state/history, but not mutate/clear the queue directly in the first version.
 
 ## Webhook Ingress
 

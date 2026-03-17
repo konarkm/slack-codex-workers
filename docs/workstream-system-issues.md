@@ -152,14 +152,17 @@ Settled conceptually:
 - `set_heartbeat(interval, description?)`
 - `set_cron(schedule, target, description?)`
 - `set_webhook(source, events, target, match?, description?)`
-- plus list/get/disable
+- plus list/get/disable and wake-delivery inspection
 
 Current implementation contract:
 
 - `schedule` currently uses a standard 5-field cron string
+- omitted cron/webhook `target` defaults to `self`
+- cron registrations use the configured workspace timezone
 - `events` is an explicit string list
 - `match` is an optional exact-match string map
 - `description` remains optional
+- wake inspection is exposed as `list_wake_deliveries()` and returns queued plus historical delivery records in scope
 
 ## 7. Webhook auth/body-limit/idempotency implementation details
 

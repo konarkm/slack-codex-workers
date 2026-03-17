@@ -3,6 +3,8 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { logInfo, logWarn } from "../logger.js";
 import type { AppConfig } from "../config.js";
 
+const webhookSourcePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
 export interface NormalizedWebhookIngress {
   source: string;
   event: string;
@@ -87,6 +89,10 @@ export class WebhookIngressServer {
         eventId: result.eventId,
       });
     } catch (error) {
+      if (isWebhookShutdownError(error)) {
+        this.respondJson(res, 503, { ok: false, error: "shutting_down" });
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       logWarn("Webhook ingress request failed", { error: message });
       this.respondJson(res, 500, { ok: false, error: "internal_error" });
@@ -168,8 +174,17 @@ export class WebhookIngressServer {
     if (!url.pathname.startsWith(`${normalizedBase}/`)) {
       return null;
     }
-    const source = url.pathname.slice(normalizedBase.length + 1).trim();
-    return source.length > 0 && !source.includes("/") ? decodeURIComponent(source) : null;
+    const encodedSource = url.pathname.slice(normalizedBase.length + 1).trim();
+    if (encodedSource.length === 0 || encodedSource.includes("/")) {
+      return null;
+    }
+    let source: string;
+    try {
+      source = decodeURIComponent(encodedSource);
+    } catch {
+      return null;
+    }
+    return webhookSourcePattern.test(source) ? source : null;
   }
 
   private extractSecret(req: IncomingMessage): string | null {
@@ -222,6 +237,15 @@ function safeSecretEquals(left: string, right: string): boolean {
     return false;
   }
   return timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function isWebhookShutdownError(error: unknown): boolean {
+  return Boolean(
+    error
+    && typeof error === "object"
+    && "code" in error
+    && (error as { code?: unknown }).code === "WEBHOOK_SHUTDOWN",
+  );
 }
 
 function stableJsonStringify(value: unknown): string {

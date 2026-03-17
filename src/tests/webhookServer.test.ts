@@ -58,6 +58,25 @@ describe("webhook ingress server", () => {
     expect(handler).not.toHaveBeenCalled();
   });
 
+  it("rejects encoded webhook sources that would escape the payload root", async () => {
+    const handler = vi.fn();
+    const server = new WebhookIngressServer(makeConfig(), handler);
+    activeServers.push(server);
+    await server.start();
+
+    const response = await fetch(`http://127.0.0.1:${server.getListeningPort()}/webhooks/%2Ftmp`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer secret-github",
+      },
+      body: JSON.stringify({ event: "push" }),
+    });
+
+    expect(response.status).toBe(404);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
   it("still returns auth failure before exposing shutdown state", async () => {
     const handler = vi.fn();
     const server = new WebhookIngressServer(
@@ -201,5 +220,28 @@ describe("webhook ingress server", () => {
 
     expect(response.status).toBe(503);
     expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("maps shutdown races in the handler to a fail-closed 503", async () => {
+    const handler = vi.fn().mockImplementation(async () => {
+      const error = new Error("Webhook ingress unavailable during shutdown.") as Error & { code: string };
+      error.code = "WEBHOOK_SHUTDOWN";
+      throw error;
+    });
+    const server = new WebhookIngressServer(makeConfig({ webhookBodyMaxBytes: 1024 }), handler);
+    activeServers.push(server);
+    await server.start();
+
+    const response = await fetch(`http://127.0.0.1:${server.getListeningPort()}/webhooks/github`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer secret-github",
+      },
+      body: JSON.stringify({ event: "push" }),
+    });
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toMatchObject({ ok: false, error: "shutting_down" });
   });
 });

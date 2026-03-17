@@ -196,9 +196,18 @@ function createDmSession(service: any, overrides: Partial<DmSessionRecord> = {})
 afterEach(async () => {
   while (activeServices.length > 0) {
     const service = activeServices.pop();
+    if (!service) continue;
+    service.stopping = true;
+    service.runtimeStarted = false;
     if (service?.registrationPollTimer) {
       clearTimeout(service.registrationPollTimer);
       service.registrationPollTimer = null;
+    }
+    await service.currentRegistrationLoopPromise?.catch(() => undefined);
+    try {
+      service.store.close();
+    } catch {
+      // Some tests close the store directly as part of their assertions.
     }
   }
   while (tempDirs.length > 0) {
@@ -266,7 +275,6 @@ describe("service lifecycle decisions", () => {
     expect(record?.retryable).toBe(false);
     expect(record?.lastError).toContain("Codex turn");
     expect(slack.postThreadReply).toHaveBeenCalled();
-    store.close();
   });
 
   it("keeps normal worker turn startup out of blocked_running_turn", async () => {
@@ -286,7 +294,6 @@ describe("service lifecycle decisions", () => {
     const updated = store.getWorkerByKey(worker.key);
     expect(updated?.status).toBe("running");
     expect(updated?.activeTurnId).toBe("turn-1");
-    store.close();
   });
 
   it("allows recover when live reconciliation shows the backing thread is missing", async () => {
@@ -301,7 +308,6 @@ describe("service lifecycle decisions", () => {
     expect(updated?.appThreadId).toBe("thread-2");
     expect(updated?.status).toBe("idle");
     expect(slack.postThreadReply).toHaveBeenCalled();
-    store.close();
   });
 
   it("refuses recover when blocked state is stale but the backing thread is healthy", async () => {
@@ -322,7 +328,6 @@ describe("service lifecycle decisions", () => {
       "1.000",
       expect.stringContaining("Recover is only available"),
     );
-    store.close();
   });
 
   it("refuses DM recover when blocked state is stale but the backing thread is healthy", async () => {
@@ -340,7 +345,6 @@ describe("service lifecycle decisions", () => {
     expect(codex.createAdminThread).not.toHaveBeenCalled();
     expect(response.response).toContain("Recover is only available");
     expect(slack.postTopLevelMessage).not.toHaveBeenCalled();
-    store.close();
   });
 
   it("creates the Slack child anchor before the backing worker thread", async () => {
@@ -987,6 +991,7 @@ describe("service lifecycle decisions", () => {
   it("fans out matched webhook events into queued self wakes with durable payload pointers", async () => {
     const { dir, service, codex, store } = await createService();
     service.runtimeStarted = true;
+    service.scheduleRegistrationLoop = vi.fn();
     createWorker(service, { workstreamId: "T1:root" });
     codex.reconcileThreadForSend.mockResolvedValue("idle");
     codex.startTurnWithResumeFallback.mockResolvedValue("turn-webhook");
@@ -1056,6 +1061,7 @@ describe("service lifecycle decisions", () => {
   it("dedupes webhook ingress before creating additional wakes", async () => {
     const { service, store } = await createService();
     service.runtimeStarted = true;
+    service.scheduleRegistrationLoop = vi.fn();
     createWorker(service, { workstreamId: "T1:root" });
 
     store.upsertRegistration({
@@ -1111,6 +1117,7 @@ describe("service lifecycle decisions", () => {
   it("does not fan out webhook wakes when source, event, or match fields do not align", async () => {
     const { service, store } = await createService();
     service.runtimeStarted = true;
+    service.scheduleRegistrationLoop = vi.fn();
     createWorker(service, { workstreamId: "T1:root" });
     store.upsertRegistration({
       id: "reg-webhook",
@@ -1173,6 +1180,7 @@ describe("service lifecycle decisions", () => {
   it("spawns new work for matched webhook registrations targeting the workstream", async () => {
     const { service, codex, store, slack } = await createService();
     service.runtimeStarted = true;
+    service.scheduleRegistrationLoop = vi.fn();
     createWorker(service, { workstreamId: "T1:root" });
     codex.createWorkerThread.mockResolvedValue({ threadId: "thread-webhook-spawn" });
     codex.startTurnWithResumeFallback.mockResolvedValue("turn-webhook-spawn");
@@ -1236,6 +1244,7 @@ describe("service lifecycle decisions", () => {
   it("does not disable webhook registrations after bounded transient wake retries", async () => {
     const { service, codex, store } = await createService();
     service.runtimeStarted = true;
+    service.scheduleRegistrationLoop = vi.fn();
     createWorker(service, { workstreamId: "T1:root" });
     codex.reconcileThreadForSend.mockResolvedValue("idle");
     codex.startTurnWithResumeFallback.mockRejectedValue(new Error("temporary outage"));

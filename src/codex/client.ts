@@ -15,7 +15,7 @@ import {
   slackGetRegistrationToolName,
   slackListChannelsArgsSchema,
   slackListChannelsToolName,
-  slackListPendingWakesToolName,
+  slackListWakeDeliveriesToolName,
   slackListRegistrationsToolName,
   slackSetCronArgsSchema,
   slackSetCronToolName,
@@ -67,7 +67,7 @@ export interface DynamicToolHandlers {
   disableRegistration(args: z.infer<typeof slackDisableRegistrationArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
   listRegistrations(ctx: DynamicToolHandlerContext): Promise<string>;
   getRegistration(args: z.infer<typeof slackGetRegistrationArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
-  listPendingWakes(ctx: DynamicToolHandlerContext): Promise<string>;
+  listWakeDeliveries(ctx: DynamicToolHandlerContext): Promise<string>;
 }
 
 export interface InteractiveRequest {
@@ -504,8 +504,8 @@ export class CodexClient {
       return;
     }
 
-    if (parsed.data.tool === slackListPendingWakesToolName) {
-      const text = await this.dynamicToolHandlers.listPendingWakes(ctx);
+    if (parsed.data.tool === slackListWakeDeliveriesToolName) {
+      const text = await this.dynamicToolHandlers.listWakeDeliveries(ctx);
       await this.rpc.respond(id, { contentItems: [{ type: "inputText", text }], success: true });
       return;
     }
