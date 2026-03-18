@@ -212,7 +212,9 @@ export class SlackCodexWorkersService extends EventEmitter {
     if (!event || typeof event !== "object") return null;
     const eventRecord = event as Record<string, unknown>;
     if (typeof eventRecord.user !== "string") return null;
-    if (eventRecord.bot_id || eventRecord.subtype === "bot_message" || eventRecord.subtype === "message_changed") return null;
+    const subtype = typeof eventRecord.subtype === "string" ? eventRecord.subtype : null;
+    if (eventRecord.bot_id || subtype === "bot_message" || subtype === "message_changed") return null;
+    if (subtype && subtype !== "file_share") return null;
     if (typeof eventRecord.channel !== "string" || typeof eventRecord.ts !== "string") return null;
 
     const text = typeof eventRecord.text === "string" ? eventRecord.text : "";
@@ -2561,9 +2563,22 @@ export class SlackCodexWorkersService extends EventEmitter {
   }
 
   private async postWorkerSystemMessage(worker: WorkerRecord, message: string): Promise<void> {
-    await this.enqueueSlackWrite(this.getWorkerQueueKey(worker), async () => {
-      await this.slack.postThreadReply(worker.channelId, worker.rootTs, renderSystemMessage(message));
-    });
+    try {
+      await this.enqueueSlackWrite(this.getWorkerQueueKey(worker), async () => {
+        await this.slack.postThreadReply(worker.channelId, worker.rootTs, renderSystemMessage(message));
+      });
+    } catch (error) {
+      if (isSlackCannotReplyToMessageError(error)) {
+        logWarn("skipping worker system message because Slack cannot reply to the root message", {
+          workerKey: worker.key,
+          channelId: worker.channelId,
+          rootTs: worker.rootTs,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return;
+      }
+      throw error;
+    }
   }
 
   private async postDmSystemMessage(session: DmSessionRecord, message: string): Promise<void> {
@@ -2909,6 +2924,13 @@ function isSlackMessageNotFoundError(error: unknown): boolean {
   const maybeError = error as { message?: unknown; data?: { error?: unknown } };
   return maybeError.data?.error === "message_not_found"
     || (typeof maybeError.message === "string" && maybeError.message.includes("message_not_found"));
+}
+
+function isSlackCannotReplyToMessageError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const maybeError = error as { message?: unknown; data?: { error?: unknown } };
+  return maybeError.data?.error === "cannot_reply_to_message"
+    || (typeof maybeError.message === "string" && maybeError.message.includes("cannot_reply_to_message"));
 }
 
 function isManuallyBlockedStatus(status: SessionStatus): boolean {

@@ -228,6 +228,51 @@ afterEach(async () => {
 });
 
 describe("service lifecycle decisions", () => {
+  it("ignores non-user message subtypes like channel_join", async () => {
+    const { service, store } = await createService();
+
+    await (service as any).handleMessageEvent({
+      type: "message",
+      subtype: "channel_join",
+      user: "U1",
+      channel: "C1",
+      channel_type: "channel",
+      ts: "2.000",
+      text: "<@U1> has joined the channel",
+    });
+
+    expect(store.getInboundMessage("T1:C1:2.000:channel-root")).toBeNull();
+    expect(store.listWorkers()).toHaveLength(0);
+  });
+
+  it("accepts file_share messages as inbound user content", async () => {
+    const { service, store, slack, codex } = await createService();
+    (slack.extractFiles as any).mockReturnValue([
+      {
+        id: "F1",
+        name: "image.png",
+        mimetype: "image/png",
+        url_private_download: "https://files.test/image.png",
+      },
+    ]);
+    codex.createWorkerThread.mockResolvedValue({ threadId: "thread-2" });
+    codex.startTurnWithResumeFallback.mockResolvedValue("turn-2");
+
+    await (service as any).handleMessageEvent({
+      type: "message",
+      subtype: "file_share",
+      user: "U1",
+      channel: "C1",
+      channel_type: "channel",
+      ts: "3.000",
+      text: "",
+      files: [{ id: "F1" }],
+    });
+
+    expect(store.getInboundMessage("T1:C1:3.000:channel-root")?.status).toBe("processed");
+    expect(store.listWorkers()).toHaveLength(1);
+  });
+
   it("cleans up partially started dependencies when startup fails", async () => {
     const { service, slack, codex } = await createService();
     const webhooks = {
@@ -317,6 +362,45 @@ describe("service lifecycle decisions", () => {
     expect(updated?.appThreadId).toBe("thread-2");
     expect(updated?.status).toBe("idle");
     expect(slack.postThreadReply).toHaveBeenCalled();
+  });
+
+  it("does not crash startup reconciliation when Slack cannot reply to a worker root message", async () => {
+    const { service, slack, codex, store } = await createService();
+    const worker = createWorker(service, {
+      key: "T1:C1:join-root",
+      rootTs: "2.000",
+      activeTurnId: "turn-stale",
+      status: "running",
+    });
+    codex.reconcileThreadForSend.mockResolvedValue("idle");
+    slack.postThreadReply.mockRejectedValueOnce(new Error("cannot_reply_to_message"));
+
+    await expect((service as any).reconcileWorkerOnStartup(worker)).resolves.toBeUndefined();
+
+    const updated = store.getWorkerByKey(worker.key);
+    expect(updated?.status).toBe("idle");
+    expect(updated?.activeTurnId).toBeNull();
+    expect(updated?.lastError).toContain("Recovered stale active turn after runtime startup.");
+  });
+
+  it("survives full startup when persisted worker reconciliation hits cannot_reply_to_message", async () => {
+    const { service, slack, codex, store } = await createService();
+    createWorker(service, {
+      key: "T1:C1:join-root",
+      rootTs: "2.000",
+      activeTurnId: "turn-stale",
+      status: "running",
+    });
+    codex.reconcileThreadForSend.mockResolvedValue("idle");
+    slack.postThreadReply.mockRejectedValueOnce(new Error("cannot_reply_to_message"));
+
+    await expect(service.start()).resolves.toBeUndefined();
+
+    const updated = store.getWorkerByKey("T1:C1:join-root");
+    expect(updated?.status).toBe("idle");
+    expect(updated?.activeTurnId).toBeNull();
+    expect(updated?.lastError).toContain("Recovered stale active turn after runtime startup.");
+    expect(service.runtimeStarted).toBe(true);
   });
 
   it("refuses recover when blocked state is stale but the backing thread is healthy", async () => {
