@@ -90,6 +90,12 @@ export interface DynamicToolHandlers {
   adminListWakeDeliveries(args: z.infer<typeof slackAdminListWakeDeliveriesArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
 }
 
+export interface CompactionEvent {
+  threadId: string;
+  itemId: string;
+  status: "started" | "completed" | "failed";
+}
+
 export interface InteractiveRequest {
   kind: PendingRequestKind;
   requestId: JsonRpcId;
@@ -109,6 +115,7 @@ export class CodexClient {
   private readonly activeTurns = new Map<string, ActiveTurnState>();
   private dynamicToolHandlers: DynamicToolHandlers | null = null;
   private interactiveRequestHandler: ((request: InteractiveRequest) => Promise<void>) | null = null;
+  private compactionHandler: ((event: CompactionEvent) => Promise<void>) | null = null;
   private notificationQueue = Promise.resolve();
 
   constructor(codexBin: string, cwd: string) {
@@ -136,6 +143,10 @@ export class CodexClient {
 
   registerInteractiveRequestHandler(handler: (request: InteractiveRequest) => Promise<void>): void {
     this.interactiveRequestHandler = handler;
+  }
+
+  registerCompactionHandler(handler: (event: CompactionEvent) => Promise<void>): void {
+    this.compactionHandler = handler;
   }
 
   async start(): Promise<void> {
@@ -301,10 +312,24 @@ export class CodexClient {
     if (event.method === "item/started" || event.method === "item/completed") {
       const params = event.params as Record<string, unknown>;
       const turnId = typeof params.turnId === "string" ? params.turnId : "";
-      const active = this.activeTurns.get(turnId);
-      if (!active) return;
       const item = params.item;
       const phase = event.method === "item/started" ? "started" : "completed";
+      const threadId = typeof params.threadId === "string" ? params.threadId : "";
+
+      if (isContextCompaction(item) && threadId && this.compactionHandler) {
+        const itemId = typeof item.id === "string" ? item.id : "";
+        if (itemId) {
+          const status = phase === "started"
+            ? "started"
+            : hasFailure(asRecord(item))
+              ? "failed"
+              : "completed";
+          await this.compactionHandler({ threadId, itemId, status });
+        }
+      }
+
+      const active = this.activeTurns.get(turnId);
+      if (!active) return;
 
       if (isAgentMessage(item) && typeof item.text === "string" && phase === "completed") {
         const itemId = typeof item.id === "string" ? item.id : "__default__";
@@ -734,6 +759,16 @@ function hasFailure(item: Record<string, unknown>): boolean {
   const status = typeof item.status === "string" ? item.status.toLowerCase() : "";
   const exitCode = typeof item.exitCode === "number" ? item.exitCode : 0;
   return status.includes("failed") || status.includes("declined") || Boolean(item.error) || exitCode !== 0;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" ? value as Record<string, unknown> : {};
+}
+
+function isContextCompaction(value: unknown): value is { type: "contextCompaction"; id?: unknown } {
+  return Boolean(value)
+    && typeof value === "object"
+    && (value as { type?: unknown }).type === "contextCompaction";
 }
 
 function summarizeCommandResult(item: Record<string, unknown>): string | null {

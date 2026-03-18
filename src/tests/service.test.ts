@@ -592,6 +592,176 @@ describe("service lifecycle decisions", () => {
     ]);
   });
 
+  it("posts compact lifecycle messages in a worker thread", async () => {
+    const { service, slack, codex, store } = await createService();
+    const worker = createWorker(service, {
+      status: "idle",
+      activeTurnId: null,
+      appThreadId: "thread-1",
+    });
+
+    await service.handleThreadCommand(worker, "compact", []);
+    await (service as any).handleCompactionEvent({ threadId: "thread-1", itemId: "compact-1", status: "started" });
+    await (service as any).handleCompactionEvent({ threadId: "thread-1", itemId: "compact-1", status: "completed" });
+
+    expect(codex.compactThread).toHaveBeenCalledWith("thread-1");
+    expect(slack.postThreadReply.mock.calls).toEqual([
+      ["C1", "1.000", "Compaction requested for thread thread-1"],
+      ["C1", "1.000", "_System_: Compacting context."],
+      ["C1", "1.000", "_System_: Context compacted."],
+    ]);
+    store.close();
+  });
+
+  it("posts compact failure messages in a worker thread", async () => {
+    const { service, slack, codex, store } = await createService();
+    const worker = createWorker(service, {
+      status: "idle",
+      activeTurnId: null,
+      appThreadId: "thread-1",
+    });
+    codex.compactThread.mockRejectedValue(new Error("boom"));
+
+    await service.handleThreadCommand(worker, "compact", []);
+
+    expect(slack.postThreadReply.mock.calls).toEqual([
+      ["C1", "1.000", "Compaction requested for thread thread-1"],
+      ["C1", "1.000", "_System_: Context compaction failed: boom"],
+    ]);
+    store.close();
+  });
+
+  it("treats failed worker compaction completion events as failures", async () => {
+    const { service, slack, store } = await createService();
+    const worker = createWorker(service, {
+      status: "idle",
+      activeTurnId: null,
+      appThreadId: "thread-1",
+    });
+
+    await service.handleThreadCommand(worker, "compact", []);
+    await (service as any).handleCompactionEvent({ threadId: "thread-1", itemId: "compact-1", status: "started" });
+    await (service as any).handleCompactionEvent({ threadId: "thread-1", itemId: "compact-1", status: "failed" });
+
+    expect(slack.postThreadReply.mock.calls).toEqual([
+      ["C1", "1.000", "Compaction requested for thread thread-1"],
+      ["C1", "1.000", "_System_: Compacting context."],
+      ["C1", "1.000", "_System_: Context compaction failed."],
+    ]);
+    store.close();
+  });
+
+  it("ignores stale worker compaction events for a different item id", async () => {
+    const { service, slack, store } = await createService();
+    const worker = createWorker(service, {
+      status: "idle",
+      activeTurnId: null,
+      appThreadId: "thread-1",
+    });
+
+    await service.handleThreadCommand(worker, "compact", []);
+    await (service as any).handleCompactionEvent({ threadId: "thread-1", itemId: "compact-1", status: "started" });
+    await (service as any).handleCompactionEvent({ threadId: "thread-1", itemId: "stale-old", status: "completed" });
+
+    expect(slack.postThreadReply.mock.calls).toEqual([
+      ["C1", "1.000", "Compaction requested for thread thread-1"],
+      ["C1", "1.000", "_System_: Compacting context."],
+    ]);
+    store.close();
+  });
+
+  it("ignores pre-start worker completion events until the real compaction starts", async () => {
+    const { service, slack, store } = await createService();
+    const worker = createWorker(service, {
+      status: "idle",
+      activeTurnId: null,
+      appThreadId: "thread-1",
+    });
+
+    await service.handleThreadCommand(worker, "compact", []);
+    await (service as any).handleCompactionEvent({ threadId: "thread-1", itemId: "stale-old", status: "completed" });
+    await (service as any).handleCompactionEvent({ threadId: "thread-1", itemId: "compact-1", status: "started" });
+    await (service as any).handleCompactionEvent({ threadId: "thread-1", itemId: "compact-1", status: "completed" });
+
+    expect(slack.postThreadReply.mock.calls).toEqual([
+      ["C1", "1.000", "Compaction requested for thread thread-1"],
+      ["C1", "1.000", "_System_: Compacting context."],
+      ["C1", "1.000", "_System_: Context compacted."],
+    ]);
+    store.close();
+  });
+
+  it("rejects duplicate worker thread compaction requests while one is pending", async () => {
+    const { service, slack, codex, store } = await createService();
+    const worker = createWorker(service, {
+      status: "idle",
+      activeTurnId: null,
+      appThreadId: "thread-1",
+    });
+    codex.compactThread.mockResolvedValue(undefined);
+
+    await service.handleThreadCommand(worker, "compact", []);
+    await service.handleThreadCommand(worker, "compact", []);
+
+    expect(codex.compactThread).toHaveBeenCalledTimes(1);
+    expect(slack.postThreadReply.mock.calls).toEqual([
+      ["C1", "1.000", "Compaction requested for thread thread-1"],
+      ["C1", "1.000", "Context compaction is already in progress for this thread."],
+    ]);
+    store.close();
+  });
+
+  it("allows retrying worker compaction when the previous pending attempt is stale", async () => {
+    vi.useFakeTimers();
+    try {
+      const { service, slack, codex, store } = await createService();
+      const worker = createWorker(service, {
+        status: "idle",
+        activeTurnId: null,
+        appThreadId: "thread-1",
+      });
+      codex.compactThread.mockResolvedValue(undefined);
+
+      await service.handleThreadCommand(worker, "compact", []);
+      vi.advanceTimersByTime(10 * 60 * 1000 + 1);
+      await service.handleThreadCommand(worker, "compact", []);
+
+      expect(codex.compactThread).toHaveBeenCalledTimes(2);
+      expect(slack.postThreadReply.mock.calls).toEqual([
+        ["C1", "1.000", "Compaction requested for thread thread-1"],
+        ["C1", "1.000", "Compaction requested for thread thread-1"],
+      ]);
+      store.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels worker thread compaction if the thread is no longer idle by send time", async () => {
+    const { service, slack, codex, store } = await createService();
+    const worker = createWorker(service, {
+      status: "idle",
+      activeTurnId: null,
+      appThreadId: "thread-1",
+    });
+    slack.postThreadReply.mockImplementationOnce(async (...args: unknown[]) => {
+      service.store.updateWorkerState(worker.key, {
+        activeTurnId: "turn-2",
+        status: "running",
+      });
+      return "reply-ts";
+    });
+
+    await service.handleThreadCommand(worker, "compact", []);
+
+    expect(codex.compactThread).not.toHaveBeenCalled();
+    expect(slack.postThreadReply.mock.calls).toEqual([
+      ["C1", "1.000", "Compaction requested for thread thread-1"],
+      ["C1", "1.000", "_System_: Context compaction canceled because the thread is no longer idle."],
+    ]);
+    store.close();
+  });
+
   it("adds the worker identity reaction before the seen status on a new root message", async () => {
     const { service, slack, codex, store } = await createService();
     codex.createWorkerThread.mockResolvedValue({ threadId: "thread-2" });
@@ -645,6 +815,175 @@ describe("service lifecycle decisions", () => {
     const updated = store.getDmSession("T1", "U-admin");
     expect(updated?.status).toBe("interrupted");
     expect(updated?.lastError).toBeNull();
+    store.close();
+  });
+
+  it("posts compact lifecycle messages in the admin DM", async () => {
+    const { service, slack, codex, store } = await createService();
+    const session = createDmSession(service, {
+      status: "idle",
+      activeTurnId: null,
+      appThreadId: "dm-thread-1",
+    });
+
+    const result = await service.handleDmCommand(session, "compact", []);
+    expect(result.response).toBe("Compaction requested for thread dm-thread-1");
+    await result.afterSend?.();
+    await (service as any).handleCompactionEvent({ threadId: "dm-thread-1", itemId: "compact-1", status: "started" });
+    await (service as any).handleCompactionEvent({ threadId: "dm-thread-1", itemId: "compact-1", status: "completed" });
+
+    expect(codex.compactThread).toHaveBeenCalledWith("dm-thread-1");
+    expect(slack.postTopLevelMessage.mock.calls).toEqual([
+      ["D1", "_System_: Compacting context."],
+      ["D1", "_System_: Context compacted."],
+    ]);
+    store.close();
+  });
+
+  it("posts compact failure messages in the admin DM", async () => {
+    const { service, slack, codex, store } = await createService();
+    const session = createDmSession(service, {
+      status: "idle",
+      activeTurnId: null,
+      appThreadId: "dm-thread-1",
+    });
+    codex.compactThread.mockRejectedValue(new Error("boom"));
+
+    const result = await service.handleDmCommand(session, "compact", []);
+    await result.afterSend?.();
+
+    expect(slack.postTopLevelMessage.mock.calls).toEqual([
+      ["D1", "_System_: Context compaction failed: boom"],
+    ]);
+    store.close();
+  });
+
+  it("treats failed DM compaction completion events as failures", async () => {
+    const { service, slack, store } = await createService();
+    const session = createDmSession(service, {
+      status: "idle",
+      activeTurnId: null,
+      appThreadId: "dm-thread-1",
+    });
+
+    const result = await service.handleDmCommand(session, "compact", []);
+    expect(result.response).toBe("Compaction requested for thread dm-thread-1");
+    await result.afterSend?.();
+    await (service as any).handleCompactionEvent({ threadId: "dm-thread-1", itemId: "compact-1", status: "started" });
+    await (service as any).handleCompactionEvent({ threadId: "dm-thread-1", itemId: "compact-1", status: "failed" });
+
+    expect(slack.postTopLevelMessage.mock.calls).toEqual([
+      ["D1", "_System_: Compacting context."],
+      ["D1", "_System_: Context compaction failed."],
+    ]);
+    store.close();
+  });
+
+  it("ignores stale DM compaction events for a different item id", async () => {
+    const { service, slack, store } = await createService();
+    const session = createDmSession(service, {
+      status: "idle",
+      activeTurnId: null,
+      appThreadId: "dm-thread-1",
+    });
+
+    const result = await service.handleDmCommand(session, "compact", []);
+    await result.afterSend?.();
+    await (service as any).handleCompactionEvent({ threadId: "dm-thread-1", itemId: "compact-1", status: "started" });
+    await (service as any).handleCompactionEvent({ threadId: "dm-thread-1", itemId: "stale-old", status: "completed" });
+
+    expect(slack.postTopLevelMessage.mock.calls).toEqual([
+      ["D1", "_System_: Compacting context."],
+    ]);
+    store.close();
+  });
+
+  it("ignores pre-start DM completion events until the real compaction starts", async () => {
+    const { service, slack, store } = await createService();
+    const session = createDmSession(service, {
+      status: "idle",
+      activeTurnId: null,
+      appThreadId: "dm-thread-1",
+    });
+
+    const result = await service.handleDmCommand(session, "compact", []);
+    await result.afterSend?.();
+    await (service as any).handleCompactionEvent({ threadId: "dm-thread-1", itemId: "stale-old", status: "completed" });
+    await (service as any).handleCompactionEvent({ threadId: "dm-thread-1", itemId: "compact-1", status: "started" });
+    await (service as any).handleCompactionEvent({ threadId: "dm-thread-1", itemId: "compact-1", status: "completed" });
+
+    expect(slack.postTopLevelMessage.mock.calls).toEqual([
+      ["D1", "_System_: Compacting context."],
+      ["D1", "_System_: Context compacted."],
+    ]);
+    store.close();
+  });
+
+  it("rejects duplicate DM compaction requests while one is pending", async () => {
+    const { service, codex, store } = await createService();
+    const session = createDmSession(service, {
+      status: "idle",
+      activeTurnId: null,
+      appThreadId: "dm-thread-1",
+    });
+    codex.compactThread.mockResolvedValue(undefined);
+
+    const first = await service.handleDmCommand(session, "compact", []);
+    expect(first.response).toBe("Compaction requested for thread dm-thread-1");
+    await first.afterSend?.();
+    const second = await service.handleDmCommand(session, "compact", []);
+
+    expect(codex.compactThread).toHaveBeenCalledTimes(1);
+    expect(second.response).toBe("Context compaction is already in progress for this DM.");
+    store.close();
+  });
+
+  it("allows retrying DM compaction when the previous pending attempt is stale", async () => {
+    vi.useFakeTimers();
+    try {
+      const { service, codex, store } = await createService();
+      const session = createDmSession(service, {
+        status: "idle",
+        activeTurnId: null,
+        appThreadId: "dm-thread-1",
+      });
+      codex.compactThread.mockResolvedValue(undefined);
+
+      const first = await service.handleDmCommand(session, "compact", []);
+      expect(first.response).toBe("Compaction requested for thread dm-thread-1");
+      await first.afterSend?.();
+      vi.advanceTimersByTime(10 * 60 * 1000 + 1);
+      const second = await service.handleDmCommand(session, "compact", []);
+      expect(second.response).toBe("Compaction requested for thread dm-thread-1");
+      await second.afterSend?.();
+
+      expect(codex.compactThread).toHaveBeenCalledTimes(2);
+      store.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels DM compaction if the DM is no longer idle by send time", async () => {
+    const { service, slack, codex, store } = await createService();
+    const session = createDmSession(service, {
+      status: "idle",
+      activeTurnId: null,
+      appThreadId: "dm-thread-1",
+    });
+
+    const result = await service.handleDmCommand(session, "compact", []);
+    service.store.upsertDmSession({
+      ...session,
+      status: "running",
+      activeTurnId: "turn-2",
+    });
+    await result.afterSend?.();
+
+    expect(codex.compactThread).not.toHaveBeenCalled();
+    expect(slack.postTopLevelMessage.mock.calls).toEqual([
+      ["D1", "_System_: Context compaction canceled because this DM is no longer idle."],
+    ]);
     store.close();
   });
 

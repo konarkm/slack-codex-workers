@@ -6,6 +6,7 @@ import { DEFAULT_EFFORTS, type AppConfig } from "../config.js";
 import { parseSlashCommand, helpText, normalizeEffort } from "./commands.js";
 import {
   CodexClient,
+  type CompactionEvent,
   type DynamicToolHandlerContext,
   type InteractiveRequest,
   isMissingThreadError,
@@ -65,11 +66,26 @@ interface DmCommandResult {
   afterSend?: () => Promise<void>;
 }
 
+interface PendingThreadCompaction {
+  workerKey: string;
+  itemId: string | null;
+  startedAt: number;
+}
+
+interface PendingDmCompaction {
+  teamId: string;
+  userId: string;
+  channelId: string;
+  itemId: string | null;
+  startedAt: number;
+}
+
 const BLOCKED_RUNNING_TURN_POLL_INTERVAL_MS = 2_000;
 const BLOCKED_RUNNING_TURN_POLL_WINDOW_MS = 30_000;
 const REGISTRATION_POLL_INTERVAL_MS = 5_000;
 const WAKE_RETRY_MAX_ATTEMPTS = 3;
 const WEBHOOK_PREVIOUS_SECRET_OVERLAP_MS = 24 * 60 * 60 * 1000;
+const COMPACTION_STALE_TIMEOUT_MS = 10 * 60 * 1000;
 const webhookShutdownErrorCode = "WEBHOOK_SHUTDOWN";
 const STATUS_REACTIONS = {
   seen: "eyes",
@@ -89,6 +105,8 @@ export class SlackCodexWorkersService extends EventEmitter {
   private readonly renderState = new Map<string, RenderSessionState>();
   private readonly slackWriteQueues = new Map<string, Promise<unknown>>();
   private readonly pendingInteractiveRequests = new Map<string, InteractiveRequest>();
+  private readonly pendingThreadCompactions = new Map<string, PendingThreadCompaction>();
+  private readonly pendingDmCompactions = new Map<string, PendingDmCompaction>();
   private readonly blockedTurnPolls = new Map<string, NodeJS.Timeout>();
   private readonly blockedTurnDeadlines = new Map<string, number>();
   private readonly startingWorkerTurns = new Map<string, Promise<string>>();
@@ -134,6 +152,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       adminListWakeDeliveries: async (args, ctx) => this.handleAdminListWakeDeliveriesTool(args, ctx),
     });
     this.codex.registerInteractiveRequestHandler(async (request) => this.handleInteractiveRequest(request));
+    this.codex.registerCompactionHandler(async (event) => this.handleCompactionEvent(event));
   }
 
   async start(): Promise<void> {
@@ -557,11 +576,18 @@ export class SlackCodexWorkersService extends EventEmitter {
     const command = parseSlashCommand(context.text);
     if (command) {
       const result = await this.handleDmCommand(session, command.name, command.args);
-      await this.enqueueSlackWrite(this.getDmQueueKey(session.teamId, session.userId), async () => {
-        await this.slack.postTopLevelMessage(session!.channelId, result.response);
-      });
-      if (result.afterSend) {
-        await result.afterSend();
+      try {
+        await this.enqueueSlackWrite(this.getDmQueueKey(session.teamId, session.userId), async () => {
+          await this.slack.postTopLevelMessage(session!.channelId, result.response);
+        });
+        if (result.afterSend) {
+          await result.afterSend();
+        }
+      } catch (error) {
+        if (command.name === "compact" && session.appThreadId) {
+          this.pendingDmCompactions.delete(session.appThreadId);
+        }
+        throw error;
       }
       return { status: "processed" };
     }
@@ -1242,6 +1268,7 @@ export class SlackCodexWorkersService extends EventEmitter {
 
   private async handleThreadCommand(worker: WorkerRecord, name: string, args: string[]): Promise<void> {
     let response = "";
+    let afterSend: (() => Promise<void>) | null = null;
     if (name === "help") {
       response = helpText("thread");
     } else if (name === "status") {
@@ -1285,9 +1312,18 @@ export class SlackCodexWorkersService extends EventEmitter {
         response = "Cannot compact while the worker is active.";
       } else if (isUnavailableForCompact(worker.status)) {
         response = "Cannot compact while this thread is blocked or waiting for recovery.";
+      } else if (this.hasFreshPendingThreadCompaction(worker.appThreadId)) {
+        response = "Context compaction is already in progress for this thread.";
       } else {
-        await this.codex.compactThread(worker.appThreadId);
+        this.pendingThreadCompactions.set(worker.appThreadId, {
+          workerKey: worker.key,
+          itemId: null,
+          startedAt: Date.now(),
+        });
         response = `Compaction requested for thread ${worker.appThreadId}`;
+        afterSend = async () => {
+          await this.runThreadCompaction(worker);
+        };
       }
     } else if (name === "stop") {
       if (!worker.activeTurnId) {
@@ -1312,9 +1348,19 @@ export class SlackCodexWorkersService extends EventEmitter {
     } else {
       response = "This command is only available in DMs.";
     }
-    await this.enqueueSlackWrite(this.getWorkerQueueKey(worker), async () => {
-      await this.slack.postThreadReply(worker.channelId, worker.rootTs, response);
-    });
+    try {
+      await this.enqueueSlackWrite(this.getWorkerQueueKey(worker), async () => {
+        await this.slack.postThreadReply(worker.channelId, worker.rootTs, response);
+      });
+      if (afterSend) {
+        await afterSend();
+      }
+    } catch (error) {
+      if (afterSend) {
+        this.pendingThreadCompactions.delete(worker.appThreadId);
+      }
+      throw error;
+    }
   }
 
   private async handleDmCommand(session: DmSessionRecord, name: string, args: string[]): Promise<DmCommandResult> {
@@ -1348,8 +1394,20 @@ export class SlackCodexWorkersService extends EventEmitter {
       if (!currentSession?.appThreadId) return { response: "No DM admin thread to compact." };
       if (currentSession.activeTurnId || currentSession.pendingRequest) return { response: "Cannot compact while the DM admin thread is active." };
       if (isUnavailableForCompact(currentSession.status)) return { response: "Cannot compact while this DM is blocked or waiting for recovery." };
-      await this.codex.compactThread(currentSession.appThreadId);
-      return { response: `Compaction requested for thread ${currentSession.appThreadId}` };
+      if (this.hasFreshPendingDmCompaction(currentSession.appThreadId)) return { response: "Context compaction is already in progress for this DM." };
+      this.pendingDmCompactions.set(currentSession.appThreadId, {
+        teamId: currentSession.teamId,
+        userId: currentSession.userId,
+        channelId: currentSession.channelId,
+        itemId: null,
+        startedAt: Date.now(),
+      });
+      return {
+        response: `Compaction requested for thread ${currentSession.appThreadId}`,
+        afterSend: async () => {
+          await this.runDmCompaction(currentSession);
+        },
+      };
     }
     if (name === "new-thread") {
       const refreshed = await this.recoverDmSession(currentSession ?? session);
@@ -2666,6 +2724,112 @@ export class SlackCodexWorkersService extends EventEmitter {
     const updated = this.requireDmSession(session.teamId, session.userId);
     await this.postDmSystemMessage(updated, reason);
     return updated;
+  }
+
+  private async runThreadCompaction(worker: WorkerRecord): Promise<void> {
+    const latest = this.store.getWorkerByKey(worker.key);
+    if (!latest || latest.appThreadId !== worker.appThreadId || latest.activeTurnId || latest.pendingRequest || isUnavailableForCompact(latest.status)) {
+      this.pendingThreadCompactions.delete(worker.appThreadId);
+      await this.enqueueSlackWrite(this.getWorkerQueueKey(worker), async () => {
+        await this.slack.postThreadReply(worker.channelId, worker.rootTs, renderSystemMessage("Context compaction canceled because the thread is no longer idle."));
+      });
+      return;
+    }
+    try {
+      await this.codex.compactThread(worker.appThreadId);
+    } catch (error) {
+      this.pendingThreadCompactions.delete(worker.appThreadId);
+      const message = error instanceof Error ? error.message : String(error);
+      await this.enqueueSlackWrite(this.getWorkerQueueKey(worker), async () => {
+        await this.slack.postThreadReply(worker.channelId, worker.rootTs, renderSystemMessage(`Context compaction failed: ${message}`));
+      });
+    }
+  }
+
+  private async runDmCompaction(session: DmSessionRecord): Promise<void> {
+    if (!session.appThreadId) return;
+    const latest = this.store.getDmSession(session.teamId, session.userId);
+    if (!latest || latest.appThreadId !== session.appThreadId || latest.activeTurnId || latest.pendingRequest || isUnavailableForCompact(latest.status)) {
+      this.pendingDmCompactions.delete(session.appThreadId);
+      await this.enqueueSlackWrite(this.getDmQueueKey(session.teamId, session.userId), async () => {
+        await this.slack.postTopLevelMessage(session.channelId, renderSystemMessage("Context compaction canceled because this DM is no longer idle."));
+      });
+      return;
+    }
+    try {
+      await this.codex.compactThread(session.appThreadId);
+    } catch (error) {
+      this.pendingDmCompactions.delete(session.appThreadId);
+      const message = error instanceof Error ? error.message : String(error);
+      await this.enqueueSlackWrite(this.getDmQueueKey(session.teamId, session.userId), async () => {
+        await this.slack.postTopLevelMessage(session.channelId, renderSystemMessage(`Context compaction failed: ${message}`));
+      });
+    }
+  }
+
+  private async handleCompactionEvent(event: CompactionEvent): Promise<void> {
+    const pendingWorker = this.pendingThreadCompactions.get(event.threadId);
+    if (pendingWorker) {
+      if (!pendingWorker.itemId) {
+        if (event.status !== "started") return;
+        pendingWorker.itemId = event.itemId;
+      } else if (pendingWorker.itemId !== event.itemId) {
+        return;
+      }
+      const worker = this.store.getWorkerByKey(pendingWorker.workerKey);
+      if (!worker || worker.appThreadId !== event.threadId) {
+        this.pendingThreadCompactions.delete(event.threadId);
+      } else {
+        const message = event.status === "started"
+          ? "Compacting context."
+          : event.status === "failed"
+            ? "Context compaction failed."
+            : "Context compacted.";
+        await this.enqueueSlackWrite(this.getWorkerQueueKey(worker), async () => {
+          await this.slack.postThreadReply(worker.channelId, worker.rootTs, renderSystemMessage(message));
+        });
+        if (event.status !== "started") {
+          this.pendingThreadCompactions.delete(event.threadId);
+        }
+      }
+    }
+
+    const dm = this.pendingDmCompactions.get(event.threadId);
+    if (dm) {
+      if (!dm.itemId) {
+        if (event.status !== "started") return;
+        dm.itemId = event.itemId;
+      } else if (dm.itemId !== event.itemId) {
+        return;
+      }
+      const message = event.status === "started"
+        ? "Compacting context."
+        : event.status === "failed"
+          ? "Context compaction failed."
+          : "Context compacted.";
+      await this.enqueueSlackWrite(this.getDmQueueKey(dm.teamId, dm.userId), async () => {
+        await this.slack.postTopLevelMessage(dm.channelId, renderSystemMessage(message));
+      });
+      if (event.status !== "started") {
+        this.pendingDmCompactions.delete(event.threadId);
+      }
+    }
+  }
+
+  private hasFreshPendingThreadCompaction(appThreadId: string): boolean {
+    const pending = this.pendingThreadCompactions.get(appThreadId);
+    if (!pending) return false;
+    if (Date.now() - pending.startedAt <= COMPACTION_STALE_TIMEOUT_MS) return true;
+    this.pendingThreadCompactions.delete(appThreadId);
+    return false;
+  }
+
+  private hasFreshPendingDmCompaction(appThreadId: string): boolean {
+    const pending = this.pendingDmCompactions.get(appThreadId);
+    if (!pending) return false;
+    if (Date.now() - pending.startedAt <= COMPACTION_STALE_TIMEOUT_MS) return true;
+    this.pendingDmCompactions.delete(appThreadId);
+    return false;
   }
 
   private async postWorkerSystemMessage(worker: WorkerRecord, message: string): Promise<void> {

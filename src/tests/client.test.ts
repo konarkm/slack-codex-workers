@@ -192,4 +192,55 @@ describe("codex client dynamic tool routing", () => {
       success: true,
     });
   });
+
+  it("maps successful contextCompaction notifications to started/completed compaction events", async () => {
+    const compactionHandler = vi.fn().mockResolvedValue(undefined);
+    const client = Object.create(CodexClient.prototype) as any;
+    client.activeTurns = new Map();
+    client.compactionHandler = compactionHandler;
+
+    await client.handleNotification({
+      jsonrpc: "2.0",
+      method: "item/started",
+      params: {
+        threadId: "thread-1",
+        item: { id: "compact-1", type: "contextCompaction" },
+      },
+    });
+    await client.handleNotification({
+      jsonrpc: "2.0",
+      method: "item/completed",
+      params: {
+        threadId: "thread-1",
+        item: { id: "compact-1", type: "contextCompaction", status: "completed" },
+      },
+    });
+
+    expect(compactionHandler.mock.calls).toEqual([
+      [{ threadId: "thread-1", itemId: "compact-1", status: "started" }],
+      [{ threadId: "thread-1", itemId: "compact-1", status: "completed" }],
+    ]);
+  });
+
+  it("maps failed contextCompaction completions to failed compaction events", async () => {
+    const compactionHandler = vi.fn().mockResolvedValue(undefined);
+    const client = Object.create(CodexClient.prototype) as any;
+    client.activeTurns = new Map();
+    client.compactionHandler = compactionHandler;
+
+    await client.handleNotification({
+      jsonrpc: "2.0",
+      method: "item/completed",
+      params: {
+        threadId: "thread-1",
+        item: { id: "compact-1", type: "contextCompaction", status: "failed", error: { message: "boom" } },
+      },
+    });
+
+    expect(compactionHandler).toHaveBeenCalledWith({
+      threadId: "thread-1",
+      itemId: "compact-1",
+      status: "failed",
+    });
+  });
 });
