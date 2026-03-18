@@ -214,6 +214,7 @@ export class Store {
         parent_worker_key TEXT,
         request_item_id TEXT,
         request_item_path TEXT,
+        terminal_response_item_id TEXT,
         last_error TEXT,
         last_inbound_message_ts TEXT,
         pending_request_json TEXT,
@@ -379,6 +380,7 @@ export class Store {
     this.ensureColumn("workers", "workstream_id", "TEXT");
     this.ensureColumn("workers", "request_item_id", "TEXT");
     this.ensureColumn("workers", "request_item_path", "TEXT");
+    this.ensureColumn("workers", "terminal_response_item_id", "TEXT");
     this.ensureColumn("registrations", "owner_user_id", "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn("registrations", "root_owner_user_id", "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn("pending_wakes", "attempts", "INTEGER NOT NULL DEFAULT 0");
@@ -479,8 +481,8 @@ export class Store {
       INSERT INTO workers (
         key, team_id, channel_id, root_ts, workstream_id, app_thread_id, active_turn_id, owner_user_id, root_owner_user_id,
         status, current_agent_slack_ts, current_agent_item_id, current_worklog_slack_ts, settings_json, identity_json,
-        parent_worker_key, request_item_id, request_item_path, last_error, last_inbound_message_ts, pending_request_json, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        parent_worker_key, request_item_id, request_item_path, terminal_response_item_id, last_error, last_inbound_message_ts, pending_request_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(team_id, channel_id, root_ts) DO UPDATE SET
         workstream_id=excluded.workstream_id,
         app_thread_id=excluded.app_thread_id,
@@ -494,8 +496,9 @@ export class Store {
         settings_json=excluded.settings_json,
         identity_json=excluded.identity_json,
         parent_worker_key=excluded.parent_worker_key,
-      request_item_id=excluded.request_item_id,
-      request_item_path=excluded.request_item_path,
+        request_item_id=excluded.request_item_id,
+        request_item_path=excluded.request_item_path,
+        terminal_response_item_id=excluded.terminal_response_item_id,
         last_error=excluded.last_error,
         last_inbound_message_ts=excluded.last_inbound_message_ts,
         pending_request_json=excluded.pending_request_json,
@@ -519,6 +522,7 @@ export class Store {
       input.parentWorkerKey,
       input.requestItemId,
       input.requestItemPath,
+      input.terminalResponseItemId,
       input.lastError,
       input.lastInboundMessageTs,
       input.pendingRequest ? JSON.stringify(input.pendingRequest) : null,
@@ -530,7 +534,7 @@ export class Store {
 
   updateWorkerState(
     key: string,
-    patch: Partial<Pick<WorkerRecord, "activeTurnId" | "status" | "currentAgentSlackTs" | "currentAgentItemId" | "currentWorklogSlackTs" | "settings" | "lastError" | "lastInboundMessageTs" | "pendingRequest" | "workstreamId" | "requestItemId" | "requestItemPath">>,
+    patch: Partial<Pick<WorkerRecord, "activeTurnId" | "status" | "currentAgentSlackTs" | "currentAgentItemId" | "currentWorklogSlackTs" | "settings" | "lastError" | "lastInboundMessageTs" | "pendingRequest" | "workstreamId" | "requestItemId" | "requestItemPath" | "terminalResponseItemId">>,
   ): void {
     const worker = this.getWorkerByKey(key);
     if (!worker) return;
@@ -545,6 +549,7 @@ export class Store {
         settings_json = ?,
         request_item_id = ?,
         request_item_path = ?,
+        terminal_response_item_id = ?,
         last_error = ?,
         last_inbound_message_ts = ?,
         pending_request_json = ?,
@@ -560,6 +565,7 @@ export class Store {
       JSON.stringify(Object.hasOwn(patch, "settings") ? patch.settings : worker.settings),
       Object.hasOwn(patch, "requestItemId") ? patch.requestItemId : worker.requestItemId,
       Object.hasOwn(patch, "requestItemPath") ? patch.requestItemPath : worker.requestItemPath,
+      Object.hasOwn(patch, "terminalResponseItemId") ? patch.terminalResponseItemId : worker.terminalResponseItemId,
       Object.hasOwn(patch, "lastError") ? patch.lastError : worker.lastError,
       Object.hasOwn(patch, "lastInboundMessageTs") ? patch.lastInboundMessageTs : worker.lastInboundMessageTs,
       Object.hasOwn(patch, "pendingRequest") ? JSON.stringify(patch.pendingRequest) : JSON.stringify(worker.pendingRequest),
@@ -1288,6 +1294,7 @@ export class Store {
       parentWorkerKey: row.parent_worker_key ? String(row.parent_worker_key) : null,
       requestItemId: row.request_item_id ? String(row.request_item_id) : null,
       requestItemPath: row.request_item_path ? String(row.request_item_path) : null,
+      terminalResponseItemId: row.terminal_response_item_id ? String(row.terminal_response_item_id) : null,
       lastError: row.last_error ? String(row.last_error) : null,
       lastInboundMessageTs: row.last_inbound_message_ts ? String(row.last_inbound_message_ts) : null,
       pendingRequest: parsePendingRequest(typeof row.pending_request_json === "string" ? row.pending_request_json : null),

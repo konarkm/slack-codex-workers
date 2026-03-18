@@ -98,6 +98,7 @@ describe("store", () => {
       parentWorkerKey: null,
       requestItemId: null,
       requestItemPath: null,
+      terminalResponseItemId: null,
       lastError: "oops",
       lastInboundMessageTs: "4.000",
       pendingRequest: {

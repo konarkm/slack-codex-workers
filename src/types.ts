@@ -77,6 +77,7 @@ export interface WorkerRecord {
   parentWorkerKey: string | null;
   requestItemId: string | null;
   requestItemPath: string | null;
+  terminalResponseItemId: string | null;
   lastError: string | null;
   lastInboundMessageTs: string | null;
   pendingRequest: PendingRequestState | null;

@@ -377,6 +377,8 @@ The public Slack thread is the human-facing surface for that item.
 
 The item is the durable local protocol artifact.
 
+For a spawned public worker, the durable local artifact pair is typically one request item and at most one terminal response item. Later in-thread back-and-forth lives in Slack and backing-thread continuity rather than generating an unbounded stream of local response files.
+
 ### No Automatic Reuse
 
 The system should not implement broad automatic reuse/routing into old public threads for new inbound events.
@@ -455,7 +457,7 @@ Item status handles completion/failure semantics without introducing many more f
 
 Each item is a separate file.
 
-Requests and responses are separate files.
+Requests and terminal responses are separate files.
 
 ### Content
 

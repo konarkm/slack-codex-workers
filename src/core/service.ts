@@ -828,6 +828,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       parentWorkerKey: input.parentWorkerKey,
       requestItemId: shell.requestItemId,
       requestItemPath: shell.requestItemPath,
+      terminalResponseItemId: null,
       lastError: null,
       lastInboundMessageTs: rootTs,
       pendingRequest: null,
@@ -1037,7 +1038,7 @@ export class SlackCodexWorkersService extends EventEmitter {
   }
 
   private async onWorkerCompleted(workerKey: string, assistantText: string, status: string, error?: string | null): Promise<void> {
-    const worker = this.ensureWorkerWorkstream(this.ensureWorkerIdentity(this.requireWorker(workerKey)));
+    let worker = this.ensureWorkerWorkstream(this.ensureWorkerIdentity(this.requireWorker(workerKey)));
     const state = this.getRenderState(`worker:${workerKey}`);
     const finalAssistantText = state.pendingAssistant?.text ?? assistantText;
     if (status === "interrupted" && state.pendingAssistant) {
@@ -1061,20 +1062,22 @@ export class SlackCodexWorkersService extends EventEmitter {
       });
     }
 
-    if (worker.workstreamId) {
+    if (worker.workstreamId && !worker.terminalResponseItemId && (status === "completed" || status === "failed")) {
       const workstream = this.store.getWorkstreamById(worker.workstreamId);
       if (workstream) {
         const responseBody = status === "completed"
           ? finalAssistantText
           : `Turn ${status}.${error ? ` ${error}` : ""}`;
-        const responsePath = await this.workstreams.appendResponseItem(workstream, worker, {
+        const responseItem = await this.workstreams.ensureTerminalResponseItem(workstream, worker, {
           status,
           body: responseBody,
           requestItemId: worker.requestItemId,
         });
-        if (status === "completed" || status === "failed") {
-          await this.workstreams.archiveWorkerItems(workstream, worker, responsePath, status);
-        }
+        await this.workstreams.archiveRequestItem(workstream, worker, status);
+        this.store.updateWorkerState(workerKey, {
+          terminalResponseItemId: responseItem.itemId,
+        });
+        worker = this.requireWorker(workerKey);
       }
     }
 
@@ -1084,6 +1087,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       currentAgentSlackTs: null,
       currentAgentItemId: null,
       currentWorklogSlackTs: null,
+      terminalResponseItemId: worker.terminalResponseItemId,
       pendingRequest: null,
       lastError: status === "interrupted" ? null : error ?? (status === "completed" ? null : `Turn ${status}`),
     });

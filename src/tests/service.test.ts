@@ -177,6 +177,7 @@ function createWorker(service: any, overrides: Partial<WorkerRecord> = {}): Work
     parentWorkerKey: null,
     requestItemId: null,
     requestItemPath: null,
+    terminalResponseItemId: null,
     lastError: null,
     lastInboundMessageTs: null,
     pendingRequest: null,
@@ -2465,6 +2466,232 @@ describe("service lifecycle decisions", () => {
     expect(itemFiles.some((file) => file.startsWith("res-"))).toBe(true);
     const responseFile = itemFiles.find((file) => file.startsWith("res-"))!;
     await expect(fs.readFile(path.join(dir, ".slack-workers", "archive", responseFile), "utf8")).resolves.toContain('"kind": "response"');
+    store.close();
+  });
+
+  it("writes only one durable response item for a worker across later completed turns", async () => {
+    const { dir, service, codex, store } = await createService();
+    codex.createWorkerThread.mockResolvedValue({ threadId: "thread-2" });
+    codex.startTurnWithResumeFallback.mockResolvedValue("turn-2");
+
+    const context: SlackMessageContext = {
+      teamId: "T1",
+      channelId: "C1",
+      channelType: "channel",
+      userId: "U1",
+      username: "alice",
+      text: "Investigate the failing deploy",
+      ts: "7.000",
+      threadTs: null,
+      isDm: false,
+      files: [],
+    };
+    store.createOrGetInboundMessage({
+      key: "msg-workstream-once",
+      teamId: "T1",
+      channelId: "C1",
+      messageTs: "7.000",
+      rootTs: "7.000",
+      kind: "channel-root",
+      payloadJson: JSON.stringify(context),
+    });
+
+    await service.processInboundMessage("msg-workstream-once");
+
+    const worker = store.getWorker("T1", "C1", "7.000");
+    expect(worker?.terminalResponseItemId).toBeNull();
+
+    await service.onWorkerCompleted(worker!.key, "Deploy issue is fixed.", "completed");
+    const afterFirst = store.getWorker("T1", "C1", "7.000");
+    expect(afterFirst?.terminalResponseItemId).toBeTruthy();
+
+    await service.onWorkerCompleted(worker!.key, "Adding another follow-up reply.", "completed");
+
+    const archivedFiles = await fs.readdir(path.join(dir, ".slack-workers", "archive"));
+    const responseFiles = archivedFiles.filter((file) => file.startsWith("res-"));
+    expect(responseFiles).toHaveLength(1);
+    await expect(fs.readFile(path.join(dir, ".slack-workers", "archive", responseFiles[0]!), "utf8")).resolves.toContain("Deploy issue is fixed.");
+    store.close();
+  });
+
+  it("does not consume the durable response artifact slot on interruption", async () => {
+    const { dir, service, codex, store } = await createService();
+    codex.createWorkerThread.mockResolvedValue({ threadId: "thread-2" });
+    codex.startTurnWithResumeFallback.mockResolvedValue("turn-2");
+
+    const context: SlackMessageContext = {
+      teamId: "T1",
+      channelId: "C1",
+      channelType: "channel",
+      userId: "U1",
+      username: "alice",
+      text: "Investigate the failing deploy",
+      ts: "8.000",
+      threadTs: null,
+      isDm: false,
+      files: [],
+    };
+    store.createOrGetInboundMessage({
+      key: "msg-workstream-interrupted",
+      teamId: "T1",
+      channelId: "C1",
+      messageTs: "8.000",
+      rootTs: "8.000",
+      kind: "channel-root",
+      payloadJson: JSON.stringify(context),
+    });
+
+    await service.processInboundMessage("msg-workstream-interrupted");
+
+    const worker = store.getWorker("T1", "C1", "8.000");
+    await service.onWorkerCompleted(worker!.key, "", "interrupted");
+
+    const afterInterrupted = store.getWorker("T1", "C1", "8.000");
+    expect(afterInterrupted?.terminalResponseItemId).toBeNull();
+
+    await service.onWorkerCompleted(worker!.key, "Deploy issue is fixed.", "completed");
+
+    const archivedFiles = await fs.readdir(path.join(dir, ".slack-workers", "archive"));
+    const responseFiles = archivedFiles.filter((file) => file.startsWith("res-"));
+    expect(responseFiles).toHaveLength(1);
+    await expect(fs.readFile(path.join(dir, ".slack-workers", "archive", responseFiles[0]!), "utf8")).resolves.toContain("Deploy issue is fixed.");
+    store.close();
+  });
+
+  it("writes the one durable response item for a failed first terminal outcome", async () => {
+    const { dir, service, codex, store } = await createService();
+    codex.createWorkerThread.mockResolvedValue({ threadId: "thread-2" });
+    codex.startTurnWithResumeFallback.mockResolvedValue("turn-2");
+
+    const context: SlackMessageContext = {
+      teamId: "T1",
+      channelId: "C1",
+      channelType: "channel",
+      userId: "U1",
+      username: "alice",
+      text: "Investigate the failing deploy",
+      ts: "9.000",
+      threadTs: null,
+      isDm: false,
+      files: [],
+    };
+    store.createOrGetInboundMessage({
+      key: "msg-workstream-failed",
+      teamId: "T1",
+      channelId: "C1",
+      messageTs: "9.000",
+      rootTs: "9.000",
+      kind: "channel-root",
+      payloadJson: JSON.stringify(context),
+    });
+
+    await service.processInboundMessage("msg-workstream-failed");
+
+    const worker = store.getWorker("T1", "C1", "9.000");
+    await service.onWorkerCompleted(worker!.key, "", "failed", "boom");
+
+    const afterFailed = store.getWorker("T1", "C1", "9.000");
+    expect(afterFailed?.terminalResponseItemId).toBeTruthy();
+
+    const archivedFiles = await fs.readdir(path.join(dir, ".slack-workers", "archive"));
+    const responseFiles = archivedFiles.filter((file) => file.startsWith("res-"));
+    expect(responseFiles).toHaveLength(1);
+    await expect(fs.readFile(path.join(dir, ".slack-workers", "archive", responseFiles[0]!), "utf8")).resolves.toContain("Turn failed. boom");
+    store.close();
+  });
+
+  it("keeps the first durable failed response artifact when the worker later completes", async () => {
+    const { dir, service, codex, store } = await createService();
+    codex.createWorkerThread.mockResolvedValue({ threadId: "thread-2" });
+    codex.startTurnWithResumeFallback.mockResolvedValue("turn-2");
+
+    const context: SlackMessageContext = {
+      teamId: "T1",
+      channelId: "C1",
+      channelType: "channel",
+      userId: "U1",
+      username: "alice",
+      text: "Investigate the failing deploy",
+      ts: "10.000",
+      threadTs: null,
+      isDm: false,
+      files: [],
+    };
+    store.createOrGetInboundMessage({
+      key: "msg-workstream-failed-then-completed",
+      teamId: "T1",
+      channelId: "C1",
+      messageTs: "10.000",
+      rootTs: "10.000",
+      kind: "channel-root",
+      payloadJson: JSON.stringify(context),
+    });
+
+    await service.processInboundMessage("msg-workstream-failed-then-completed");
+
+    const worker = store.getWorker("T1", "C1", "10.000");
+    await service.onWorkerCompleted(worker!.key, "", "failed", "boom");
+    await service.onWorkerCompleted(worker!.key, "Recovered now.", "completed");
+
+    const archivedFiles = await fs.readdir(path.join(dir, ".slack-workers", "archive"));
+    const responseFiles = archivedFiles.filter((file) => file.startsWith("res-"));
+    expect(responseFiles).toHaveLength(1);
+    await expect(fs.readFile(path.join(dir, ".slack-workers", "archive", responseFiles[0]!), "utf8")).resolves.toContain("Turn failed. boom");
+    await expect(fs.readFile(path.join(dir, ".slack-workers", "archive", responseFiles[0]!), "utf8")).resolves.not.toContain("Recovered now.");
+    store.close();
+  });
+
+  it("backfills terminalResponseItemId from an existing archived response artifact without duplicating it", async () => {
+    const { dir, service, store } = await createService();
+    const worker = createWorker(service, {
+      key: "T1:C1:11.000",
+      rootTs: "11.000",
+      requestItemId: "req-test",
+      requestItemPath: path.join(dir, ".slack-workers", "active", "req-test.md"),
+      terminalResponseItemId: null,
+      workstreamId: "T1:root",
+    });
+    const responseItemId = "res-test";
+    await fs.mkdir(path.join(dir, ".slack-workers", "archive"), { recursive: true });
+    await fs.writeFile(
+      path.join(dir, ".slack-workers", "archive", `${responseItemId}.md`),
+      [
+        "<!-- slack-workers-item",
+        JSON.stringify({
+          id: responseItemId,
+          kind: "response",
+          status: "completed",
+          workstream: "root",
+          from: "root/T1:C1:11.000",
+          to: "root",
+          claimed_by: "root/T1:C1:11.000",
+          bridge_worker_key: "T1:C1:11.000",
+          source_kind: "worker-response",
+          source_summary: "response for req-test",
+          source_slack_channel_id: "C1",
+          source_slack_message_ts: "11.000",
+          created_at: "2026-03-18T00:00:00.000Z",
+          updated_at: "2026-03-18T00:00:00.000Z",
+        }, null, 2),
+        "-->",
+        "",
+        "# Response to req-test",
+        "",
+        "Existing terminal response.",
+        "",
+      ].join("\n"),
+    );
+
+    await service.onWorkerCompleted(worker.key, "Recovered completion should not rewrite.", "completed");
+
+    const updated = store.getWorkerByKey(worker.key);
+    expect(updated?.terminalResponseItemId).toBe(responseItemId);
+
+    const archivedFiles = await fs.readdir(path.join(dir, ".slack-workers", "archive"));
+    const responseFiles = archivedFiles.filter((file) => file.startsWith("res-"));
+    expect(responseFiles).toEqual([`${responseItemId}.md`]);
+    await expect(fs.readFile(path.join(dir, ".slack-workers", "archive", responseFiles[0]!), "utf8")).resolves.toContain("Existing terminal response.");
+    await expect(fs.readFile(path.join(dir, ".slack-workers", "archive", responseFiles[0]!), "utf8")).resolves.not.toContain("Recovered completion should not rewrite.");
     store.close();
   });
 

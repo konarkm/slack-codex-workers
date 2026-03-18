@@ -210,7 +210,7 @@ export class WorkstreamManager {
     await fs.writeFile(item.filePath, renderItemDocument(metadata, item.title, item.body));
   }
 
-  async appendResponseItem(
+  async ensureTerminalResponseItem(
     workstream: WorkstreamRecord,
     worker: WorkerRecord,
     input: {
@@ -218,11 +218,14 @@ export class WorkstreamManager {
       body: string;
       requestItemId?: string | null;
     },
-  ): Promise<string> {
-    const id = `res-${timestampToken()}-${randomUUID().slice(0, 8)}`;
-    const activeDir = this.getWorkstreamActiveDir(workstream.relativePath);
-    await fs.mkdir(activeDir, { recursive: true });
-    const filePath = path.join(activeDir, `${id}.md`);
+  ): Promise<{ itemId: string; filePath: string; created: boolean }> {
+    const id = buildTerminalResponseItemId(input.requestItemId, worker.key);
+    const archiveDir = this.getWorkstreamArchiveDir(workstream.relativePath);
+    await fs.mkdir(archiveDir, { recursive: true });
+    const filePath = path.join(archiveDir, `${id}.md`);
+    if (await pathExists(filePath)) {
+      return { itemId: id, filePath, created: false };
+    }
     const createdAt = new Date().toISOString();
     const requestSummary = input.requestItemId ? `response for ${input.requestItemId}` : "worker response";
     const metadata: ItemMetadata = {
@@ -243,14 +246,24 @@ export class WorkstreamManager {
     };
     const title = input.requestItemId ? `Response to ${input.requestItemId}` : `Worker response (${input.status})`;
     await fs.writeFile(filePath, renderItemDocument(metadata, title, input.body.trim() || "(empty response)"));
-    return filePath;
+    return { itemId: id, filePath, created: true };
+  }
+
+  async archiveRequestItem(
+    workstream: WorkstreamRecord,
+    worker: WorkerRecord,
+    finalStatus: string,
+  ): Promise<void> {
+    if (worker.requestItemPath) {
+      await this.archiveItem(workstream, worker.requestItemPath, finalStatus);
+    }
   }
 
   async archiveWorkerItems(
     workstream: WorkstreamRecord,
     worker: WorkerRecord,
     responseFilePath: string,
-    finalStatus: "completed" | "failed",
+    finalStatus: string,
   ): Promise<void> {
     if (worker.requestItemPath) {
       await this.archiveItem(workstream, worker.requestItemPath, finalStatus);
@@ -495,6 +508,14 @@ function parseItemDocument(value: string): { metadata: ItemMetadata; title: stri
     title,
     body,
   };
+}
+
+function buildTerminalResponseItemId(requestItemId: string | null | undefined, workerKey: string): string {
+  if (requestItemId?.startsWith("req-")) {
+    return `res-${requestItemId.slice(4)}`;
+  }
+  const suffix = workerKey.replace(/[^a-zA-Z0-9._-]/g, "-");
+  return `res-${suffix}`;
 }
 
 async function writeFileIfMissing(filePath: string, contents: string): Promise<void> {

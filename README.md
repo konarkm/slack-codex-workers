@@ -13,7 +13,7 @@ Slack-first bridge for running many Codex app-server workers behind one Slack bo
   - a mutable worklog message for tool/command/MCP activity
 - The final completion message always mentions the root human owner.
 - Admin DMs provide a control surface for defaults and bridge operations.
-- Each spawned worker writes a durable local request item and later response items inside its workstream.
+- Each spawned worker writes one durable local request item and, at most once, one durable terminal response item inside its workstream.
 
 ## Current Scope
 
@@ -183,7 +183,7 @@ For a supervised production build:
 - Child workstreams are created explicitly via bridge-owned creation paths and get their own visible directory plus local `.slack-workers/active`, `.slack-workers/archive`, and `registrations.json`.
 - Channel roots only create workers in registered workstream-home channels.
 - Channel roots create workers keyed by `(teamId, channelId, rootTs)`.
-- Each worker keeps a durable workstream request item; completion appends a response item instead of depending only on Slack thread history.
+- Each worker keeps a durable workstream request item; the first `completed` or `failed` outcome writes one durable response item instead of depending only on Slack thread history.
 - Thread replies from humans become `username: message` turn input.
 - If a worker turn is active, replies go through `turn/steer`.
 - If no turn is active, replies start a fresh turn on the same worker.
