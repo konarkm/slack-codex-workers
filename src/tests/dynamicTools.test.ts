@@ -6,6 +6,7 @@ import {
   slackAdminListRegistrationsToolName,
   slackAdminListWakeDeliveriesToolName,
   adminDynamicTools,
+  adminDeveloperInstructions,
   slackGetCurrentTimeToolName,
   slackGetWebhookMailboxToolName,
   slackRotateWebhookSecretToolName,
@@ -13,6 +14,7 @@ import {
   slackSetCronArgsSchema,
   slackSetWebhookArgsSchema,
   slackSpawnWorkerArgsSchema,
+  workerDeveloperInstructions,
   workerDynamicTools,
 } from "../core/dynamicTools.js";
 
@@ -88,6 +90,23 @@ describe("dynamic tools", () => {
   it("exposes webhook secret rotation only on the admin surface", () => {
     expect(workerDynamicTools.map((entry) => entry.name)).not.toContain(slackRotateWebhookSecretToolName);
     expect(adminDynamicTools.map((entry) => entry.name)).toContain(slackRotateWebhookSecretToolName);
+  });
+
+  it("tells workers not to echo Slack speaker prefixes back to the human", () => {
+    expect(workerDeveloperInstructions).toContain("Do not echo the speaker prefix back in your own replies.");
+    expect(workerDeveloperInstructions).toContain("'Konark:'");
+  });
+
+  it("tells workers to be concise by default but fuller during planning", () => {
+    expect(workerDeveloperInstructions).toContain("communicate like a strong operator or employee");
+    expect(workerDeveloperInstructions).toContain("do not over-compress");
+    expect(workerDeveloperInstructions).toContain("planning, evaluating options, discussing architecture");
+  });
+
+  it("tells admins to be concise by default but fuller during planning", () => {
+    expect(adminDeveloperInstructions).toContain("communicate like a strong operator or employee");
+    expect(adminDeveloperInstructions).toContain("do not over-compress");
+    expect(adminDeveloperInstructions).toContain("planning, evaluating options, discussing architecture");
   });
 
   it("exposes admin registration management tools only on the admin surface", () => {

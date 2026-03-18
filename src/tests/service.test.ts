@@ -71,6 +71,7 @@ function makeConfig(dir: string, overrides: Partial<AppConfig> = {}): AppConfig 
     attachmentRetentionMs: null,
     slackUploadTimeoutMs: 600_000,
     slackUploadMaxFiles: 10,
+    showSlackWorklog: false,
     workspaceTimezone: "America/Los_Angeles",
     webhookPort: nextWebhookPort++,
     webhookBindHost: "127.0.0.1",
@@ -228,6 +229,62 @@ afterEach(async () => {
 });
 
 describe("service lifecycle decisions", () => {
+  it("suppresses worker worklog Slack posts by default", async () => {
+    const { service, slack } = await createService();
+    createWorker(service);
+
+    await (service as any).onWorkerWorklogItem("T1:C1:1.000", {
+      itemId: "item-1",
+      type: "commandExecution",
+      title: "Run command: echo hi",
+      status: "completed",
+    });
+
+    expect(slack.postThreadReply).not.toHaveBeenCalled();
+  });
+
+  it("posts worker worklog Slack updates when enabled", async () => {
+    const { service, slack } = await createService({ showSlackWorklog: true });
+    createWorker(service);
+
+    await (service as any).onWorkerWorklogItem("T1:C1:1.000", {
+      itemId: "item-1",
+      type: "commandExecution",
+      title: "Run command: echo hi",
+      status: "completed",
+    });
+
+    expect(slack.postThreadReply).toHaveBeenCalledWith("C1", "1.000", ":white_check_mark: Run command: echo hi", { username: "Gear", iconEmoji: "gear" });
+  });
+
+  it("suppresses DM worklog Slack posts by default", async () => {
+    const { service, slack } = await createService();
+    createDmSession(service);
+
+    await (service as any).onDmWorklogItem("T1", "U-admin", "dm-thread-1", {
+      itemId: "item-1",
+      type: "commandExecution",
+      title: "Run command: echo hi",
+      status: "completed",
+    });
+
+    expect(slack.postTopLevelMessage).not.toHaveBeenCalled();
+  });
+
+  it("posts DM worklog Slack updates when enabled", async () => {
+    const { service, slack } = await createService({ showSlackWorklog: true });
+    createDmSession(service);
+
+    await (service as any).onDmWorklogItem("T1", "U-admin", "dm-thread-1", {
+      itemId: "item-1",
+      type: "commandExecution",
+      title: "Run command: echo hi",
+      status: "completed",
+    });
+
+    expect(slack.postTopLevelMessage).toHaveBeenCalledWith("D1", ":white_check_mark: Run command: echo hi");
+  });
+
   it("ignores non-user message subtypes like channel_join", async () => {
     const { service, store } = await createService();
 
@@ -782,7 +839,7 @@ describe("service lifecycle decisions", () => {
   });
 
   it("posts completed work events and final assistant messages as separate worker replies in order", async () => {
-    const { service, slack, store } = await createService();
+    const { service, slack, store } = await createService({ showSlackWorklog: true });
     createWorker(service, {
       status: "running",
       activeTurnId: "turn-1",

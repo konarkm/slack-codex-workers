@@ -1027,6 +1027,7 @@ export class SlackCodexWorkersService extends EventEmitter {
   }
 
   private async onWorkerWorklogItem(workerKey: string, event: WorklogItem): Promise<void> {
+    if (!this.config.showSlackWorklog) return;
     if (event.status === "started") return;
     const worker = this.ensureWorkerIdentity(this.requireWorker(workerKey));
     await this.flushPendingWorkerAssistant(workerKey, false);
@@ -1126,6 +1127,7 @@ export class SlackCodexWorkersService extends EventEmitter {
 
   private async onDmWorklogItem(teamId: string, userId: string, threadId: string, event: WorklogItem): Promise<void> {
     if (!this.isCurrentDmThread(teamId, userId, threadId)) return;
+    if (!this.config.showSlackWorklog) return;
     if (event.status === "started") return;
     const session = this.requireDmSession(teamId, userId);
     await this.flushPendingDmAssistant(teamId, userId, false);

@@ -37,6 +37,7 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     attachmentRetentionMs: null,
     slackUploadTimeoutMs: 600_000,
     slackUploadMaxFiles: 10,
+    showSlackWorklog: false,
     workspaceTimezone: "America/Los_Angeles",
     webhookPort: 0,
     webhookBindHost: "127.0.0.1",

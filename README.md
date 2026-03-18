@@ -128,6 +128,7 @@ Key variables:
 - `ATTACHMENT_RETENTION_MS`: reserved for future retention cleanup; currently a no-op and should stay `off`/`null`
 - `SLACK_UPLOAD_TIMEOUT_MS`: timeout for outbound Slack file upload calls
 - `SLACK_UPLOAD_MAX_FILES`: max files accepted by one `slack_upload_files` tool call
+- `SHOW_SLACK_WORKLOG`: when enabled, stream completed tool/worklog items like `Run command: ...` into Slack. Default: off, so only assistant messages and final responses are shown.
 - `WORKSPACE_TIMEZONE`: timezone used for cron registrations. Defaults to the host timezone and falls back to `UTC` if invalid
 - `WEBHOOK_PORT`: local port for authenticated webhook ingress. Default: `3014`
 - `WEBHOOK_BIND_HOST`: bind host for webhook ingress. Default: `127.0.0.1`
