@@ -79,4 +79,117 @@ describe("codex client dynamic tool routing", () => {
       success: true,
     });
   });
+
+  it("routes list_registrations_admin through the dynamic tool handler", async () => {
+    const respond = vi.fn().mockResolvedValue(undefined);
+    const adminListRegistrations = vi.fn().mockResolvedValue("reg-1 [enabled] webhook -> spawn (workstream)");
+    const client = Object.create(CodexClient.prototype) as any;
+    client.rpc = { respond };
+    client.dynamicToolHandlers = { adminListRegistrations };
+
+    await client.handleDynamicToolCall("req-4", {
+      threadId: "thread-4",
+      turnId: "turn-4",
+      callId: "call-4",
+      tool: "list_registrations_admin",
+      arguments: { workstream: "ops-debug" },
+    });
+
+    expect(adminListRegistrations).toHaveBeenCalledWith({
+      workstream: "ops-debug",
+    }, {
+      threadId: "thread-4",
+      turnId: "turn-4",
+      callId: "call-4",
+    });
+    expect(respond).toHaveBeenCalledWith("req-4", {
+      contentItems: [{ type: "inputText", text: "reg-1 [enabled] webhook -> spawn (workstream)" }],
+      success: true,
+    });
+  });
+
+  it("routes get_registration_admin through the dynamic tool handler", async () => {
+    const respond = vi.fn().mockResolvedValue(undefined);
+    const adminGetRegistration = vi.fn().mockResolvedValue("{\"id\":\"reg-1\"}");
+    const client = Object.create(CodexClient.prototype) as any;
+    client.rpc = { respond };
+    client.dynamicToolHandlers = { adminGetRegistration };
+
+    await client.handleDynamicToolCall("req-5", {
+      threadId: "thread-5",
+      turnId: "turn-5",
+      callId: "call-5",
+      tool: "get_registration_admin",
+      arguments: { registrationId: "reg-1" },
+    });
+
+    expect(adminGetRegistration).toHaveBeenCalledWith({
+      registrationId: "reg-1",
+    }, {
+      threadId: "thread-5",
+      turnId: "turn-5",
+      callId: "call-5",
+    });
+    expect(respond).toHaveBeenCalledWith("req-5", {
+      contentItems: [{ type: "inputText", text: "{\"id\":\"reg-1\"}" }],
+      success: true,
+    });
+  });
+
+  it("routes disable_registration_admin through the dynamic tool handler", async () => {
+    const respond = vi.fn().mockResolvedValue(undefined);
+    const adminDisableRegistration = vi.fn().mockResolvedValue("Disabled registration reg-1.");
+    const client = Object.create(CodexClient.prototype) as any;
+    client.rpc = { respond };
+    client.dynamicToolHandlers = { adminDisableRegistration };
+
+    await client.handleDynamicToolCall("req-6", {
+      threadId: "thread-6",
+      turnId: "turn-6",
+      callId: "call-6",
+      tool: "disable_registration_admin",
+      arguments: { registrationId: "reg-1" },
+    });
+
+    expect(adminDisableRegistration).toHaveBeenCalledWith({
+      registrationId: "reg-1",
+    }, {
+      threadId: "thread-6",
+      turnId: "turn-6",
+      callId: "call-6",
+    });
+    expect(respond).toHaveBeenCalledWith("req-6", {
+      contentItems: [{ type: "inputText", text: "Disabled registration reg-1." }],
+      success: true,
+    });
+  });
+
+  it("routes list_wake_deliveries_admin through the dynamic tool handler", async () => {
+    const respond = vi.fn().mockResolvedValue(undefined);
+    const adminListWakeDeliveries = vi.fn().mockResolvedValue("wake-1 delivered registration=reg-1");
+    const client = Object.create(CodexClient.prototype) as any;
+    client.rpc = { respond };
+    client.dynamicToolHandlers = { adminListWakeDeliveries };
+
+    await client.handleDynamicToolCall("req-7", {
+      threadId: "thread-7",
+      turnId: "turn-7",
+      callId: "call-7",
+      tool: "list_wake_deliveries_admin",
+      arguments: { workstream: "ops-debug", registrationId: "reg-1" },
+    });
+
+    expect(adminListWakeDeliveries).toHaveBeenCalledWith({
+      workstream: "ops-debug",
+      registrationId: "reg-1",
+    }, {
+      threadId: "thread-7",
+      turnId: "turn-7",
+      callId: "call-7",
+    });
+    expect(respond).toHaveBeenCalledWith("req-7", {
+      contentItems: [{ type: "inputText", text: "wake-1 delivered registration=reg-1" }],
+      success: true,
+    });
+  });
 });

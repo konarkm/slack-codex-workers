@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  slackAdminDisableRegistrationToolName,
+  slackAdminGetRegistrationToolName,
+  slackAdminListRegistrationsArgsSchema,
+  slackAdminListRegistrationsToolName,
+  slackAdminListWakeDeliveriesToolName,
   adminDynamicTools,
   slackGetCurrentTimeToolName,
   slackGetWebhookMailboxToolName,
@@ -83,5 +88,32 @@ describe("dynamic tools", () => {
   it("exposes webhook secret rotation only on the admin surface", () => {
     expect(workerDynamicTools.map((entry) => entry.name)).not.toContain(slackRotateWebhookSecretToolName);
     expect(adminDynamicTools.map((entry) => entry.name)).toContain(slackRotateWebhookSecretToolName);
+  });
+
+  it("exposes admin registration management tools only on the admin surface", () => {
+    const workerNames = workerDynamicTools.map((entry) => entry.name);
+    const adminNames = adminDynamicTools.map((entry) => entry.name);
+    expect(workerNames).not.toContain(slackAdminListRegistrationsToolName);
+    expect(workerNames).not.toContain(slackAdminGetRegistrationToolName);
+    expect(workerNames).not.toContain(slackAdminDisableRegistrationToolName);
+    expect(workerNames).not.toContain(slackAdminListWakeDeliveriesToolName);
+    expect(adminNames).toContain(slackAdminListRegistrationsToolName);
+    expect(adminNames).toContain(slackAdminGetRegistrationToolName);
+    expect(adminNames).toContain(slackAdminDisableRegistrationToolName);
+    expect(adminNames).toContain(slackAdminListWakeDeliveriesToolName);
+  });
+
+  it("parses optional admin registration filters", () => {
+    expect(slackAdminListRegistrationsArgsSchema.parse({
+      workstream: "ops-debug",
+    })).toEqual({
+      workstream: "ops-debug",
+    });
+  });
+
+  it("rejects whitespace-only admin workstream filters", () => {
+    expect(() => slackAdminListRegistrationsArgsSchema.parse({
+      workstream: "   ",
+    })).toThrow();
   });
 });

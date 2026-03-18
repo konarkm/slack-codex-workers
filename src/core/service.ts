@@ -128,6 +128,10 @@ export class SlackCodexWorkersService extends EventEmitter {
       listRegistrations: async (ctx) => this.handleListRegistrationsTool(ctx),
       getRegistration: async (args, ctx) => this.handleGetRegistrationTool(args, ctx),
       listWakeDeliveries: async (ctx) => this.handleListWakeDeliveriesTool(ctx),
+      adminListRegistrations: async (args, ctx) => this.handleAdminListRegistrationsTool(args, ctx),
+      adminGetRegistration: async (args, ctx) => this.handleAdminGetRegistrationTool(args, ctx),
+      adminDisableRegistration: async (args, ctx) => this.handleAdminDisableRegistrationTool(args, ctx),
+      adminListWakeDeliveries: async (args, ctx) => this.handleAdminListWakeDeliveriesTool(args, ctx),
     });
     this.codex.registerInteractiveRequestHandler(async (request) => this.handleInteractiveRequest(request));
   }
@@ -1824,6 +1828,62 @@ export class SlackCodexWorkersService extends EventEmitter {
     return wakes.map((wake) => `${wake.id} ${wake.status} ${wake.summary}`).join("\n");
   }
 
+  private async handleAdminListRegistrationsTool(
+    args: { workstream?: string | undefined },
+    ctx: DynamicToolHandlerContext,
+  ): Promise<string> {
+    const session = this.requireAdminDmContext(ctx);
+    const workstream = this.resolveAdminWorkstreamFilter(session.teamId, args.workstream);
+    const registrations = workstream
+      ? this.store.listRegistrationsForWorkstream(workstream.id)
+      : this.store.listRegistrationsForTeam(session.teamId);
+    if (registrations.length === 0) {
+      return workstream
+        ? `No registrations in workstream ${formatWorkstreamAddress(workstream)}.`
+        : "No registrations in the current workspace.";
+    }
+    return registrations.map((registration) => this.formatAdminRegistrationLine(registration)).join("\n");
+  }
+
+  private async handleAdminGetRegistrationTool(
+    args: { registrationId: string },
+    ctx: DynamicToolHandlerContext,
+  ): Promise<string> {
+    const session = this.requireAdminDmContext(ctx);
+    const registration = this.requireAdminRegistration(session.teamId, args.registrationId);
+    return JSON.stringify(registration, null, 2);
+  }
+
+  private async handleAdminDisableRegistrationTool(
+    args: { registrationId: string },
+    ctx: DynamicToolHandlerContext,
+  ): Promise<string> {
+    const session = this.requireAdminDmContext(ctx);
+    const registration = this.requireAdminRegistration(session.teamId, args.registrationId);
+    const updated = await this.registrations.disableRegistrationById(registration.id);
+    return `Disabled registration ${updated?.id ?? registration.id}.`;
+  }
+
+  private async handleAdminListWakeDeliveriesTool(
+    args: { workstream?: string | undefined; registrationId?: string | undefined },
+    ctx: DynamicToolHandlerContext,
+  ): Promise<string> {
+    const session = this.requireAdminDmContext(ctx);
+    const workstream = this.resolveAdminWorkstreamFilter(session.teamId, args.workstream);
+    let wakes = this.store.listPendingWakesForTeam(session.teamId);
+    if (workstream) {
+      wakes = wakes.filter((wake) => wake.workstreamId === workstream.id);
+    }
+    if (args.registrationId) {
+      const registration = this.requireAdminRegistration(session.teamId, args.registrationId);
+      wakes = wakes.filter((wake) => wake.registrationId === registration.id);
+    }
+    if (wakes.length === 0) {
+      return "No wake deliveries matched the requested admin scope.";
+    }
+    return wakes.map((wake) => this.formatAdminWakeLine(wake)).join("\n");
+  }
+
   private requireRegistrationContext(ctx: DynamicToolHandlerContext): RegistrationContext {
     const workerRecord = this.store.getWorkerByAppThreadId(ctx.threadId);
     const worker = workerRecord ? this.ensureWorkerWorkstream(workerRecord) : null;
@@ -2902,6 +2962,62 @@ export class SlackCodexWorkersService extends EventEmitter {
 
   private requireWebhookMailboxState(): WebhookMailboxState {
     return this.ensureWebhookMailboxInitialized();
+  }
+
+  private resolveAdminWorkstreamFilter(teamId: string, relativePath?: string | undefined): WorkstreamRecord | null {
+    if (relativePath === undefined) return null;
+    const trimmed = relativePath.trim();
+    if (!trimmed) {
+      throw new Error("Workstream filter must not be blank.");
+    }
+    const normalizedPath = trimmed.replace(/^\/+|\/+$/g, "");
+    const normalized = normalizedPath === "root" ? "" : normalizedPath;
+    const workstream = this.store.getWorkstreamByRelativePath(teamId, normalized);
+    if (!workstream) {
+      throw new Error(`Workstream not found: ${trimmed}`);
+    }
+    return workstream;
+  }
+
+  private requireAdminRegistration(teamId: string, registrationId: string): RegistrationRecord {
+    const registration = this.store.getRegistration(registrationId);
+    if (!registration || registration.teamId !== teamId) {
+      throw new Error("Registration not found.");
+    }
+    return registration;
+  }
+
+  private formatAdminRegistrationLine(registration: RegistrationRecord): string {
+    const workstream = this.store.getWorkstreamById(registration.workstreamId);
+    const scope = registration.workerKey ? `worker:${registration.workerKey}` : "workstream";
+    return [
+      `${registration.id}`,
+      `[${registration.enabled ? "enabled" : "disabled"}]`,
+      `${registration.trigger.kind}`,
+      `-> ${registration.action.kind}`,
+      `(${scope})`,
+      `workstream=${workstream ? formatWorkstreamAddress(workstream) : registration.workstreamId}`,
+      registration.description ? `description=${registration.description}` : "",
+    ].filter(Boolean).join(" ");
+  }
+
+  private formatAdminWakeLine(wake: {
+    id: string;
+    registrationId: string;
+    status: string;
+    workstreamId: string;
+    workerKey: string | null;
+    summary: string;
+  }): string {
+    const workstream = this.store.getWorkstreamById(wake.workstreamId);
+    return [
+      `${wake.id}`,
+      `${wake.status}`,
+      `registration=${wake.registrationId}`,
+      `workstream=${workstream ? formatWorkstreamAddress(workstream) : wake.workstreamId}`,
+      wake.workerKey ? `worker=${wake.workerKey}` : "worker=(none)",
+      wake.summary,
+    ].join(" ");
   }
 }
 

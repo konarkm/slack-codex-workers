@@ -1065,6 +1065,217 @@ describe("service lifecycle decisions", () => {
     store.close();
   });
 
+  it("lists and disables registrations from the admin DM with optional workstream filtering", async () => {
+    const { service, store } = await createService();
+    createDmSession(service, { appThreadId: "dm-thread-1" });
+    store.upsertWorkstream({
+      id: "T1:ops-debug",
+      teamId: "T1",
+      parentId: "T1:root",
+      slug: "ops-debug",
+      relativePath: "ops-debug",
+      channelId: "C-ops",
+      channelName: "ops-debug",
+      description: "ops",
+    });
+    store.upsertRegistration({
+      id: "reg-admin-1",
+      teamId: "T1",
+      workstreamId: "T1:root",
+      workerKey: null,
+      ownerUserId: "",
+      rootOwnerUserId: "",
+      description: "root webhook",
+      enabled: true,
+      target: {
+        kind: "workstream",
+        workstreamId: "T1:root",
+        workerKey: null,
+      },
+      action: { kind: "spawn" },
+      trigger: {
+        kind: "webhook",
+        source: "qa",
+        events: ["root.check"],
+        match: null,
+      },
+    });
+    store.upsertRegistration({
+      id: "reg-admin-2",
+      teamId: "T1",
+      workstreamId: "T1:ops-debug",
+      workerKey: null,
+      ownerUserId: "",
+      rootOwnerUserId: "",
+      description: "ops heartbeat",
+      enabled: true,
+      target: {
+        kind: "workstream",
+        workstreamId: "T1:ops-debug",
+        workerKey: null,
+      },
+      action: { kind: "spawn" },
+      trigger: {
+        kind: "heartbeat",
+        intervalMinutes: 15,
+      },
+    });
+
+    const listedAll = await service.handleAdminListRegistrationsTool(
+      {},
+      { threadId: "dm-thread-1", turnId: "turn-1", callId: "call-1" },
+    );
+    expect(listedAll).toContain("reg-admin-1");
+    expect(listedAll).toContain("reg-admin-2");
+
+    const listedFiltered = await service.handleAdminListRegistrationsTool(
+      { workstream: "ops-debug" },
+      { threadId: "dm-thread-1", turnId: "turn-1", callId: "call-1" },
+    );
+    expect(listedFiltered).toContain("reg-admin-2");
+    expect(listedFiltered).not.toContain("reg-admin-1");
+
+    const listedRoot = await service.handleAdminListRegistrationsTool(
+      { workstream: "/root" },
+      { threadId: "dm-thread-1", turnId: "turn-1", callId: "call-1" },
+    );
+    expect(listedRoot).toContain("reg-admin-1");
+    expect(listedRoot).not.toContain("reg-admin-2");
+
+    const detail = await service.handleAdminGetRegistrationTool(
+      { registrationId: "reg-admin-2" },
+      { threadId: "dm-thread-1", turnId: "turn-1", callId: "call-1" },
+    );
+    expect(detail).toContain('"id": "reg-admin-2"');
+
+    const disabled = await service.handleAdminDisableRegistrationTool(
+      { registrationId: "reg-admin-2" },
+      { threadId: "dm-thread-1", turnId: "turn-1", callId: "call-1" },
+    );
+    expect(disabled).toContain("Disabled registration reg-admin-2");
+    expect(store.getRegistration("reg-admin-2")).toMatchObject({ enabled: false });
+
+    await expect(service.handleAdminListRegistrationsTool(
+      { workstream: "   " },
+      { threadId: "dm-thread-1", turnId: "turn-1", callId: "call-1" },
+    )).rejects.toThrow();
+
+    await expect(service.handleAdminListRegistrationsTool(
+      {},
+      { threadId: "thread-1", turnId: "turn-1", callId: "call-1" },
+    )).rejects.toThrow("admin DM");
+    store.close();
+  });
+
+  it("lists wake deliveries from the admin DM with filters", async () => {
+    const { service, store } = await createService();
+    createDmSession(service, { appThreadId: "dm-thread-1" });
+    store.upsertWorkstream({
+      id: "T1:ops-debug",
+      teamId: "T1",
+      parentId: "T1:root",
+      slug: "ops-debug",
+      relativePath: "ops-debug",
+      channelId: "C-ops",
+      channelName: "ops-debug",
+      description: "ops",
+    });
+    store.upsertRegistration({
+      id: "reg-admin-1",
+      teamId: "T1",
+      workstreamId: "T1:root",
+      workerKey: null,
+      ownerUserId: "",
+      rootOwnerUserId: "",
+      description: "root webhook",
+      enabled: true,
+      target: {
+        kind: "workstream",
+        workstreamId: "T1:root",
+        workerKey: null,
+      },
+      action: { kind: "spawn" },
+      trigger: {
+        kind: "webhook",
+        source: "qa",
+        events: ["root.check"],
+        match: null,
+      },
+    });
+    store.upsertRegistration({
+      id: "reg-admin-2",
+      teamId: "T1",
+      workstreamId: "T1:ops-debug",
+      workerKey: null,
+      ownerUserId: "",
+      rootOwnerUserId: "",
+      description: "ops heartbeat",
+      enabled: true,
+      target: {
+        kind: "workstream",
+        workstreamId: "T1:ops-debug",
+        workerKey: null,
+      },
+      action: { kind: "spawn" },
+      trigger: {
+        kind: "heartbeat",
+        intervalMinutes: 15,
+      },
+    });
+    store.createPendingWake({
+      id: "wake-admin-1",
+      teamId: "T1",
+      registrationId: "reg-admin-1",
+      workstreamId: "T1:root",
+      workerKey: null,
+      status: "delivered",
+      summary: "root delivered",
+      payloadPath: null,
+      firedEvent: null,
+      dueAt: null,
+      attempts: 0,
+      nextAttemptAt: null,
+      lastError: null,
+    });
+    store.createPendingWake({
+      id: "wake-admin-2",
+      teamId: "T1",
+      registrationId: "reg-admin-2",
+      workstreamId: "T1:ops-debug",
+      workerKey: null,
+      status: "queued",
+      summary: "ops queued",
+      payloadPath: null,
+      firedEvent: null,
+      dueAt: null,
+      attempts: 0,
+      nextAttemptAt: null,
+      lastError: null,
+    });
+
+    const listedAll = await service.handleAdminListWakeDeliveriesTool(
+      {},
+      { threadId: "dm-thread-1", turnId: "turn-1", callId: "call-1" },
+    );
+    expect(listedAll).toContain("wake-admin-1");
+    expect(listedAll).toContain("wake-admin-2");
+
+    const filtered = await service.handleAdminListWakeDeliveriesTool(
+      { workstream: "ops-debug", registrationId: "reg-admin-2" },
+      { threadId: "dm-thread-1", turnId: "turn-1", callId: "call-1" },
+    );
+    expect(filtered).toContain("wake-admin-2");
+    expect(filtered).not.toContain("wake-admin-1");
+
+    const rootFiltered = await service.handleAdminListWakeDeliveriesTool(
+      { workstream: "/root", registrationId: "reg-admin-1" },
+      { threadId: "dm-thread-1", turnId: "turn-1", callId: "call-1" },
+    );
+    expect(rootFiltered).toContain("wake-admin-1");
+    expect(rootFiltered).not.toContain("wake-admin-2");
+    store.close();
+  });
+
   it("queues and delivers heartbeat wakes into an idle worker", async () => {
     const { service, codex, store } = await createService();
     createWorker(service, { workstreamId: "T1:root" });

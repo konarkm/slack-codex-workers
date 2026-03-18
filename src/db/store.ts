@@ -866,6 +866,15 @@ export class Store {
     return rows.map((row) => this.toPendingWake(row));
   }
 
+  listPendingWakesForTeam(teamId: string): PendingWakeRecord[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM pending_wakes
+      WHERE team_id = ?
+      ORDER BY created_at ASC, id ASC
+    `).all(teamId) as Record<string, unknown>[];
+    return rows.map((row) => this.toPendingWake(row));
+  }
+
   getPendingWake(id: string): PendingWakeRecord | null {
     const row = this.db.prepare("SELECT * FROM pending_wakes WHERE id = ?").get(id) as Record<string, unknown> | undefined;
     return row ? this.toPendingWake(row) : null;

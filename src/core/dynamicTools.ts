@@ -16,6 +16,10 @@ export const slackDisableRegistrationToolName = "disable_registration";
 export const slackListRegistrationsToolName = "list_registrations";
 export const slackGetRegistrationToolName = "get_registration";
 export const slackListWakeDeliveriesToolName = "list_wake_deliveries";
+export const slackAdminDisableRegistrationToolName = "disable_registration_admin";
+export const slackAdminListRegistrationsToolName = "list_registrations_admin";
+export const slackAdminGetRegistrationToolName = "get_registration_admin";
+export const slackAdminListWakeDeliveriesToolName = "list_wake_deliveries_admin";
 
 export const workerDynamicTools = [
   {
@@ -217,6 +221,57 @@ export const adminDynamicTools = [
   workerDynamicTools[2],
   workerDynamicTools[3],
   {
+    name: slackAdminListRegistrationsToolName,
+    description:
+      "List durable registrations across the bridge from the admin DM. If workstream is provided, limit results to that workstream path; otherwise list all registrations in the workspace.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        workstream: { type: "string", minLength: 1 },
+      },
+    },
+  },
+  {
+    name: slackAdminGetRegistrationToolName,
+    description:
+      "Get the full details for one durable registration by id from the admin DM, regardless of which worker or workstream owns it.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["registrationId"],
+      properties: {
+        registrationId: { type: "string", minLength: 1 },
+      },
+    },
+  },
+  {
+    name: slackAdminDisableRegistrationToolName,
+    description:
+      "Disable a durable registration by id from the admin DM without deleting it, regardless of which worker or workstream owns it.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["registrationId"],
+      properties: {
+        registrationId: { type: "string", minLength: 1 },
+      },
+    },
+  },
+  {
+    name: slackAdminListWakeDeliveriesToolName,
+    description:
+      "List wake delivery records across the bridge from the admin DM. Filter by workstream path and/or registration id when you need a narrower operational view.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        workstream: { type: "string", minLength: 1 },
+        registrationId: { type: "string", minLength: 1 },
+      },
+    },
+  },
+  {
     name: slackRotateWebhookSecretToolName,
     description:
       "Rotate the shared webhook mailbox secret for the entire bridge. This moves the previous current secret into fallback position and returns the updated mailbox bundle. Use this only in the admin DM when rotating external webhook credentials intentionally.",
@@ -290,8 +345,25 @@ export const slackDisableRegistrationArgsSchema = z.object({
   registrationId: z.string().min(1),
 });
 
+export const slackAdminListRegistrationsArgsSchema = z.object({
+  workstream: z.string().trim().min(1).optional(),
+});
+
 export const slackGetRegistrationArgsSchema = z.object({
   registrationId: z.string().min(1),
+});
+
+export const slackAdminGetRegistrationArgsSchema = z.object({
+  registrationId: z.string().min(1),
+});
+
+export const slackAdminDisableRegistrationArgsSchema = z.object({
+  registrationId: z.string().min(1),
+});
+
+export const slackAdminListWakeDeliveriesArgsSchema = z.object({
+  workstream: z.string().trim().min(1).optional(),
+  registrationId: z.string().min(1).optional(),
 });
 
 export const workerDeveloperInstructions = [
@@ -314,6 +386,7 @@ export const adminDeveloperInstructions = [
   "Use slack_create_workstream only after the human has explicitly approved creating a new workstream in the conversation.",
   "Use get_current_time when you need the current local time or configured workspace timezone.",
   "Use get_webhook_mailbox to inspect the current shared webhook mailbox endpoint and secret, and use rotate_webhook_secret when the human intentionally wants to rotate that organization-wide secret.",
+  "Use list_registrations_admin, get_registration_admin, disable_registration_admin, and list_wake_deliveries_admin for bird's-eye registration inspection and cleanup from the admin DM. These tools accept explicit workstream or registration filters instead of using current worker-thread scope.",
   "Use slack_upload_files when you need to share one or more existing local files into this admin DM conversation.",
   "Use concise operational language suitable for an admin/operator chat.",
 ].join("\n");

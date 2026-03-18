@@ -219,6 +219,43 @@ describe("store", () => {
     store.close();
   });
 
+  it("lists pending wakes across a team for admin views", async () => {
+    const { store } = await createStore();
+    store.createPendingWake({
+      id: "wake-1",
+      teamId: "T1",
+      registrationId: "reg-1",
+      workstreamId: "T1:root",
+      workerKey: "worker-1",
+      status: "delivered",
+      summary: "wake one",
+      payloadPath: null,
+      firedEvent: null,
+      dueAt: null,
+      attempts: 0,
+      nextAttemptAt: null,
+      lastError: null,
+    });
+    store.createPendingWake({
+      id: "wake-2",
+      teamId: "T2",
+      registrationId: "reg-2",
+      workstreamId: "T2:root",
+      workerKey: null,
+      status: "queued",
+      summary: "wake two",
+      payloadPath: null,
+      firedEvent: null,
+      dueAt: null,
+      attempts: 0,
+      nextAttemptAt: null,
+      lastError: null,
+    });
+
+    expect(store.listPendingWakesForTeam("T1").map((wake) => wake.id)).toEqual(["wake-1"]);
+    store.close();
+  });
+
   it("derives registration scope columns from the target payload", async () => {
     const { store } = await createStore();
     store.upsertRegistration({
