@@ -16,6 +16,16 @@ describe("commands", () => {
       args: [],
       raw: ".status",
     });
+    expect(parseSlashCommand(".new-thread")).toEqual({
+      name: "new-thread",
+      args: [],
+      raw: ".new-thread",
+    });
+    expect(parseSlashCommand("/new-thread")).toEqual({
+      name: "new-thread",
+      args: [],
+      raw: "/new-thread",
+    });
   });
 
   it("parses slash commands with leading whitespace", () => {
@@ -40,6 +50,7 @@ describe("commands", () => {
     expect(helpText("dm")).toContain(".health");
     expect(helpText("dm")).toContain(".restart-now");
     expect(helpText("dm")).toContain(".restart-cancel");
+    expect(helpText("dm")).toContain(".new-thread");
     expect(helpText("dm")).toContain(".recover");
     expect(helpText("dm")).toContain(".stop");
     expect(helpText("dm")).toContain(".workstream-create");
@@ -54,6 +65,7 @@ describe("commands", () => {
     expect(helpText("thread")).toContain(".stop");
     expect(helpText("thread")).toContain(".workstream-create");
     expect(helpText("thread")).not.toContain(".restart");
+    expect(helpText("thread")).not.toContain(".new-thread");
     expect(helpText("thread")).toContain("missing or blocked");
   });
 });

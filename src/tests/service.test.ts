@@ -577,7 +577,7 @@ describe("service lifecycle decisions", () => {
     });
 
     const result = await service.handleDmCommand(service.store.getDmSession("T1", "U-admin"), "stop", []);
-    await service.onDmCompleted("T1", "U-admin", "", "interrupted");
+    await service.onDmCompleted("T1", "U-admin", "dm-thread-1", "", "interrupted");
 
     expect(result.response).toBe("_System_: Interrupt requested.");
     expect(codex.interruptTurn).toHaveBeenCalledWith("dm-thread-1", "turn-1");
@@ -587,6 +587,178 @@ describe("service lifecycle decisions", () => {
     const updated = store.getDmSession("T1", "U-admin");
     expect(updated?.status).toBe("interrupted");
     expect(updated?.lastError).toBeNull();
+    store.close();
+  });
+
+  it("creates a fresh admin thread immediately with the new-thread command", async () => {
+    const { service, codex, store } = await createService();
+    const session = createDmSession(service, { appThreadId: "dm-thread-old" });
+    codex.createAdminThread.mockResolvedValue({ threadId: "dm-thread-new", threadName: null });
+
+    const result = await service.handleDmCommand(session, "new-thread", []);
+
+    expect(result.response).toContain("Created a fresh backing Codex admin thread.");
+    expect(result.response).toContain("dm-thread-new");
+    expect(store.getDmSession("T1", "U-admin")).toMatchObject({
+      appThreadId: "dm-thread-new",
+      status: "idle",
+      activeTurnId: null,
+    });
+    store.close();
+  });
+
+  it("new-thread abandons the old DM turn and declines stale interactive prompts", async () => {
+    const { service, codex, store } = await createService();
+    const session = createDmSession(service, {
+      appThreadId: "dm-thread-old",
+      activeTurnId: "turn-old",
+      status: "blocked_input",
+      pendingRequest: {
+        kind: "tool_user_input",
+        requestId: "req-old",
+        promptText: "Need input",
+        threadId: "dm-thread-old",
+        turnId: "turn-old",
+        itemId: null,
+        questionIds: [],
+        schemaJson: null,
+        createdAt: "2026-03-18T00:00:00.000Z",
+      },
+    });
+    (service as any).pendingInteractiveRequests.set("dm-thread-old", {
+      kind: "tool_user_input",
+      requestId: "req-old",
+      threadId: "dm-thread-old",
+      turnId: "turn-old",
+      itemId: null,
+      promptText: "Need input",
+      questionIds: [],
+      schemaJson: null,
+      params: {},
+    });
+    (service as any).startingDmTurns.set("dm:T1:U-admin", Promise.resolve("turn-stale"));
+    codex.createAdminThread.mockResolvedValue({ threadId: "dm-thread-new", threadName: null });
+
+    const result = await service.handleDmCommand(session, "new-thread", []);
+
+    expect(result.response).toContain("dm-thread-new");
+    expect(codex.interruptTurn).toHaveBeenCalledWith("dm-thread-old", "turn-old");
+    expect(codex.respondToServerRequest).toHaveBeenCalledWith("req-old", { answers: {} });
+    expect((service as any).pendingInteractiveRequests.has("dm-thread-old")).toBe(false);
+    expect((service as any).startingDmTurns.has("dm:T1:U-admin")).toBe(false);
+    expect(store.getDmSession("T1", "U-admin")).toMatchObject({
+      appThreadId: "dm-thread-new",
+      activeTurnId: null,
+      pendingRequest: null,
+      status: "idle",
+    });
+    store.close();
+  });
+
+  it("new-thread still succeeds when declining a stale interactive request fails", async () => {
+    const { service, codex, store } = await createService();
+    const session = createDmSession(service, {
+      appThreadId: "dm-thread-old",
+      activeTurnId: "turn-old",
+      status: "blocked_input",
+      pendingRequest: {
+        kind: "tool_user_input",
+        requestId: "req-old",
+        promptText: "Need input",
+        threadId: "dm-thread-old",
+        turnId: "turn-old",
+        itemId: null,
+        questionIds: [],
+        schemaJson: null,
+        createdAt: "2026-03-18T00:00:00.000Z",
+      },
+    });
+    (service as any).pendingInteractiveRequests.set("dm-thread-old", {
+      kind: "tool_user_input",
+      requestId: "req-old",
+      threadId: "dm-thread-old",
+      turnId: "turn-old",
+      itemId: null,
+      promptText: "Need input",
+      questionIds: [],
+      schemaJson: null,
+      params: {},
+    });
+    codex.respondToServerRequest.mockRejectedValue(new Error("gone"));
+    codex.createAdminThread.mockResolvedValue({ threadId: "dm-thread-new", threadName: null });
+
+    const result = await service.handleDmCommand(session, "new-thread", []);
+
+    expect(result.response).toContain("dm-thread-new");
+    expect((service as any).pendingInteractiveRequests.has("dm-thread-old")).toBe(false);
+    expect(store.getDmSession("T1", "U-admin")?.appThreadId).toBe("dm-thread-new");
+    store.close();
+  });
+
+  it("new-thread preserves effective team defaults when the DM has no override", async () => {
+    const { service, codex, store } = await createService();
+    const session = createDmSession(service, {
+      appThreadId: "dm-thread-old",
+      settings: { model: null, effort: null },
+    });
+    store.setTeamDefaults("T1", { model: "gpt-5.5", effort: "medium" });
+    codex.createAdminThread.mockResolvedValue({ threadId: "dm-thread-new", threadName: null });
+
+    await service.handleDmCommand(session, "new-thread", []);
+
+    expect(codex.createAdminThread).toHaveBeenCalledWith({ model: "gpt-5.5", effort: "medium" });
+    store.close();
+  });
+
+  it("ignores stale DM completion callbacks after new-thread swaps the backing thread", async () => {
+    const { service, slack, codex, store } = await createService();
+    const session = createDmSession(service, {
+      appThreadId: "dm-thread-old",
+      status: "running",
+      activeTurnId: "turn-old",
+      lastInboundMessageTs: "9.000",
+    });
+    codex.createAdminThread.mockResolvedValue({ threadId: "dm-thread-new", threadName: null });
+
+    await service.handleDmCommand(session, "new-thread", []);
+    await (service as any).onDmCompleted("T1", "U-admin", "dm-thread-old", "stale text", "completed");
+
+    const updated = store.getDmSession("T1", "U-admin");
+    expect(updated).toMatchObject({
+      appThreadId: "dm-thread-new",
+      status: "idle",
+      activeTurnId: null,
+    });
+    expect(slack.postTopLevelMessage).toHaveBeenCalledTimes(1);
+    expect(slack.postTopLevelMessage).toHaveBeenCalledWith(
+      "D1",
+      "_System_: Reattached this admin DM to a fresh Codex thread. Prior runtime context was lost.",
+    );
+    store.close();
+  });
+
+  it("clears stale DM buffered assistant text when new-thread swaps the backing thread", async () => {
+    const { service, slack, codex, store } = await createService();
+    const session = createDmSession(service, {
+      appThreadId: "dm-thread-old",
+      status: "running",
+      activeTurnId: "turn-old",
+    });
+    await (service as any).onDmAgentMessage("T1", "U-admin", "dm-thread-old", "agent-old", "stale buffered text");
+    codex.createAdminThread.mockResolvedValue({ threadId: "dm-thread-new", threadName: null });
+
+    await service.handleDmCommand(session, "new-thread", []);
+    await (service as any).onDmAgentMessage("T1", "U-admin", "dm-thread-new", "agent-new", "fresh buffered text");
+    await (service as any).onDmCompleted("T1", "U-admin", "dm-thread-new", "", "completed");
+
+    expect(slack.postTopLevelMessage.mock.calls).toContainEqual([
+      "D1",
+      "fresh buffered text",
+    ]);
+    expect(slack.postTopLevelMessage.mock.calls).not.toContainEqual([
+      "D1",
+      "stale buffered text",
+    ]);
     store.close();
   });
 
@@ -2288,15 +2460,15 @@ describe("service lifecycle decisions", () => {
       activeTurnId: "turn-1",
     });
 
-    await service.onDmWorklogItem("T1", "U-admin", {
+    await service.onDmWorklogItem("T1", "U-admin", "dm-thread-1", {
       itemId: "tool-1",
       type: "webSearch",
       title: "Web Search",
       status: "started",
       detail: "weather: San Francisco, CA",
     });
-    await service.onDmAgentMessage("T1", "U-admin", "agent-1", "Checking weather now.");
-    await service.onDmCompleted("T1", "U-admin", "Checking weather now.", "completed");
+    await service.onDmAgentMessage("T1", "U-admin", "dm-thread-1", "agent-1", "Checking weather now.");
+    await service.onDmCompleted("T1", "U-admin", "dm-thread-1", "Checking weather now.", "completed");
 
     expect(slack.postTopLevelMessage.mock.calls).toEqual([
       ["D1", "Checking weather now."],

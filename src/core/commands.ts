@@ -10,6 +10,7 @@ export type CommandName =
   | "model"
   | "effort"
   | "compact"
+  | "new-thread"
   | "recover"
   | "stop"
   | "workstream-create";
@@ -30,6 +31,7 @@ const COMMANDS = new Set<CommandName>([
   "model",
   "effort",
   "compact",
+  "new-thread",
   "recover",
   "stop",
   "workstream-create",
@@ -61,6 +63,7 @@ export function helpText(scope: "dm" | "thread"): string {
     lines.push(".model [id] - show or set the global default model for threads without overrides");
     lines.push(".effort [level] - show or set the global default effort for threads without overrides");
     lines.push(".compact - compact the DM admin conversation");
+    lines.push(".new-thread - attach this admin DM to a fresh Codex thread immediately");
     lines.push(".stop - request interruption of the active DM admin turn");
     lines.push(".recover - recover this DM only when the backing Codex thread is missing or blocked");
     lines.push(".workstream-create <slug> [parent=<path>] [description...] - create a new workstream channel and scaffold");

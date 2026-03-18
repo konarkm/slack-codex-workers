@@ -63,6 +63,7 @@ Implemented in this repo:
   - `.model` / `/model`
   - `.effort` / `/effort`
   - `.compact` / `/compact`
+  - `.new-thread` / `/new-thread`
   - `.stop` / `/stop`
   - `.recover` / `/recover`
   - `.restart <codex|bridge|both>` / `/restart <codex|bridge|both>`
@@ -215,4 +216,5 @@ For a supervised production build:
 - `/restart-now` forces the currently queued restart immediately.
 - `/restart-cancel` clears the currently queued restart.
 - `/restart bridge` and `/restart both` only work properly under the launcher/supervisor path because they exit with code `42` and rely on `./scripts/launch.sh` to relaunch the bridge.
+- `/new-thread` immediately attaches the admin DM to a fresh backing Codex thread while preserving the DM's current settings; use it after deploys when you want a fresh admin tool surface.
 - `/recover` is recovery-only; it is available only when the thread or admin DM is blocked or live Codex reconciliation shows the backing thread is missing.

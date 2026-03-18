@@ -955,38 +955,45 @@ export class SlackCodexWorkersService extends EventEmitter {
         turnId = await this.codex.startTurnWithResumeFallback(
           latestSession.appThreadId!,
           input,
-          latestSession.settings,
+          resolveRuntimeSettings(latestSession.settings, this.store.getTeamDefaults(latestSession.teamId)),
           {
             onTurnStarted: async () => {
-              await this.onDmTurnStarted(latestSession.teamId, latestSession.userId);
+              await this.onDmTurnStarted(latestSession.teamId, latestSession.userId, latestSession.appThreadId!);
             },
             onAgentDelta: async ({ itemId, delta }) => {
-              await this.onDmAgentDelta(latestSession.teamId, latestSession.userId, itemId, delta);
+              await this.onDmAgentDelta(latestSession.teamId, latestSession.userId, latestSession.appThreadId!, itemId, delta);
             },
             onAgentMessage: async ({ itemId, text }) => {
-              await this.onDmAgentMessage(latestSession.teamId, latestSession.userId, itemId, text);
+              await this.onDmAgentMessage(latestSession.teamId, latestSession.userId, latestSession.appThreadId!, itemId, text);
             },
             onWorklogItem: async (event) => {
-              await this.onDmWorklogItem(latestSession.teamId, latestSession.userId, event);
+              await this.onDmWorklogItem(latestSession.teamId, latestSession.userId, latestSession.appThreadId!, event);
             },
             onCompleted: async ({ assistantText, status, error }) => {
-              await this.onDmCompleted(latestSession.teamId, latestSession.userId, assistantText, status, error);
+              await this.onDmCompleted(latestSession.teamId, latestSession.userId, latestSession.appThreadId!, assistantText, status, error);
             },
           },
         );
       } catch (error) {
-        this.store.upsertDmSession({
-          ...this.requireDmSession(latestSession.teamId, latestSession.userId),
-          status: "idle",
-          lastError: null,
-        });
+        const currentSession = this.requireDmSession(latestSession.teamId, latestSession.userId);
+        if (currentSession.appThreadId === latestSession.appThreadId) {
+          this.store.upsertDmSession({
+            ...currentSession,
+            status: "idle",
+            lastError: null,
+          });
+        }
         throw error;
       } finally {
         this.startingDmTurns.delete(sessionKey);
       }
 
+      const currentSession = this.requireDmSession(latestSession.teamId, latestSession.userId);
+      if (currentSession.appThreadId !== latestSession.appThreadId) {
+        return turnId;
+      }
       this.store.upsertDmSession({
-        ...this.requireDmSession(latestSession.teamId, latestSession.userId),
+        ...currentSession,
         activeTurnId: turnId,
         status: "running",
         lastError: null,
@@ -1092,14 +1099,17 @@ export class SlackCodexWorkersService extends EventEmitter {
     await this.processRegistrationLoop();
   }
 
-  private async onDmAgentDelta(teamId: string, userId: string, itemId: string, delta: string): Promise<void> {
+  private async onDmAgentDelta(teamId: string, userId: string, threadId: string, itemId: string, delta: string): Promise<void> {
+    if (!this.isCurrentDmThread(teamId, userId, threadId)) return;
     void teamId;
     void userId;
+    void threadId;
     void itemId;
     void delta;
   }
 
-  private async onDmTurnStarted(teamId: string, userId: string): Promise<void> {
+  private async onDmTurnStarted(teamId: string, userId: string, threadId: string): Promise<void> {
+    if (!this.isCurrentDmThread(teamId, userId, threadId)) return;
     const session = this.requireDmSession(teamId, userId);
     if (!session.lastInboundMessageTs) return;
     await this.enqueueSlackWrite(this.getDmQueueKey(teamId, userId), async () => {
@@ -1107,13 +1117,15 @@ export class SlackCodexWorkersService extends EventEmitter {
     });
   }
 
-  private async onDmAgentMessage(teamId: string, userId: string, itemId: string, text: string): Promise<void> {
+  private async onDmAgentMessage(teamId: string, userId: string, threadId: string, itemId: string, text: string): Promise<void> {
+    if (!this.isCurrentDmThread(teamId, userId, threadId)) return;
     const state = this.getRenderState(`dm:${teamId}:${userId}`);
     await this.flushPendingDmAssistant(teamId, userId, false);
     state.pendingAssistant = { itemId, text };
   }
 
-  private async onDmWorklogItem(teamId: string, userId: string, event: WorklogItem): Promise<void> {
+  private async onDmWorklogItem(teamId: string, userId: string, threadId: string, event: WorklogItem): Promise<void> {
+    if (!this.isCurrentDmThread(teamId, userId, threadId)) return;
     if (event.status === "started") return;
     const session = this.requireDmSession(teamId, userId);
     await this.flushPendingDmAssistant(teamId, userId, false);
@@ -1122,7 +1134,8 @@ export class SlackCodexWorkersService extends EventEmitter {
     });
   }
 
-  private async onDmCompleted(teamId: string, userId: string, assistantText: string, status: string, error?: string | null): Promise<void> {
+  private async onDmCompleted(teamId: string, userId: string, threadId: string, assistantText: string, status: string, error?: string | null): Promise<void> {
+    if (!this.isCurrentDmThread(teamId, userId, threadId)) return;
     const session = this.requireDmSession(teamId, userId);
     const state = this.getRenderState(`dm:${teamId}:${userId}`);
     const finalAssistantText = state.pendingAssistant?.text ?? assistantText;
@@ -1331,6 +1344,10 @@ export class SlackCodexWorkersService extends EventEmitter {
       if (isUnavailableForCompact(currentSession.status)) return { response: "Cannot compact while this DM is blocked or waiting for recovery." };
       await this.codex.compactThread(currentSession.appThreadId);
       return { response: `Compaction requested for thread ${currentSession.appThreadId}` };
+    }
+    if (name === "new-thread") {
+      const refreshed = await this.recoverDmSession(currentSession ?? session);
+      return { response: `Created a fresh backing Codex admin thread.\nThread: ${refreshed.appThreadId ?? "(none)"}` };
     }
     if (name === "stop") {
       if (!currentSession?.appThreadId || !currentSession.activeTurnId) {
@@ -2473,7 +2490,30 @@ export class SlackCodexWorkersService extends EventEmitter {
 
   private async recoverDmSession(session: DmSessionRecord): Promise<DmSessionRecord> {
     this.clearBlockedTurnPoll(this.getDmPollKey(session.teamId, session.userId));
-    const created = await this.codex.createAdminThread(session.settings);
+    const previousThreadId = session.appThreadId;
+    if (previousThreadId && session.activeTurnId) {
+      try {
+        await this.codex.interruptTurn(previousThreadId, session.activeTurnId);
+      } catch {
+        // Best effort: the old thread may already be gone or finishing.
+      }
+    }
+    if (previousThreadId) {
+      const pending = this.pendingInteractiveRequests.get(previousThreadId);
+      if (pending) {
+        try {
+          await this.codex.respondToServerRequest(pending.requestId, pending.kind === "mcp_elicitation"
+            ? { action: "decline", content: null, _meta: null }
+            : { answers: {} });
+        } catch {
+          // Best effort: stale requests may already be gone.
+        }
+        this.pendingInteractiveRequests.delete(previousThreadId);
+      }
+    }
+    this.startingDmTurns.delete(this.getDmSessionKey(session.teamId, session.userId));
+    this.renderState.delete(`dm:${session.teamId}:${session.userId}`);
+    const created = await this.codex.createAdminThread(resolveRuntimeSettings(session.settings, this.store.getTeamDefaults(session.teamId)));
     const recovered = this.store.upsertDmSession({
       ...session,
       appThreadId: created.threadId,
@@ -2910,6 +2950,11 @@ export class SlackCodexWorkersService extends EventEmitter {
     const session = this.store.getDmSession(teamId, userId);
     if (!session) throw new Error(`Missing DM session ${teamId}:${userId}`);
     return session;
+  }
+
+  private isCurrentDmThread(teamId: string, userId: string, threadId: string): boolean {
+    const session = this.store.getDmSession(teamId, userId);
+    return Boolean(session && session.appThreadId === threadId);
   }
 
   private requireAdminDmContext(ctx: DynamicToolHandlerContext): DmSessionRecord {
