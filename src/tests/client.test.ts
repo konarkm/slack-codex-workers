@@ -193,6 +193,34 @@ describe("codex client dynamic tool routing", () => {
     });
   });
 
+  it("routes archive_workstream_admin through the dynamic tool handler", async () => {
+    const respond = vi.fn().mockResolvedValue(undefined);
+    const adminArchiveWorkstream = vi.fn().mockResolvedValue("Archived workstream ops-debug.");
+    const client = Object.create(CodexClient.prototype) as any;
+    client.rpc = { respond };
+    client.dynamicToolHandlers = { adminArchiveWorkstream };
+
+    await client.handleDynamicToolCall("req-8", {
+      threadId: "thread-8",
+      turnId: "turn-8",
+      callId: "call-8",
+      tool: "archive_workstream_admin",
+      arguments: { workstream: "ops-debug" },
+    });
+
+    expect(adminArchiveWorkstream).toHaveBeenCalledWith({
+      workstream: "ops-debug",
+    }, {
+      threadId: "thread-8",
+      turnId: "turn-8",
+      callId: "call-8",
+    });
+    expect(respond).toHaveBeenCalledWith("req-8", {
+      contentItems: [{ type: "inputText", text: "Archived workstream ops-debug." }],
+      success: true,
+    });
+  });
+
   it("maps successful contextCompaction notifications to started/completed compaction events", async () => {
     const compactionHandler = vi.fn().mockResolvedValue(undefined);
     const client = Object.create(CodexClient.prototype) as any;

@@ -186,6 +186,7 @@ describe("store", () => {
       channelId: "C1",
       channelName: "general",
       description: "root",
+      archivedAt: null,
     });
 
     store.upsertRegistration({
@@ -217,6 +218,58 @@ describe("store", () => {
 
     store.disableRegistration("reg-1");
     expect(store.getRegistration("reg-1")).toMatchObject({ enabled: false });
+    store.close();
+  });
+
+  it("hides archived workstreams from active lookups while preserving archived lookup access", async () => {
+    const { store } = await createStore();
+    store.upsertWorkstream({
+      id: "T1:root",
+      teamId: "T1",
+      parentId: null,
+      slug: "root",
+      relativePath: "",
+      channelId: "C1",
+      channelName: "general",
+      description: "root",
+      archivedAt: null,
+    });
+    store.upsertWorkstream({
+      id: "T1:ops",
+      teamId: "T1",
+      parentId: "T1:root",
+      slug: "ops",
+      relativePath: "ops",
+      channelId: "C-ops",
+      channelName: "ops",
+      description: "ops",
+      archivedAt: null,
+    });
+    store.upsertWorkstream({
+      id: "T1:ops/child",
+      teamId: "T1",
+      parentId: "T1:ops",
+      slug: "child",
+      relativePath: "ops/child",
+      channelId: "C-child",
+      channelName: "child",
+      description: "child",
+      archivedAt: null,
+    });
+
+    const archived = store.archiveWorkstream("T1:ops", "2026-03-18T12:00:00.000Z");
+    expect(archived).toMatchObject({ archivedAt: "2026-03-18T12:00:00.000Z" });
+    expect(store.getWorkstreamById("T1:ops")).toBeNull();
+    expect(store.getWorkstreamByRelativePath("T1", "ops")).toBeNull();
+    expect(store.getWorkstreamByChannel("T1", "C-ops")).toBeNull();
+    expect(store.listWorkstreams("T1").map((workstream) => workstream.relativePath)).toEqual(["", "ops/child"]);
+    expect(store.listWorkstreams("T1", { includeArchived: true }).map((workstream) => workstream.relativePath)).toEqual(["", "ops", "ops/child"]);
+    expect(store.listChildWorkstreams("T1:root").map((workstream) => workstream.relativePath)).toEqual([]);
+    expect(store.listChildWorkstreams("T1:root", { includeArchived: true }).map((workstream) => workstream.relativePath)).toEqual(["ops"]);
+    expect(store.getWorkstreamById("T1:ops", { includeArchived: true })).toMatchObject({
+      relativePath: "ops",
+      archivedAt: "2026-03-18T12:00:00.000Z",
+    });
     store.close();
   });
 

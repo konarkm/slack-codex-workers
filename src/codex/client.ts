@@ -4,6 +4,8 @@ import { logWarn } from "../logger.js";
 import type { JsonRpcId, PendingRequestKind, ReasoningEffort, RuntimeSettings, TurnInput, WorklogItem } from "../types.js";
 import { CodexRpcClient, type RpcNotification, type RpcServerRequest } from "./rpcClient.js";
 import {
+  slackAdminArchiveWorkstreamArgsSchema,
+  slackAdminArchiveWorkstreamToolName,
   slackAdminDisableRegistrationArgsSchema,
   slackAdminDisableRegistrationToolName,
   slackAdminGetRegistrationArgsSchema,
@@ -88,6 +90,7 @@ export interface DynamicToolHandlers {
   adminGetRegistration(args: z.infer<typeof slackAdminGetRegistrationArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
   adminDisableRegistration(args: z.infer<typeof slackAdminDisableRegistrationArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
   adminListWakeDeliveries(args: z.infer<typeof slackAdminListWakeDeliveriesArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
+  adminArchiveWorkstream(args: z.infer<typeof slackAdminArchiveWorkstreamArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
 }
 
 export interface CompactionEvent {
@@ -599,6 +602,13 @@ export class CodexClient {
     if (parsed.data.tool === slackAdminListWakeDeliveriesToolName) {
       const args = slackAdminListWakeDeliveriesArgsSchema.parse(parsed.data.arguments);
       const text = await this.dynamicToolHandlers.adminListWakeDeliveries(args, ctx);
+      await this.rpc.respond(id, { contentItems: [{ type: "inputText", text }], success: true });
+      return;
+    }
+
+    if (parsed.data.tool === slackAdminArchiveWorkstreamToolName) {
+      const args = slackAdminArchiveWorkstreamArgsSchema.parse(parsed.data.arguments);
+      const text = await this.dynamicToolHandlers.adminArchiveWorkstream(args, ctx);
       await this.rpc.respond(id, { contentItems: [{ type: "inputText", text }], success: true });
       return;
     }

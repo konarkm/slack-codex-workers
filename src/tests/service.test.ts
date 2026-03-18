@@ -26,6 +26,7 @@ vi.mock("@slack/bolt", () => ({
       conversations: {
         join: vi.fn().mockResolvedValue({ ok: true }),
         create: vi.fn().mockResolvedValue({ channel: { id: "C-created", name: "created", is_private: false, is_member: true } }),
+        archive: vi.fn().mockResolvedValue({ ok: true }),
         open: vi.fn().mockResolvedValue({ channel: { id: "D-opened" } }),
         list: vi.fn().mockResolvedValue({ channels: [], response_metadata: {} }),
       },
@@ -124,6 +125,7 @@ async function createService(configOverrides: Partial<AppConfig> = {}) {
       updatedAt: new Date().toISOString(),
     })),
     openDmChannel: vi.fn().mockResolvedValue("D-opened"),
+    archivePublicChannel: vi.fn().mockResolvedValue(undefined),
   };
   const codex = {
     isRunning: vi.fn().mockReturnValue(true),
@@ -153,6 +155,7 @@ async function createService(configOverrides: Partial<AppConfig> = {}) {
     channelId: "C1",
     channelName: "general",
     description: "root",
+    archivedAt: null,
   });
   return { dir, service, slack, codex, store };
 }
@@ -1404,6 +1407,7 @@ describe("service lifecycle decisions", () => {
     expect(store.getWorkstreamByRelativePath("T1", "ops")).toMatchObject({
       relativePath: "ops",
       channelName: "ops",
+      archivedAt: null,
     });
     await expect(fs.readFile(path.join(dir, "ops", "WORKSTREAM.md"), "utf8")).resolves.toContain("Slack surface: #ops");
     await expect(fs.readFile(path.join(dir, "ops", "AGENTS.md"), "utf8")).resolves.toContain("WORKSTREAM.md");
@@ -1437,6 +1441,331 @@ describe("service lifecycle decisions", () => {
     expect(slack.createPublicChannel).toHaveBeenCalledWith("T1", "research");
     expect(store.getWorkstreamByRelativePath("T1", "research")).toMatchObject({ relativePath: "research" });
     expect(slack.postTopLevelMessage).toHaveBeenCalledWith("D1", expect.stringContaining("Created workstream research."));
+    store.close();
+  });
+
+  it("archives a workstream from the admin DM command and removes it from active routing", async () => {
+    const { dir, service, slack, store } = await createService();
+    const session = createDmSession(service, { appThreadId: "dm-thread-1" });
+
+    await service.handleDmCommand(session, "workstream-create", ["ops", "parent=root", "Handles", "ops"]);
+    store.upsertRegistration({
+      id: "reg-ops-1",
+      teamId: "T1",
+      workstreamId: "T1:ops",
+      workerKey: null,
+      ownerUserId: "U1",
+      rootOwnerUserId: "U1",
+      description: "ops webhook",
+      enabled: true,
+      target: { kind: "workstream", workstreamId: "T1:ops", workerKey: null },
+      action: { kind: "spawn" },
+      trigger: { kind: "webhook", source: "ops", events: ["ready"], match: null },
+    });
+    store.createPendingWake({
+      id: "wake-ops-queued",
+      teamId: "T1",
+      registrationId: "reg-ops-1",
+      workstreamId: "T1:ops",
+      workerKey: null,
+      status: "queued",
+      summary: "ops wake",
+      payloadPath: null,
+      firedEvent: null,
+      dueAt: null,
+      attempts: 0,
+      nextAttemptAt: null,
+      lastError: null,
+    });
+    store.createPendingWake({
+      id: "wake-ops-delivered",
+      teamId: "T1",
+      registrationId: "reg-ops-1",
+      workstreamId: "T1:ops",
+      workerKey: null,
+      status: "delivered",
+      summary: "old wake",
+      payloadPath: null,
+      firedEvent: null,
+      dueAt: null,
+      attempts: 0,
+      nextAttemptAt: null,
+      lastError: null,
+    });
+    store.createPendingWake({
+      id: "wake-ops-failed-retry",
+      teamId: "T1",
+      registrationId: "reg-ops-1",
+      workstreamId: "T1:ops",
+      workerKey: null,
+      status: "failed",
+      summary: "retry wake",
+      payloadPath: null,
+      firedEvent: null,
+      dueAt: null,
+      attempts: 1,
+      nextAttemptAt: "2026-03-19T00:00:00.000Z",
+      lastError: "temporary",
+    });
+
+    const result = await service.handleDmCommand(session, "workstream-archive", ["ops"]);
+
+    expect(result.response).toContain("Archived workstream ops.");
+    expect(slack.archivePublicChannel).toHaveBeenCalledWith("C-ops");
+    expect(store.getRegistration("reg-ops-1")).toMatchObject({ enabled: false });
+    expect(store.getPendingWake("wake-ops-queued")).toMatchObject({
+      status: "quarantined",
+      lastError: "workstream archived",
+    });
+    expect(store.getPendingWake("wake-ops-failed-retry")).toMatchObject({
+      status: "quarantined",
+      lastError: "workstream archived",
+    });
+    expect(store.getPendingWake("wake-ops-delivered")).toMatchObject({ status: "delivered" });
+    expect(store.getWorkstreamByRelativePath("T1", "ops")).toBeNull();
+    expect(store.getWorkstreamById("T1:ops", { includeArchived: true })).toMatchObject({
+      archivedAt: expect.any(String),
+    });
+    const archivedRegistrations = await service.handleAdminListRegistrationsTool(
+      { workstream: "ops" },
+      { threadId: "dm-thread-1", turnId: "turn-1", callId: "call-1" },
+    );
+    const archivedWakes = await service.handleAdminListWakeDeliveriesTool(
+      { workstream: "ops" },
+      { threadId: "dm-thread-1", turnId: "turn-1", callId: "call-1" },
+    );
+    expect(archivedRegistrations).toContain("reg-ops-1");
+    expect(archivedWakes).toContain("wake-ops-queued");
+    await expect(fs.access(path.join(dir, "ops", "WORKSTREAM.md"))).resolves.toBeUndefined();
+    store.close();
+  });
+
+  it("refuses to archive root or a workstream with active children", async () => {
+    const { service, store } = await createService();
+    const session = createDmSession(service, { appThreadId: "dm-thread-1" });
+    store.upsertWorkstream({
+      id: "T1:ops",
+      teamId: "T1",
+      parentId: "T1:root",
+      slug: "ops",
+      relativePath: "ops",
+      channelId: "C-ops",
+      channelName: "ops",
+      description: "ops",
+      archivedAt: null,
+    });
+    store.upsertWorkstream({
+      id: "T1:ops/child",
+      teamId: "T1",
+      parentId: "T1:ops",
+      slug: "child",
+      relativePath: "ops/child",
+      channelId: "C-child",
+      channelName: "child",
+      description: "child",
+      archivedAt: null,
+    });
+
+    const rootResult = await service.handleDmCommand(session, "workstream-archive", ["root"]);
+    const childResult = await service.handleDmCommand(session, "workstream-archive", ["ops"]);
+
+    expect(rootResult.response).toContain("Root workstream cannot be archived.");
+    expect(childResult.response).toContain("child workstreams exist");
+    store.close();
+  });
+
+  it("refuses to archive a workstream with active workers or non-failed pending shells", async () => {
+    const { service, store } = await createService();
+    const session = createDmSession(service, { appThreadId: "dm-thread-1" });
+    store.upsertWorkstream({
+      id: "T1:ops",
+      teamId: "T1",
+      parentId: "T1:root",
+      slug: "ops",
+      relativePath: "ops",
+      channelId: "C-ops",
+      channelName: "ops",
+      description: "ops",
+      archivedAt: null,
+    });
+    createWorker(service, {
+      key: "T1:C-ops:2.000",
+      channelId: "C-ops",
+      rootTs: "2.000",
+      workstreamId: "T1:ops",
+      appThreadId: "thread-ops",
+      status: "running",
+    });
+
+    const workerBlocked = await service.handleDmCommand(session, "workstream-archive", ["ops"]);
+    expect(workerBlocked.response).toContain("active or blocked");
+
+    store.updateWorkerState("T1:C-ops:2.000", { status: "idle", activeTurnId: null });
+    store.upsertPendingWorkerShell({
+      id: "shell-1",
+      teamId: "T1",
+      workstreamId: "T1:ops",
+      channelId: "C-ops",
+      rootTs: null,
+      title: "pending",
+      requestItemId: null,
+      requestItemPath: null,
+      ownerUserId: "U1",
+      rootOwnerUserId: "U1",
+      settings: { model: null, effort: null },
+      identity: null,
+      parentWorkerKey: null,
+      source: { sourceKind: "manual", sourceSummary: "pending shell" },
+      status: "pending",
+      appThreadId: null,
+      lastError: null,
+    });
+
+    const shellBlocked = await service.handleDmCommand(session, "workstream-archive", ["ops"]);
+    expect(shellBlocked.response).toContain("worker creation is still pending");
+
+    store.deletePendingWorkerShell("shell-1");
+    store.upsertPendingWorkerShell({
+      id: "shell-failed",
+      teamId: "T1",
+      workstreamId: "T1:ops",
+      channelId: "C-ops",
+      rootTs: null,
+      title: "failed shell",
+      requestItemId: null,
+      requestItemPath: null,
+      ownerUserId: "U1",
+      rootOwnerUserId: "U1",
+      settings: { model: null, effort: null },
+      identity: null,
+      parentWorkerKey: null,
+      source: { sourceKind: "manual", sourceSummary: "failed shell" },
+      status: "failed",
+      appThreadId: null,
+      lastError: "boom",
+    });
+    store.deletePendingWorkerShell("shell-1");
+    const afterFailedShell = await service.handleDmCommand(session, "workstream-archive", ["ops"]);
+    expect(afterFailedShell.response).toContain("Archived workstream ops.");
+    store.close();
+  });
+
+  it("keeps local automation state unchanged if Slack archive fails", async () => {
+    const { service, slack, store } = await createService();
+    const session = createDmSession(service, { appThreadId: "dm-thread-1" });
+    store.upsertWorkstream({
+      id: "T1:ops",
+      teamId: "T1",
+      parentId: "T1:root",
+      slug: "ops",
+      relativePath: "ops",
+      channelId: "C-ops",
+      channelName: "ops",
+      description: "ops",
+      archivedAt: null,
+    });
+    store.upsertRegistration({
+      id: "reg-ops-1",
+      teamId: "T1",
+      workstreamId: "T1:ops",
+      workerKey: null,
+      ownerUserId: "U1",
+      rootOwnerUserId: "U1",
+      description: "ops webhook",
+      enabled: true,
+      target: { kind: "workstream", workstreamId: "T1:ops", workerKey: null },
+      action: { kind: "spawn" },
+      trigger: { kind: "webhook", source: "ops", events: ["ready"], match: null },
+    });
+    store.createPendingWake({
+      id: "wake-ops-queued",
+      teamId: "T1",
+      registrationId: "reg-ops-1",
+      workstreamId: "T1:ops",
+      workerKey: null,
+      status: "queued",
+      summary: "ops wake",
+      payloadPath: null,
+      firedEvent: null,
+      dueAt: null,
+      attempts: 0,
+      nextAttemptAt: null,
+      lastError: null,
+    });
+    slack.archivePublicChannel.mockRejectedValueOnce(new Error("archive denied"));
+
+    const result = await service.handleDmCommand(session, "workstream-archive", ["ops"]);
+
+    expect(result.response).toContain("Workstream archive failed for ops: archive denied");
+    expect(store.getRegistration("reg-ops-1")).toMatchObject({ enabled: true });
+    expect(store.getPendingWake("wake-ops-queued")).toMatchObject({
+      status: "queued",
+      lastError: null,
+    });
+    expect(store.getWorkstreamByRelativePath("T1", "ops")).toMatchObject({ relativePath: "ops" });
+    expect(store.getWorkstreamById("T1:ops", { includeArchived: true })).toMatchObject({ archivedAt: null });
+    store.close();
+  });
+
+  it("marks the workstream archived even if post-archive local cleanup fails", async () => {
+    const { service, slack, store } = await createService();
+    const session = createDmSession(service, { appThreadId: "dm-thread-1" });
+    store.upsertWorkstream({
+      id: "T1:ops",
+      teamId: "T1",
+      parentId: "T1:root",
+      slug: "ops",
+      relativePath: "ops",
+      channelId: "C-ops",
+      channelName: "ops",
+      description: "ops",
+      archivedAt: null,
+    });
+    store.upsertRegistration({
+      id: "reg-ops-1",
+      teamId: "T1",
+      workstreamId: "T1:ops",
+      workerKey: null,
+      ownerUserId: "U1",
+      rootOwnerUserId: "U1",
+      description: "ops webhook",
+      enabled: true,
+      target: { kind: "workstream", workstreamId: "T1:ops", workerKey: null },
+      action: { kind: "spawn" },
+      trigger: { kind: "webhook", source: "ops", events: ["ready"], match: null },
+    });
+    slack.archivePublicChannel.mockResolvedValueOnce(undefined);
+    vi.spyOn(service.registrations, "disableRegistrationById").mockRejectedValueOnce(new Error("projection write failed"));
+
+    const result = await service.handleDmCommand(session, "workstream-archive", ["ops"]);
+
+    expect(result.response).toContain("Slack channel for ops was archived, but local cleanup failed: projection write failed");
+    expect(store.getWorkstreamByRelativePath("T1", "ops")).toBeNull();
+    expect(store.getWorkstreamById("T1:ops", { includeArchived: true })).toMatchObject({
+      archivedAt: expect.any(String),
+    });
+    expect(store.getRegistration("reg-ops-1")).toMatchObject({ enabled: true });
+    store.close();
+  });
+
+  it("reports when a workstream is already archived", async () => {
+    const { service, store } = await createService();
+    const session = createDmSession(service, { appThreadId: "dm-thread-1" });
+    store.upsertWorkstream({
+      id: "T1:ops",
+      teamId: "T1",
+      parentId: "T1:root",
+      slug: "ops",
+      relativePath: "ops",
+      channelId: "C-ops",
+      channelName: "ops",
+      description: "ops",
+      archivedAt: "2026-03-18T12:00:00.000Z",
+    });
+
+    const result = await service.handleDmCommand(session, "workstream-archive", ["ops"]);
+
+    expect(result.response).toContain("Workstream ops is already archived.");
     store.close();
   });
 
@@ -1646,6 +1975,7 @@ describe("service lifecycle decisions", () => {
       channelId: "C-ops",
       channelName: "ops-debug",
       description: "ops",
+      archivedAt: null,
     });
     store.upsertRegistration({
       id: "reg-admin-1",
@@ -1748,6 +2078,7 @@ describe("service lifecycle decisions", () => {
       channelId: "C-ops",
       channelName: "ops-debug",
       description: "ops",
+      archivedAt: null,
     });
     store.upsertRegistration({
       id: "reg-admin-1",

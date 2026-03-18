@@ -65,6 +65,7 @@ export class WorkstreamManager {
       channelId: channel.channelId,
       channelName: channel.name,
       description: current?.description ?? "Top-level generalist workstream.",
+      archivedAt: null,
     });
     this.store.upsertChannels([channel]);
     return record;
@@ -130,6 +131,7 @@ export class WorkstreamManager {
         channelId: channel.channelId,
         channelName: channel.name,
         description: input.description ?? null,
+        archivedAt: null,
       });
       this.store.upsertChannels([channel]);
       return record;

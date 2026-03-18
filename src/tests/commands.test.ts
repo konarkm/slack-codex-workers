@@ -21,6 +21,11 @@ describe("commands", () => {
       args: [],
       raw: ".new-thread",
     });
+    expect(parseSlashCommand(".workstream-archive ops")).toEqual({
+      name: "workstream-archive",
+      args: ["ops"],
+      raw: ".workstream-archive ops",
+    });
     expect(parseSlashCommand("/new-thread")).toEqual({
       name: "new-thread",
       args: [],
@@ -54,6 +59,7 @@ describe("commands", () => {
     expect(helpText("dm")).toContain(".recover");
     expect(helpText("dm")).toContain(".stop");
     expect(helpText("dm")).toContain(".workstream-create");
+    expect(helpText("dm")).toContain(".workstream-archive");
     expect(helpText("dm")).toContain("slash commands may open Slack's built-in command UI first");
     expect(helpText("dm")).toContain("missing or blocked");
   });
@@ -64,6 +70,7 @@ describe("commands", () => {
     expect(helpText("thread")).toContain(".recover");
     expect(helpText("thread")).toContain(".stop");
     expect(helpText("thread")).toContain(".workstream-create");
+    expect(helpText("thread")).not.toContain(".workstream-archive");
     expect(helpText("thread")).not.toContain(".restart");
     expect(helpText("thread")).not.toContain(".new-thread");
     expect(helpText("thread")).toContain("missing or blocked");

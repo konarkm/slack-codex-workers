@@ -18,6 +18,10 @@ interface ConversationsOpenResponse {
   channel?: { id?: string };
 }
 
+interface ConversationsArchiveResponse {
+  ok?: boolean;
+}
+
 interface PostMessageResponse {
   ok?: boolean;
   ts?: string;
@@ -258,6 +262,16 @@ export class SlackGateway {
       throw new Error(`Slack did not return a DM channel id for ${userId}`);
     }
     return channelId;
+  }
+
+  async archivePublicChannel(channelId: string): Promise<void> {
+    const response = await this.app.client.conversations.archive({
+      token: this.config.slackBotToken,
+      channel: channelId,
+    }) as ConversationsArchiveResponse;
+    if (response.ok === false) {
+      throw new Error(`Slack failed to archive channel ${channelId}`);
+    }
   }
 
   private async listPublicChannels(

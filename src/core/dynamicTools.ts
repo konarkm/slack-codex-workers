@@ -20,6 +20,7 @@ export const slackAdminDisableRegistrationToolName = "disable_registration_admin
 export const slackAdminListRegistrationsToolName = "list_registrations_admin";
 export const slackAdminGetRegistrationToolName = "get_registration_admin";
 export const slackAdminListWakeDeliveriesToolName = "list_wake_deliveries_admin";
+export const slackAdminArchiveWorkstreamToolName = "archive_workstream_admin";
 
 export const workerDynamicTools = [
   {
@@ -272,6 +273,19 @@ export const adminDynamicTools = [
     },
   },
   {
+    name: slackAdminArchiveWorkstreamToolName,
+    description:
+      "Primary admin tool for retiring a child workstream from the admin DM. Archive the Slack channel, disable that workstream's registrations, quarantine queued or retryable wakes, and remove it from live routing while keeping the local scaffold on disk.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["workstream"],
+      properties: {
+        workstream: { type: "string", minLength: 1 },
+      },
+    },
+  },
+  {
     name: slackRotateWebhookSecretToolName,
     description:
       "Rotate the shared webhook mailbox secret for the entire bridge. This moves the previous current secret into fallback position and returns the updated mailbox bundle. Use this only in the admin DM when rotating external webhook credentials intentionally.",
@@ -366,6 +380,10 @@ export const slackAdminListWakeDeliveriesArgsSchema = z.object({
   registrationId: z.string().min(1).optional(),
 });
 
+export const slackAdminArchiveWorkstreamArgsSchema = z.object({
+  workstream: z.string().trim().min(1),
+});
+
 export const workerDeveloperInstructions = [
   "You are operating inside Slack as one worker in a shared-bot system.",
   "Incoming human messages are prefixed with the Slack speaker name, for example 'alice: can you check this'. Treat that prefix as authoritative speaker identity.",
@@ -393,6 +411,7 @@ export const adminDeveloperInstructions = [
   "Use get_webhook_mailbox to inspect the current shared webhook mailbox endpoint and secret, and use rotate_webhook_secret when the human intentionally wants to rotate that organization-wide secret.",
   "Prefer admin-specific tools before shell exploration for operational tasks in the admin DM.",
   "For registration inspection and cleanup, use list_registrations_admin, get_registration_admin, disable_registration_admin, and list_wake_deliveries_admin first. These tools accept explicit workstream or registration filters instead of using current worker-thread scope.",
+  "Use archive_workstream_admin when the human wants to retire a child workstream from the admin DM. This is the admin path for archiving a workstream, not a worker-thread operation.",
   "Only fall back to shell or file inspection when the admin tools are insufficient for the task.",
   "Use slack_upload_files when you need to share one or more existing local files into this admin DM conversation.",
   "Use concise operational language suitable for an admin/operator chat.",

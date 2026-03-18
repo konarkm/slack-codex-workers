@@ -13,7 +13,8 @@ export type CommandName =
   | "new-thread"
   | "recover"
   | "stop"
-  | "workstream-create";
+  | "workstream-create"
+  | "workstream-archive";
 
 export interface ParsedCommand {
   name: CommandName;
@@ -35,6 +36,7 @@ const COMMANDS = new Set<CommandName>([
   "recover",
   "stop",
   "workstream-create",
+  "workstream-archive",
 ]);
 
 export function parseSlashCommand(input: string): ParsedCommand | null {
@@ -67,6 +69,7 @@ export function helpText(scope: "dm" | "thread"): string {
     lines.push(".stop - request interruption of the active DM admin turn");
     lines.push(".recover - recover this DM only when the backing Codex thread is missing or blocked");
     lines.push(".workstream-create <slug> [parent=<path>] [description...] - create a new workstream channel and scaffold");
+    lines.push(".workstream-archive <path> - archive a child workstream, disable its automation, and remove it from live routing");
     return lines.join("\n");
   }
   lines.push(".help - show thread command help");

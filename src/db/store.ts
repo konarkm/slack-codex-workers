@@ -232,6 +232,7 @@ export class Store {
         channel_id TEXT NOT NULL,
         channel_name TEXT NOT NULL,
         description TEXT,
+        archived_at TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         UNIQUE(team_id, relative_path),
@@ -381,6 +382,7 @@ export class Store {
     this.ensureColumn("workers", "request_item_id", "TEXT");
     this.ensureColumn("workers", "request_item_path", "TEXT");
     this.ensureColumn("workers", "terminal_response_item_id", "TEXT");
+    this.ensureColumn("workstreams", "archived_at", "TEXT");
     this.ensureColumn("registrations", "owner_user_id", "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn("registrations", "root_owner_user_id", "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn("pending_wakes", "attempts", "INTEGER NOT NULL DEFAULT 0");
@@ -717,34 +719,49 @@ export class Store {
     return rows.map((row) => this.toChannel(row));
   }
 
-  getWorkstreamById(id: string): WorkstreamRecord | null {
-    const row = this.db.prepare("SELECT * FROM workstreams WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+  getWorkstreamById(id: string, options: { includeArchived?: boolean } = {}): WorkstreamRecord | null {
+    const row = options.includeArchived
+      ? this.db.prepare("SELECT * FROM workstreams WHERE id = ?").get(id) as Record<string, unknown> | undefined
+      : this.db.prepare("SELECT * FROM workstreams WHERE id = ? AND archived_at IS NULL").get(id) as Record<string, unknown> | undefined;
     return row ? this.toWorkstream(row) : null;
   }
 
-  getWorkstreamByChannel(teamId: string, channelId: string): WorkstreamRecord | null {
-    const row = this.db.prepare("SELECT * FROM workstreams WHERE team_id = ? AND channel_id = ?").get(teamId, channelId) as Record<string, unknown> | undefined;
+  getWorkstreamByChannel(teamId: string, channelId: string, options: { includeArchived?: boolean } = {}): WorkstreamRecord | null {
+    const row = options.includeArchived
+      ? this.db.prepare("SELECT * FROM workstreams WHERE team_id = ? AND channel_id = ?").get(teamId, channelId) as Record<string, unknown> | undefined
+      : this.db.prepare("SELECT * FROM workstreams WHERE team_id = ? AND channel_id = ? AND archived_at IS NULL").get(teamId, channelId) as Record<string, unknown> | undefined;
     return row ? this.toWorkstream(row) : null;
   }
 
-  getWorkstreamByRelativePath(teamId: string, relativePath: string): WorkstreamRecord | null {
-    const row = this.db.prepare("SELECT * FROM workstreams WHERE team_id = ? AND relative_path = ?").get(teamId, relativePath) as Record<string, unknown> | undefined;
+  getWorkstreamByRelativePath(teamId: string, relativePath: string, options: { includeArchived?: boolean } = {}): WorkstreamRecord | null {
+    const row = options.includeArchived
+      ? this.db.prepare("SELECT * FROM workstreams WHERE team_id = ? AND relative_path = ?").get(teamId, relativePath) as Record<string, unknown> | undefined
+      : this.db.prepare("SELECT * FROM workstreams WHERE team_id = ? AND relative_path = ? AND archived_at IS NULL").get(teamId, relativePath) as Record<string, unknown> | undefined;
     return row ? this.toWorkstream(row) : null;
   }
 
-  listWorkstreams(teamId: string): WorkstreamRecord[] {
-    const rows = this.db.prepare("SELECT * FROM workstreams WHERE team_id = ? ORDER BY relative_path ASC").all(teamId) as Record<string, unknown>[];
+  listWorkstreams(teamId: string, options: { includeArchived?: boolean } = {}): WorkstreamRecord[] {
+    const rows = options.includeArchived
+      ? this.db.prepare("SELECT * FROM workstreams WHERE team_id = ? ORDER BY relative_path ASC").all(teamId) as Record<string, unknown>[]
+      : this.db.prepare("SELECT * FROM workstreams WHERE team_id = ? AND archived_at IS NULL ORDER BY relative_path ASC").all(teamId) as Record<string, unknown>[];
+    return rows.map((row) => this.toWorkstream(row));
+  }
+
+  listChildWorkstreams(parentId: string, options: { includeArchived?: boolean } = {}): WorkstreamRecord[] {
+    const rows = options.includeArchived
+      ? this.db.prepare("SELECT * FROM workstreams WHERE parent_id = ? ORDER BY relative_path ASC").all(parentId) as Record<string, unknown>[]
+      : this.db.prepare("SELECT * FROM workstreams WHERE parent_id = ? AND archived_at IS NULL ORDER BY relative_path ASC").all(parentId) as Record<string, unknown>[];
     return rows.map((row) => this.toWorkstream(row));
   }
 
   upsertWorkstream(input: Omit<WorkstreamRecord, "createdAt" | "updatedAt"> & { createdAt?: string; updatedAt?: string }): WorkstreamRecord {
-    const current = this.getWorkstreamById(input.id);
+    const current = this.getWorkstreamById(input.id, { includeArchived: true });
     const createdAt = current?.createdAt ?? input.createdAt ?? nowIso();
     const updatedAt = input.updatedAt ?? nowIso();
     this.db.prepare(`
       INSERT INTO workstreams (
-        id, team_id, parent_id, slug, relative_path, channel_id, channel_name, description, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        id, team_id, parent_id, slug, relative_path, channel_id, channel_name, description, archived_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         parent_id=excluded.parent_id,
         slug=excluded.slug,
@@ -752,6 +769,7 @@ export class Store {
         channel_id=excluded.channel_id,
         channel_name=excluded.channel_name,
         description=excluded.description,
+        archived_at=excluded.archived_at,
         updated_at=excluded.updated_at
     `).run(
       input.id,
@@ -762,10 +780,27 @@ export class Store {
       input.channelId,
       input.channelName,
       input.description,
+      input.archivedAt,
       createdAt,
       updatedAt,
     );
-    return this.getWorkstreamById(input.id)!;
+    return this.getWorkstreamById(input.id, { includeArchived: true })!;
+  }
+
+  archiveWorkstream(id: string, archivedAt = nowIso()): WorkstreamRecord | null {
+    const current = this.getWorkstreamById(id, { includeArchived: true });
+    if (!current) return null;
+    this.db.prepare(`
+      UPDATE workstreams
+      SET archived_at = ?, updated_at = ?
+      WHERE id = ?
+    `).run(archivedAt, archivedAt, id);
+    return this.getWorkstreamById(id, { includeArchived: true });
+  }
+
+  listWorkersForWorkstream(workstreamId: string): WorkerRecord[] {
+    const rows = this.db.prepare("SELECT * FROM workers WHERE workstream_id = ? ORDER BY created_at ASC").all(workstreamId) as Record<string, unknown>[];
+    return rows.map((row) => this.toWorker(row));
   }
 
   getRegistration(id: string): RegistrationRecord | null {
@@ -1056,6 +1091,15 @@ export class Store {
     return row ? this.toPendingWorkerShell(row) : null;
   }
 
+  listPendingWorkerShellsForWorkstream(workstreamId: string): PendingWorkerShellRecord[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM pending_worker_shells
+      WHERE workstream_id = ?
+      ORDER BY created_at ASC
+    `).all(workstreamId) as Record<string, unknown>[];
+    return rows.map((row) => this.toPendingWorkerShell(row));
+  }
+
   upsertPendingWorkerShell(
     input: Omit<PendingWorkerShellRecord, "createdAt" | "updatedAt"> & { createdAt?: string; updatedAt?: string },
   ): PendingWorkerShellRecord {
@@ -1313,6 +1357,7 @@ export class Store {
       channelId: String(row.channel_id),
       channelName: String(row.channel_name),
       description: row.description ? String(row.description) : null,
+      archivedAt: row.archived_at ? String(row.archived_at) : null,
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
     };

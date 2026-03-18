@@ -150,6 +150,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       adminGetRegistration: async (args, ctx) => this.handleAdminGetRegistrationTool(args, ctx),
       adminDisableRegistration: async (args, ctx) => this.handleAdminDisableRegistrationTool(args, ctx),
       adminListWakeDeliveries: async (args, ctx) => this.handleAdminListWakeDeliveriesTool(args, ctx),
+      adminArchiveWorkstream: async (args, ctx) => this.handleAdminArchiveWorkstreamTool(args, ctx),
     });
     this.codex.registerInteractiveRequestHandler(async (request) => this.handleInteractiveRequest(request));
     this.codex.registerCompactionHandler(async (event) => this.handleCompactionEvent(event));
@@ -1489,6 +1490,9 @@ export class SlackCodexWorkersService extends EventEmitter {
     if (name === "workstream-create") {
       return { response: await this.createWorkstreamFromDmArgs(session, args) };
     }
+    if (name === "workstream-archive") {
+      return { response: await this.archiveWorkstreamFromDmArgs(session, args) };
+    }
     return { response: "Unknown command. Use /help" };
   }
 
@@ -1914,7 +1918,7 @@ export class SlackCodexWorkersService extends EventEmitter {
     ctx: DynamicToolHandlerContext,
   ): Promise<string> {
     const session = this.requireAdminDmContext(ctx);
-    const workstream = this.resolveAdminWorkstreamFilter(session.teamId, args.workstream);
+    const workstream = this.resolveAdminWorkstreamFilter(session.teamId, args.workstream, { includeArchived: true });
     const registrations = workstream
       ? this.store.listRegistrationsForWorkstream(workstream.id)
       : this.store.listRegistrationsForTeam(session.teamId);
@@ -1950,7 +1954,7 @@ export class SlackCodexWorkersService extends EventEmitter {
     ctx: DynamicToolHandlerContext,
   ): Promise<string> {
     const session = this.requireAdminDmContext(ctx);
-    const workstream = this.resolveAdminWorkstreamFilter(session.teamId, args.workstream);
+    const workstream = this.resolveAdminWorkstreamFilter(session.teamId, args.workstream, { includeArchived: true });
     let wakes = this.store.listPendingWakesForTeam(session.teamId);
     if (workstream) {
       wakes = wakes.filter((wake) => wake.workstreamId === workstream.id);
@@ -1963,6 +1967,14 @@ export class SlackCodexWorkersService extends EventEmitter {
       return "No wake deliveries matched the requested admin scope.";
     }
     return wakes.map((wake) => this.formatAdminWakeLine(wake)).join("\n");
+  }
+
+  private async handleAdminArchiveWorkstreamTool(
+    args: { workstream: string },
+    ctx: DynamicToolHandlerContext,
+  ): Promise<string> {
+    const session = this.requireAdminDmContext(ctx);
+    return this.archiveWorkstreamForAdmin(session, args.workstream);
   }
 
   private requireRegistrationContext(ctx: DynamicToolHandlerContext): RegistrationContext {
@@ -2377,6 +2389,14 @@ export class SlackCodexWorkersService extends EventEmitter {
     });
   }
 
+  private async archiveWorkstreamFromDmArgs(session: DmSessionRecord, args: string[]): Promise<string> {
+    const workstreamPath = args.join(" ").trim();
+    if (!workstreamPath) {
+      return "Usage: .workstream-archive <path> (or /workstream-archive ...)";
+    }
+    return this.archiveWorkstreamForAdmin(session, workstreamPath);
+  }
+
   private async createWorkstreamForContext(input: {
     teamId: string;
     defaultParentRelativePath: string | null;
@@ -2423,6 +2443,82 @@ export class SlackCodexWorkersService extends EventEmitter {
       );
       return message;
     }
+  }
+
+  private async archiveWorkstreamForAdmin(session: DmSessionRecord, relativePath: string): Promise<string> {
+    const workstream = this.resolveAdminWorkstreamFilter(session.teamId, relativePath, { includeArchived: true });
+    if (!workstream) {
+      throw new Error(`Workstream not found: ${relativePath.trim()}`);
+    }
+    if (workstream.archivedAt) {
+      return `Workstream ${formatWorkstreamAddress(workstream)} is already archived.`;
+    }
+    if (!workstream.relativePath) {
+      return "Root workstream cannot be archived.";
+    }
+
+    const activeChildren = this.store.listChildWorkstreams(workstream.id);
+    if (activeChildren.length > 0) {
+      return `Cannot archive ${formatWorkstreamAddress(workstream)} while child workstreams exist: ${activeChildren.map((child) => formatWorkstreamAddress(child)).join(", ")}`;
+    }
+
+    const blockingWorkers = this.store
+      .listWorkersForWorkstream(workstream.id)
+      .filter((worker) => worker.activeTurnId || worker.pendingRequest || isBlockingArchiveWorkerStatus(worker.status));
+    if (blockingWorkers.length > 0) {
+      return `Cannot archive ${formatWorkstreamAddress(workstream)} while worker threads are active or blocked.`;
+    }
+
+    const pendingShells = this.store
+      .listPendingWorkerShellsForWorkstream(workstream.id)
+      .filter((shell) => shell.status !== "failed");
+    if (pendingShells.length > 0) {
+      return `Cannot archive ${formatWorkstreamAddress(workstream)} while worker creation is still pending.`;
+    }
+
+    try {
+      await this.slack.archivePublicChannel(workstream.channelId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return `Workstream archive failed for ${formatWorkstreamAddress(workstream)}: ${message}`;
+    }
+
+    let registrationCount = 0;
+    let wakeCount = 0;
+    let archivedAt = "(unknown)";
+    try {
+      const archived = this.store.archiveWorkstream(workstream.id);
+      archivedAt = archived?.archivedAt ?? "(unknown)";
+      const registrations = this.store.listRegistrationsForWorkstream(workstream.id);
+      registrationCount = registrations.length;
+      for (const registration of registrations) {
+        await this.registrations.disableRegistrationById(registration.id);
+      }
+
+      const wakes = this.store.listPendingWakesForTeam(session.teamId)
+        .filter((wake) => wake.workstreamId === workstream.id && isArchiveQuarantinableWake(wake));
+      wakeCount = wakes.length;
+      for (const wake of wakes) {
+        this.store.updatePendingWake(wake.id, {
+          status: "quarantined",
+          nextAttemptAt: null,
+          lastError: "workstream archived",
+          summary: `${stripWakeStatusSuffix(wake.summary)} (quarantined: workstream archived)`,
+        });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return `Slack channel for ${formatWorkstreamAddress(workstream)} was archived, but local cleanup failed: ${message}`;
+    }
+
+    return [
+      `Archived workstream ${formatWorkstreamAddress(workstream)}.`,
+      `channel: #${workstream.channelName}`,
+      `registrations_disabled: ${registrationCount}`,
+      `wakes_quarantined: ${wakeCount}`,
+      `local_scaffold: kept`,
+      `archived_at: ${archivedAt}`,
+    ].join("\n");
   }
 
   private async notifyAdminControlSurface(teamId: string, message: string, excludeChannelId: string | null = null): Promise<void> {
@@ -3179,7 +3275,11 @@ export class SlackCodexWorkersService extends EventEmitter {
     return this.ensureWebhookMailboxInitialized();
   }
 
-  private resolveAdminWorkstreamFilter(teamId: string, relativePath?: string | undefined): WorkstreamRecord | null {
+  private resolveAdminWorkstreamFilter(
+    teamId: string,
+    relativePath?: string | undefined,
+    options: { includeArchived?: boolean } = {},
+  ): WorkstreamRecord | null {
     if (relativePath === undefined) return null;
     const trimmed = relativePath.trim();
     if (!trimmed) {
@@ -3187,7 +3287,7 @@ export class SlackCodexWorkersService extends EventEmitter {
     }
     const normalizedPath = trimmed.replace(/^\/+|\/+$/g, "");
     const normalized = normalizedPath === "root" ? "" : normalizedPath;
-    const workstream = this.store.getWorkstreamByRelativePath(teamId, normalized);
+    const workstream = this.store.getWorkstreamByRelativePath(teamId, normalized, { includeArchived: options.includeArchived });
     if (!workstream) {
       throw new Error(`Workstream not found: ${trimmed}`);
     }
@@ -3203,7 +3303,7 @@ export class SlackCodexWorkersService extends EventEmitter {
   }
 
   private formatAdminRegistrationLine(registration: RegistrationRecord): string {
-    const workstream = this.store.getWorkstreamById(registration.workstreamId);
+    const workstream = this.store.getWorkstreamById(registration.workstreamId, { includeArchived: true });
     const scope = registration.workerKey ? `worker:${registration.workerKey}` : "workstream";
     return [
       `${registration.id}`,
@@ -3224,7 +3324,7 @@ export class SlackCodexWorkersService extends EventEmitter {
     workerKey: string | null;
     summary: string;
   }): string {
-    const workstream = this.store.getWorkstreamById(wake.workstreamId);
+    const workstream = this.store.getWorkstreamById(wake.workstreamId, { includeArchived: true });
     return [
       `${wake.id}`,
       `${wake.status}`,
@@ -3270,6 +3370,17 @@ function isManuallyBlockedStatus(status: SessionStatus): boolean {
 
 function isUnavailableForCompact(status: SessionStatus): boolean {
   return status === "recovery_required" || status === "blocked_running_turn";
+}
+
+function isBlockingArchiveWorkerStatus(status: SessionStatus): boolean {
+  return status === "running"
+    || status === "blocked_input"
+    || status === "blocked_running_turn"
+    || status === "recovery_required";
+}
+
+function isArchiveQuarantinableWake(wake: { status: string; nextAttemptAt: string | null }): boolean {
+  return wake.status === "queued" || (wake.status === "failed" && wake.nextAttemptAt !== null);
 }
 
 function normalizeTurnStatus(status: string): SessionStatus {

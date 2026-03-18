@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  slackAdminArchiveWorkstreamArgsSchema,
+  slackAdminArchiveWorkstreamToolName,
   slackAdminDisableRegistrationToolName,
   slackAdminGetRegistrationToolName,
   slackAdminListRegistrationsArgsSchema,
@@ -116,10 +118,12 @@ describe("dynamic tools", () => {
     expect(workerNames).not.toContain(slackAdminGetRegistrationToolName);
     expect(workerNames).not.toContain(slackAdminDisableRegistrationToolName);
     expect(workerNames).not.toContain(slackAdminListWakeDeliveriesToolName);
+    expect(workerNames).not.toContain(slackAdminArchiveWorkstreamToolName);
     expect(adminNames).toContain(slackAdminListRegistrationsToolName);
     expect(adminNames).toContain(slackAdminGetRegistrationToolName);
     expect(adminNames).toContain(slackAdminDisableRegistrationToolName);
     expect(adminNames).toContain(slackAdminListWakeDeliveriesToolName);
+    expect(adminNames).toContain(slackAdminArchiveWorkstreamToolName);
   });
 
   it("parses optional admin registration filters", () => {
@@ -134,5 +138,13 @@ describe("dynamic tools", () => {
     expect(() => slackAdminListRegistrationsArgsSchema.parse({
       workstream: "   ",
     })).toThrow();
+  });
+
+  it("parses admin workstream archive arguments", () => {
+    expect(slackAdminArchiveWorkstreamArgsSchema.parse({
+      workstream: "ops-debug",
+    })).toEqual({
+      workstream: "ops-debug",
+    });
   });
 });
