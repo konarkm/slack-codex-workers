@@ -139,6 +139,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       getCurrentTime: async (ctx) => this.handleGetCurrentTimeTool(ctx),
       getWebhookMailbox: async (ctx) => this.handleGetWebhookMailboxTool(ctx),
       rotateWebhookSecret: async (ctx) => this.handleRotateWebhookSecretTool(ctx),
+      setNotification: async (args, ctx) => this.handleSetNotificationTool(args, ctx),
       setHeartbeat: async (args, ctx) => this.handleSetHeartbeatTool(args, ctx),
       setCron: async (args, ctx) => this.handleSetCronTool(args, ctx),
       setWebhook: async (args, ctx) => this.handleSetWebhookTool(args, ctx),
@@ -856,6 +857,8 @@ export class SlackCodexWorkersService extends EventEmitter {
       requestItemId: shell.requestItemId,
       requestItemPath: shell.requestItemPath,
       terminalResponseItemId: null,
+      turnNotificationTurnId: null,
+      turnNotificationEnabled: false,
       lastError: null,
       lastInboundMessageTs: rootTs,
       pendingRequest: null,
@@ -942,6 +945,8 @@ export class SlackCodexWorkersService extends EventEmitter {
       } catch (error) {
         this.store.updateWorkerState(worker.key, {
           status: "idle",
+          turnNotificationTurnId: null,
+          turnNotificationEnabled: false,
           lastError: null,
         });
         throw error;
@@ -951,6 +956,8 @@ export class SlackCodexWorkersService extends EventEmitter {
       this.store.updateWorkerState(worker.key, {
         activeTurnId: turnId,
         status: "running",
+        turnNotificationTurnId: turnId,
+        turnNotificationEnabled: false,
         lastError: null,
         pendingRequest: null,
       });
@@ -1068,13 +1075,14 @@ export class SlackCodexWorkersService extends EventEmitter {
     let worker = this.ensureWorkerWorkstream(this.ensureWorkerIdentity(this.requireWorker(workerKey)));
     const state = this.getRenderState(`worker:${workerKey}`);
     const finalAssistantText = state.pendingAssistant?.text ?? assistantText;
+    const shouldNotify = this.shouldNotifyWorkerTurn(worker);
     if (status === "interrupted" && state.pendingAssistant) {
       await this.flushPendingWorkerAssistant(workerKey, false);
     }
     state.pendingAssistant = null;
 
     if (status === "completed") {
-      const finalText = renderFinalMessage(worker.rootOwnerUserId, finalAssistantText);
+      const finalText = renderFinalMessage(shouldNotify ? worker.rootOwnerUserId : null, finalAssistantText);
       await this.enqueueSlackWrite(this.getWorkerQueueKey(worker), async () => {
         await this.slack.postThreadReply(worker.channelId, worker.rootTs, finalText, worker.identity);
       });
@@ -1083,7 +1091,7 @@ export class SlackCodexWorkersService extends EventEmitter {
         await this.slack.postThreadReply(worker.channelId, worker.rootTs, renderSystemMessage("Turn interrupted."));
       });
     } else {
-      const finalText = renderFinalMessage(worker.rootOwnerUserId, `Turn ${status}.${error ? ` ${error}` : ""}`);
+      const finalText = renderFinalMessage(shouldNotify ? worker.rootOwnerUserId : null, `Turn ${status}.${error ? ` ${error}` : ""}`);
       await this.enqueueSlackWrite(this.getWorkerQueueKey(worker), async () => {
         await this.slack.postThreadReply(worker.channelId, worker.rootTs, finalText, worker.identity);
       });
@@ -1115,6 +1123,8 @@ export class SlackCodexWorkersService extends EventEmitter {
       currentAgentItemId: null,
       currentWorklogSlackTs: null,
       terminalResponseItemId: worker.terminalResponseItemId,
+      turnNotificationTurnId: null,
+      turnNotificationEnabled: false,
       pendingRequest: null,
       lastError: status === "interrupted" ? null : error ?? (status === "completed" ? null : `Turn ${status}`),
     });
@@ -1236,10 +1246,18 @@ export class SlackCodexWorkersService extends EventEmitter {
     const pending = state.pendingAssistant;
     if (!pending) return;
     state.pendingAssistant = null;
-    const text = final ? renderFinalMessage(worker.rootOwnerUserId, pending.text) : pending.text;
+    const text = final ? renderFinalMessage(this.shouldNotifyWorkerTurn(worker) ? worker.rootOwnerUserId : null, pending.text) : pending.text;
     await this.enqueueSlackWrite(this.getWorkerQueueKey(worker), async () => {
       await this.slack.postThreadReply(worker.channelId, worker.rootTs, text, worker.identity);
     });
+  }
+
+  private shouldNotifyWorkerTurn(worker: WorkerRecord): boolean {
+    return Boolean(
+      worker.activeTurnId
+      && worker.turnNotificationTurnId === worker.activeTurnId
+      && worker.turnNotificationEnabled,
+    );
   }
 
   private async flushPendingDmAssistant(teamId: string, userId: string, final: boolean): Promise<void> {
@@ -1812,6 +1830,34 @@ export class SlackCodexWorkersService extends EventEmitter {
   private async handleGetWebhookMailboxTool(_ctx: DynamicToolHandlerContext): Promise<string> {
     const mailbox = this.requireWebhookMailboxState();
     return formatWebhookMailboxInfo(this.config, mailbox);
+  }
+
+  private async handleSetNotificationTool(
+    args: { enabled: boolean },
+    ctx: DynamicToolHandlerContext,
+  ): Promise<string> {
+    const worker = this.store.getWorkerByAppThreadId(ctx.threadId);
+    if (!worker) {
+      throw new Error("Notification control requires a worker thread context.");
+    }
+    let isCurrentTurn = worker.activeTurnId === ctx.turnId;
+    if (!isCurrentTurn) {
+      const startingTurn = this.startingWorkerTurns.get(worker.key);
+      if (startingTurn) {
+        const startingTurnId = await startingTurn.catch(() => null);
+        isCurrentTurn = startingTurnId === ctx.turnId;
+      }
+    }
+    if (!isCurrentTurn) {
+      throw new Error("Notification control requires the current active worker turn.");
+    }
+    this.store.updateWorkerState(worker.key, {
+      turnNotificationTurnId: ctx.turnId,
+      turnNotificationEnabled: args.enabled,
+    });
+    return args.enabled
+      ? "Notifications enabled for this turn."
+      : "Notifications disabled for this turn.";
   }
 
   private async handleRotateWebhookSecretTool(ctx: DynamicToolHandlerContext): Promise<string> {

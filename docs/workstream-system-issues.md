@@ -184,10 +184,12 @@ Current implementation contract:
 - requests may provide an explicit `id`; otherwise the bridge derives a stable hash from the fully canonicalized parsed JSON body, including recursively sorted nested objects
 - raw payload envelopes are stored under the bridge-owned webhook payload directory grouped by `source` and UTC date
 
-Temporary product divergence:
+Current product direction:
 
-- scheduled cron/webhook-driven work still inherits the creating worker's owner/root-owner notification identity by default
-- this is intentional during dogfooding even though the long-term target model is explicit turn-scoped notification control
+- worker turns use explicit turn-scoped notification control through `set_notification(enabled: true|false)`
+- worker final replies stay visible in Slack even when notification is off; the notification control only gates whether the final reply mentions the user
+- worker turns default to no notification unless they opt in for that turn
+- scheduled cron/webhook/heartbeat work should therefore avoid notifying by default unless the worker explicitly decides to notify
 
 Still open:
 

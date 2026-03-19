@@ -14,6 +14,8 @@ import {
   slackRotateWebhookSecretToolName,
   slackCreateWorkstreamArgsSchema,
   slackSetCronArgsSchema,
+  slackSetNotificationArgsSchema,
+  slackSetNotificationToolName,
   slackSetWebhookArgsSchema,
   slackSpawnWorkerArgsSchema,
   workerDeveloperInstructions,
@@ -89,6 +91,21 @@ describe("dynamic tools", () => {
     expect(adminTool?.description).toContain("shared webhook mailbox");
   });
 
+  it("parses set_notification arguments", () => {
+    expect(slackSetNotificationArgsSchema.parse({
+      enabled: true,
+    })).toEqual({
+      enabled: true,
+    });
+  });
+
+  it("exposes notification control only on the worker surface", () => {
+    const workerTool = workerDynamicTools.find((entry) => entry.name === slackSetNotificationToolName);
+    const adminNames = adminDynamicTools.map((entry) => entry.name);
+    expect(workerTool?.description).toContain("current worker turn should notify the human");
+    expect(adminNames).not.toContain(slackSetNotificationToolName);
+  });
+
   it("exposes webhook secret rotation only on the admin surface", () => {
     expect(workerDynamicTools.map((entry) => entry.name)).not.toContain(slackRotateWebhookSecretToolName);
     expect(adminDynamicTools.map((entry) => entry.name)).toContain(slackRotateWebhookSecretToolName);
@@ -103,6 +120,8 @@ describe("dynamic tools", () => {
     expect(workerDeveloperInstructions).toContain("communicate like a strong operator or employee");
     expect(workerDeveloperInstructions).toContain("do not over-compress");
     expect(workerDeveloperInstructions).toContain("planning, evaluating options, discussing architecture");
+    expect(workerDeveloperInstructions).toContain("Use set_notification(enabled: true|false)");
+    expect(workerDeveloperInstructions).toContain("usually call set_notification(enabled: true)");
   });
 
   it("tells admins to be concise by default but fuller during planning", () => {

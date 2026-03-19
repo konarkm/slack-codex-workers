@@ -78,6 +78,8 @@ export interface WorkerRecord {
   requestItemId: string | null;
   requestItemPath: string | null;
   terminalResponseItemId: string | null;
+  turnNotificationTurnId: string | null;
+  turnNotificationEnabled: boolean;
   lastError: string | null;
   lastInboundMessageTs: string | null;
   pendingRequest: PendingRequestState | null;

@@ -493,11 +493,19 @@ It applies to the current turn only.
 
 It does not become sticky across workers or workstreams.
 
-Current implementation note:
+The current worker-turn default should be opt-in:
 
-- during dogfooding, scheduled cron/webhook-driven work still inherits the creating worker's owner/root-owner notification identity by default
-- this is an intentional temporary divergence from the stricter turn-scoped notification model above
-- future reviews should treat the explicit turn-scoped model as the target design and the inherited-owner behavior as current implementation debt, not an accidental regression
+- if the worker does not call `set_notification`, the final assistant reply still posts visibly into the Slack thread but does not mention the user
+- if the worker calls `set_notification(enabled: true)`, the final assistant reply mentions the root owner for that turn
+- if the worker calls `set_notification(enabled: false)`, the final assistant reply remains visible without the mention
+- if the worker calls the tool multiple times in one turn, the latest value wins
+
+This explicit turn-scoped notification state should persist for the lifetime of the turn, including bridge restarts that reconnect to the same active turn.
+
+Interrupted turns keep their existing interruption behavior:
+
+- if buffered assistant text is flushed before the interruption notice, that partial text is posted without forcing a mention
+- notification control is therefore meant for settled completed/failed turn endings, not partial interrupted-turn flushes
 
 ## Spawn / Wake Runtime Model
 

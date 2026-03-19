@@ -36,6 +36,8 @@ import {
   slackSetCronToolName,
   slackSetHeartbeatArgsSchema,
   slackSetHeartbeatToolName,
+  slackSetNotificationArgsSchema,
+  slackSetNotificationToolName,
   slackSetWebhookArgsSchema,
   slackSetWebhookToolName,
   slackSpawnWorkerArgsSchema,
@@ -79,6 +81,7 @@ export interface DynamicToolHandlers {
   getCurrentTime(ctx: DynamicToolHandlerContext): Promise<string>;
   getWebhookMailbox(ctx: DynamicToolHandlerContext): Promise<string>;
   rotateWebhookSecret(ctx: DynamicToolHandlerContext): Promise<string>;
+  setNotification(args: z.infer<typeof slackSetNotificationArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
   setHeartbeat(args: z.infer<typeof slackSetHeartbeatArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
   setCron(args: z.infer<typeof slackSetCronArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
   setWebhook(args: z.infer<typeof slackSetWebhookArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
@@ -534,6 +537,13 @@ export class CodexClient {
     if (parsed.data.tool === slackSetHeartbeatToolName) {
       const args = slackSetHeartbeatArgsSchema.parse(parsed.data.arguments);
       const text = await this.dynamicToolHandlers.setHeartbeat(args, ctx);
+      await this.rpc.respond(id, { contentItems: [{ type: "inputText", text }], success: true });
+      return;
+    }
+
+    if (parsed.data.tool === slackSetNotificationToolName) {
+      const args = slackSetNotificationArgsSchema.parse(parsed.data.arguments);
+      const text = await this.dynamicToolHandlers.setNotification(args, ctx);
       await this.rpc.respond(id, { contentItems: [{ type: "inputText", text }], success: true });
       return;
     }

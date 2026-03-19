@@ -9,6 +9,7 @@ export const slackUploadFilesToolName = "slack_upload_files";
 export const slackGetCurrentTimeToolName = "get_current_time";
 export const slackGetWebhookMailboxToolName = "get_webhook_mailbox";
 export const slackRotateWebhookSecretToolName = "rotate_webhook_secret";
+export const slackSetNotificationToolName = "set_notification";
 export const slackSetHeartbeatToolName = "set_heartbeat";
 export const slackSetCronToolName = "set_cron";
 export const slackSetWebhookToolName = "set_webhook";
@@ -110,6 +111,19 @@ export const workerDynamicTools = [
       type: "object",
       additionalProperties: false,
       properties: {},
+    },
+  },
+  {
+    name: slackSetNotificationToolName,
+    description:
+      "Control whether the current worker turn should notify the human when it completes. enabled=true means mention the root owner on the final reply for this turn. enabled=false means keep the final reply visible in the Slack thread without the mention. This is turn-scoped and defaults to false unless you opt in.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["enabled"],
+      properties: {
+        enabled: { type: "boolean" },
+      },
     },
   },
   {
@@ -217,10 +231,10 @@ export const workerDynamicTools = [
 ] as const;
 
 export const adminDynamicTools = [
-  workerDynamicTools[4],
-  workerDynamicTools[5],
-  workerDynamicTools[2],
-  workerDynamicTools[3],
+  workerDynamicTools.find((entry) => entry.name === slackGetCurrentTimeToolName)!,
+  workerDynamicTools.find((entry) => entry.name === slackGetWebhookMailboxToolName)!,
+  workerDynamicTools.find((entry) => entry.name === slackCreateWorkstreamToolName)!,
+  workerDynamicTools.find((entry) => entry.name === slackUploadFilesToolName)!,
   {
     name: slackAdminListRegistrationsToolName,
     description:
@@ -332,6 +346,9 @@ export const slackUploadFilesArgsSchema = z.object({
 
 export const slackGetWebhookMailboxArgsSchema = z.object({});
 export const slackRotateWebhookSecretArgsSchema = z.object({});
+export const slackSetNotificationArgsSchema = z.object({
+  enabled: z.boolean(),
+});
 
 export const slackSetHeartbeatArgsSchema = z.object({
   registrationId: z.string().min(1).optional(),
@@ -395,6 +412,9 @@ export const workerDeveloperInstructions = [
   "Use slack_create_workstream only after the human has explicitly approved creating a new workstream in the current conversation. This is conversational/tool guidance, not a separate permission layer.",
   "Use get_current_time when you need the current local time or configured workspace timezone for time-aware reasoning or scheduling.",
   "Use get_webhook_mailbox when you need the bridge's shared webhook endpoint, secret, or accepted payload shape so you can configure external systems end-to-end.",
+  "Use set_notification(enabled: true|false) to decide whether the current worker turn should notify the human on completion. The default is no notification unless you opt in.",
+  "For direct back-and-forth with the human in this Slack thread, you should usually call set_notification(enabled: true) before finishing your turn unless the human asked you not to notify them.",
+  "For autonomous heartbeat, cron, or webhook wake work, usually leave notification off unless there is a material update, blocker, risk, or decision that warrants pinging the human.",
   "Use set_heartbeat, set_cron, set_webhook, disable_registration, list_registrations, get_registration, and list_wake_deliveries to manage durable wakeup registrations and inspect wake execution history for the current worker/workstream when you need ongoing automation.",
   "Use slack_upload_files when you need to share one or more existing local files into the current Slack thread. Only upload files that materially help the user.",
   "If you create a child worker, it is fire-and-forget. Do not wait on the child unless the human explicitly asks you to.",
