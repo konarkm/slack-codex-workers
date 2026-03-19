@@ -520,6 +520,88 @@ describe("service lifecycle decisions", () => {
     store.close();
   });
 
+  it("lists active workstreams for the current worker team", async () => {
+    const { service, store } = await createService();
+    createWorker(service);
+    store.upsertWorkstream({
+      id: "T1:customers/ef",
+      teamId: "T1",
+      parentId: "T1:root",
+      slug: "ef",
+      relativePath: "customers/ef",
+      channelId: "C-ef",
+      channelName: "ef",
+      description: null,
+      archivedAt: null,
+    });
+
+    await expect(service.handleListWorkstreamsTool(
+      "ef",
+      { threadId: "thread-1", turnId: "turn-1", callId: "call-1" },
+    )).resolves.toBe("customers/ef (#ef, C-ef)");
+    store.close();
+  });
+
+  it("spawns a child worker into an explicitly targeted workstream path", async () => {
+    const { service, codex, store } = await createService();
+    createWorker(service);
+    store.upsertWorkstream({
+      id: "T1:customers/ef",
+      teamId: "T1",
+      parentId: "T1:root",
+      slug: "ef",
+      relativePath: "customers/ef",
+      channelId: "C-ef",
+      channelName: "ef",
+      description: null,
+      archivedAt: null,
+    });
+    codex.createWorkerThread.mockResolvedValue({ threadId: "thread-child" });
+    codex.startTurnWithResumeFallback.mockResolvedValue("turn-child");
+
+    const result = await service.handleSpawnWorkerTool(
+      { workstream: "customers/ef", title: "Child task", initialUserMessage: "Do the thing", mode: "fresh" },
+      { threadId: "thread-1", turnId: "turn-1", callId: "call-1" },
+    );
+
+    expect(result).toContain("workstream customers/ef");
+    expect(store.getWorkerByAppThreadId("thread-child")).toMatchObject({
+      channelId: "C-ef",
+      workstreamId: "T1:customers/ef",
+    });
+    store.close();
+  });
+
+  it("treats root aliases as the root workstream when spawning a child worker", async () => {
+    const { service, codex, store } = await createService();
+    createWorker(service);
+    codex.createWorkerThread.mockResolvedValue({ threadId: "thread-child-root" });
+    codex.startTurnWithResumeFallback.mockResolvedValue("turn-child-root");
+
+    const result = await service.handleSpawnWorkerTool(
+      { workstream: "/root", title: "Root child", initialUserMessage: "Stay in root", mode: "fresh" },
+      { threadId: "thread-1", turnId: "turn-1", callId: "call-root" },
+    );
+
+    expect(result).toContain("workstream root");
+    expect(store.getWorkerByAppThreadId("thread-child-root")).toMatchObject({
+      channelId: "C1",
+      workstreamId: "T1:root",
+    });
+    store.close();
+  });
+
+  it("fails clearly when a targeted workstream path does not exist", async () => {
+    const { service, store } = await createService();
+    createWorker(service);
+
+    await expect(service.handleSpawnWorkerTool(
+      { workstream: "missing/path", title: "Child task", initialUserMessage: "Do the thing", mode: "fresh" },
+      { threadId: "thread-1", turnId: "turn-1", callId: "call-1" },
+    )).resolves.toBe("Workstream not found: missing/path");
+    store.close();
+  });
+
   it("quarantines stale replay rows when Slack says the message no longer exists", async () => {
     const { service, slack, codex, store } = await createService();
     codex.createWorkerThread.mockRejectedValue(new Error("boom"));

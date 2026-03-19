@@ -54,6 +54,34 @@ describe("codex client dynamic tool routing", () => {
     });
   });
 
+  it("routes list_workstreams through the dynamic tool handler", async () => {
+    const respond = vi.fn().mockResolvedValue(undefined);
+    const listWorkstreams = vi.fn().mockResolvedValue("root (#general, C1)\ncustomers/ef (#ef, C-ef)");
+    const client = Object.create(CodexClient.prototype) as any;
+    client.rpc = { respond };
+    client.dynamicToolHandlers = { listWorkstreams };
+
+    await client.handleDynamicToolCall("req-1c", {
+      threadId: "thread-1c",
+      turnId: "turn-1c",
+      callId: "call-1c",
+      tool: "list_workstreams",
+      arguments: { query: "ef" },
+    });
+
+    expect(listWorkstreams).toHaveBeenCalledWith({
+      query: "ef",
+    }, {
+      threadId: "thread-1c",
+      turnId: "turn-1c",
+      callId: "call-1c",
+    });
+    expect(respond).toHaveBeenCalledWith("req-1c", {
+      contentItems: [{ type: "inputText", text: "root (#general, C1)\ncustomers/ef (#ef, C-ef)" }],
+      success: true,
+    });
+  });
+
   it("routes get_webhook_mailbox through the dynamic tool handler", async () => {
     const respond = vi.fn().mockResolvedValue(undefined);
     const getWebhookMailbox = vi.fn().mockResolvedValue("webhook_public_url: https://hooks.example.test/webhooks");

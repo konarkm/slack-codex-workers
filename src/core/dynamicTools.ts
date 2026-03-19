@@ -3,6 +3,7 @@ import { z } from "zod";
 const webhookSourcePattern = "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$";
 
 export const slackListChannelsToolName = "slack_list_channels";
+export const slackListWorkstreamsToolName = "list_workstreams";
 export const slackSpawnWorkerToolName = "slack_spawn_worker";
 export const slackCreateWorkstreamToolName = "slack_create_workstream";
 export const slackUploadFilesToolName = "slack_upload_files";
@@ -28,7 +29,19 @@ export const workerDynamicTools = [
   {
     name: slackListChannelsToolName,
     description:
-      "List registered Slack workstream channels so you can decide where a public child worker should be created. Use when you need to route a follow-up task to the right workstream home. Returns channel ids and names.",
+      "List registered Slack workstream channels. Use this when you need a channel-level view of the bridge workspace. Returns only active registered workstream-home channels.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        query: { type: "string", minLength: 1 },
+      },
+    },
+  },
+  {
+    name: slackListWorkstreamsToolName,
+    description:
+      "List registered active workstreams so you can decide where visible child work should be created. Prefer this over slack_list_channels when routing follow-up work. Returns workstream paths plus their Slack channel names and ids.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -40,13 +53,13 @@ export const workerDynamicTools = [
   {
     name: slackSpawnWorkerToolName,
     description:
-      "Create a top-level Slack post in a registered workstream channel and immediately start a separate Codex worker thread for a distinct user-facing task. Use this only for visible child work, not for internal delegation. If channel is omitted, use the current workstream channel. Use mode='fresh' unless the child truly needs the parent thread context; use mode='fork' only when inheriting context is important.",
+      "Create a top-level Slack post in a registered workstream and immediately start a separate Codex worker thread for a distinct user-facing task. Use this only for visible child work, not for internal delegation. If workstream is omitted, use the current workstream. workstream should be a canonical relative path like customers/ef or a root alias such as root, /root, or . Use mode='fresh' unless the child truly needs the parent thread context; use mode='fork' only when inheriting context is important.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       required: ["title", "initialUserMessage"],
       properties: {
-        channel: { type: "string", minLength: 1 },
+        workstream: { type: "string", minLength: 1 },
         title: { type: "string", minLength: 1 },
         initialUserMessage: { type: "string", minLength: 1 },
         mode: { enum: ["fresh", "fork"] },
@@ -334,12 +347,16 @@ export const slackListChannelsArgsSchema = z.object({
   query: z.string().min(1).optional(),
 });
 
+export const slackListWorkstreamsArgsSchema = z.object({
+  query: z.string().min(1).optional(),
+});
+
 export const slackSpawnWorkerArgsSchema = z.object({
-  channel: z.string().min(1).optional(),
+  workstream: z.string().min(1).optional(),
   title: z.string().min(1),
   initialUserMessage: z.string().min(1),
   mode: z.enum(["fresh", "fork"]).default("fresh"),
-});
+}).strict();
 
 export const slackCreateWorkstreamArgsSchema = z.object({
   slug: z.string().min(1),
@@ -420,7 +437,8 @@ export const workerDeveloperInstructions = [
   "During normal execution and routine updates, communicate like a strong operator or employee: lead with the result or current state, keep routine updates concise, and mention detailed evidence only when it is material, surprising, risky, or requested.",
   "When the user is planning, evaluating options, discussing architecture, or setting up a long-horizon workflow, do not over-compress. In those planning conversations, explain tradeoffs, assumptions, and recommended paths clearly enough to support good decisions.",
   "Use normal assistant messages to communicate substantive progress. Raw reasoning is not shown to the human.",
-  "Use slack_spawn_worker only for distinct user-facing child tasks that should live as their own top-level Slack thread. Do not use it for internal subagents or minor follow-ups.",
+  "Use list_workstreams when you need to choose the right registered workstream for visible child work. Use slack_list_channels only when you specifically need a channel-level view.",
+  "Use slack_spawn_worker only for distinct user-facing child tasks that should live as their own top-level Slack thread. Target other workstreams by canonical workstream path, not by Slack channel. Do not use it for internal subagents or minor follow-ups.",
   "Use slack_create_workstream only after the human has explicitly approved creating a new workstream in the current conversation. This is conversational/tool guidance, not a separate permission layer.",
   "Use get_current_time when you need the current local time or configured workspace timezone for time-aware reasoning or scheduling.",
   "Use get_current_slack_thread_link when you need the exact permalink and Slack routing ids for the current public worker thread so you can reference it from another system.",

@@ -29,6 +29,7 @@ Implemented in this repo:
 - authenticated webhook ingress with durable raw payload storage and event dedupe
 - worker dynamic tools:
   - `slack_list_channels`
+  - `list_workstreams`
   - `slack_spawn_worker`
   - `slack_create_workstream`
   - `slack_upload_files`
@@ -206,7 +207,8 @@ For a supervised production build:
 - `get_current_time` returns the current UTC time, the configured workspace timezone, and the current local time in that timezone.
 - `get_current_slack_thread_link` is worker-only and returns JSON containing the exact permalink for the current public Slack thread root plus `team_id`, `channel_id`, and `root_ts`.
 - `slack_list_channels` only returns registered workstream channels.
-- `slack_spawn_worker` only targets registered workstream channels.
+- `list_workstreams` returns active registered workstreams as `path (#channel, channel_id)` and is the preferred discovery surface for visible child work.
+- `slack_spawn_worker` targets workstreams, not Slack channels. Omit `workstream` to target the current workstream, or pass a canonical workstream relative path such as `customers/ef`.
 - `slack_create_workstream` is available to workers and the admin DM. It is intended to be used after explicit user approval in the conversation, not behind a separate permission layer.
 - `get_webhook_mailbox` returns the shared webhook mailbox URL, current shared secret, accepted auth headers, and the JSON body shape for configuring external systems.
 - `get_webhook_mailbox` also reports the local bind address and whether loopback-proxy trust is enabled.

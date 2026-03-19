@@ -30,6 +30,8 @@ import {
   slackGetRegistrationToolName,
   slackListChannelsArgsSchema,
   slackListChannelsToolName,
+  slackListWorkstreamsArgsSchema,
+  slackListWorkstreamsToolName,
   slackListWakeDeliveriesToolName,
   slackListRegistrationsToolName,
   slackRotateWebhookSecretArgsSchema,
@@ -77,6 +79,7 @@ export interface DynamicToolHandlerContext {
 
 export interface DynamicToolHandlers {
   listChannels(args: z.infer<typeof slackListChannelsArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
+  listWorkstreams(args: z.infer<typeof slackListWorkstreamsArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
   spawnWorker(args: z.infer<typeof slackSpawnWorkerArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
   createWorkstream(args: z.infer<typeof slackCreateWorkstreamArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
   uploadFiles(args: z.infer<typeof slackUploadFilesArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
@@ -492,6 +495,13 @@ export class CodexClient {
     if (parsed.data.tool === slackListChannelsToolName) {
       const args = slackListChannelsArgsSchema.parse(parsed.data.arguments);
       const text = await this.dynamicToolHandlers.listChannels(args, ctx);
+      await this.rpc.respond(id, { contentItems: [{ type: "inputText", text }], success: true });
+      return;
+    }
+
+    if (parsed.data.tool === slackListWorkstreamsToolName) {
+      const args = slackListWorkstreamsArgsSchema.parse(parsed.data.arguments);
+      const text = await this.dynamicToolHandlers.listWorkstreams(args, ctx);
       await this.rpc.respond(id, { contentItems: [{ type: "inputText", text }], success: true });
       return;
     }

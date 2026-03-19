@@ -133,6 +133,7 @@ export class SlackCodexWorkersService extends EventEmitter {
     );
     this.codex.registerDynamicToolHandlers({
       listChannels: async (args, ctx) => this.handleListChannelsTool(args.query ?? "", ctx),
+      listWorkstreams: async (args, ctx) => this.handleListWorkstreamsTool(args.query ?? "", ctx),
       spawnWorker: async (args, ctx) => this.handleSpawnWorkerTool(args, ctx),
       createWorkstream: async (args, ctx) => this.handleCreateWorkstreamTool(args, ctx),
       uploadFiles: async (args, ctx) => this.handleUploadFilesTool(args, ctx),
@@ -1705,8 +1706,26 @@ export class SlackCodexWorkersService extends EventEmitter {
     return allowed.slice(0, 50).map((channel) => `${channel.name} (${channel.channelId})`).join("\n");
   }
 
+  private async handleListWorkstreamsTool(query: string, ctx: DynamicToolHandlerContext): Promise<string> {
+    const worker = this.store.getWorkerByAppThreadId(ctx.threadId);
+    if (!worker) return "No Slack worker context found.";
+    const needle = query.trim().toLowerCase();
+    const workstreams = this.store.listWorkstreams(worker.teamId)
+      .filter((workstream) => {
+        if (!needle) return true;
+        return formatWorkstreamAddress(workstream).toLowerCase().includes(needle)
+          || workstream.channelName.toLowerCase().includes(needle)
+          || workstream.channelId.toLowerCase().includes(needle);
+      });
+    if (workstreams.length === 0) return "No matching registered workstreams.";
+    return workstreams
+      .slice(0, 50)
+      .map((workstream) => `${formatWorkstreamAddress(workstream)} (#${workstream.channelName}, ${workstream.channelId})`)
+      .join("\n");
+  }
+
   private async handleSpawnWorkerTool(
-    args: { channel?: string | undefined; title: string; initialUserMessage: string; mode: "fresh" | "fork" },
+    args: { workstream?: string | undefined; title: string; initialUserMessage: string; mode: "fresh" | "fork" },
     ctx: DynamicToolHandlerContext,
   ): Promise<string> {
     const parentRecord = this.store.getWorkerByAppThreadId(ctx.threadId);
@@ -1716,27 +1735,16 @@ export class SlackCodexWorkersService extends EventEmitter {
     const parentWorkstream = parent.workstreamId ? this.store.getWorkstreamById(parent.workstreamId) : null;
     if (!parentWorkstream) return "No workstream is attached to this Slack worker.";
 
-    const targetChannel = args.channel
-      ? await this.slack.resolveChannel(parent.teamId, args.channel, parent.channelId)
-      : {
-          teamId: parent.teamId,
-          channelId: parent.channelId,
-          name: parentWorkstream.channelName,
-          isPrivate: false,
-          isMember: true,
-          updatedAt: new Date().toISOString(),
-        };
-
-    const targetWorkstream = this.workstreams.resolveWorkstreamForChannel(parent.teamId, targetChannel.channelId);
+    const targetWorkstream = this.resolveWorkerTargetWorkstream(parent.teamId, args.workstream, parentWorkstream);
     if (!targetWorkstream) {
-      return "That Slack channel is not registered as a workstream home.";
+      return `Workstream not found: ${args.workstream?.trim() ?? "(unknown)"}`;
     }
 
     const childIdentity = assignWorkerIdentity(this.store.listWorkers());
     try {
       await this.spawnWorkerIntoWorkstream({
         workstream: targetWorkstream,
-        channelId: targetChannel.channelId,
+        channelId: targetWorkstream.channelId,
         title: args.title,
         itemBody: args.initialUserMessage,
         turnInput: { text: args.initialUserMessage, imagePaths: [] },
@@ -1757,11 +1765,11 @@ export class SlackCodexWorkersService extends EventEmitter {
         surfaceFailuresInThread: true,
         shellId: ctx.callId,
       });
-      return `Spawned child worker in ${targetChannel.channelId} with title "${args.title}".`;
+      return `Spawned child worker in workstream ${formatWorkstreamAddress(targetWorkstream)} (${targetWorkstream.channelId}) with title "${args.title}".`;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (message.includes("failed to create the backing worker")) {
-        return `Created child Slack thread in ${targetChannel.channelId}, but ${message}`;
+        return `Created child Slack thread in workstream ${formatWorkstreamAddress(targetWorkstream)} (${targetWorkstream.channelId}), but ${message}`;
       }
       return `Child worker startup failed: ${message}`;
     }
@@ -3338,16 +3346,28 @@ export class SlackCodexWorkersService extends EventEmitter {
   ): WorkstreamRecord | null {
     if (relativePath === undefined) return null;
     const trimmed = relativePath.trim();
-    if (!trimmed) {
+    const normalized = normalizeWorkstreamReference(trimmed);
+    if (normalized === null) {
       throw new Error("Workstream filter must not be blank.");
     }
-    const normalizedPath = trimmed.replace(/^\/+|\/+$/g, "");
-    const normalized = normalizedPath === "root" ? "" : normalizedPath;
     const workstream = this.store.getWorkstreamByRelativePath(teamId, normalized, { includeArchived: options.includeArchived });
     if (!workstream) {
       throw new Error(`Workstream not found: ${trimmed}`);
     }
     return workstream;
+  }
+
+  private resolveWorkerTargetWorkstream(
+    teamId: string,
+    relativePath: string | undefined,
+    currentWorkstream: WorkstreamRecord,
+  ): WorkstreamRecord | null {
+    if (relativePath === undefined) return currentWorkstream;
+    const normalized = normalizeWorkstreamReference(relativePath);
+    if (normalized === null) {
+      throw new Error("Workstream target must not be blank.");
+    }
+    return this.store.getWorkstreamByRelativePath(teamId, normalized);
   }
 
   private requireAdminRegistration(teamId: string, registrationId: string): RegistrationRecord {
@@ -3685,6 +3705,15 @@ function parseWorkstreamCreateArgs(args: string[]): { slug: string; parentRelati
     parentRelativePath,
     description: descriptionParts.length > 0 ? descriptionParts.join(" ") : null,
   };
+}
+
+function normalizeWorkstreamReference(input: string): string | null {
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+  if (trimmed === ".") return "";
+  const normalizedPath = trimmed.replace(/^\/+|\/+$/g, "");
+  if (!normalizedPath || normalizedPath === "root") return "";
+  return normalizedPath;
 }
 
 function resolveRuntimeSettings(

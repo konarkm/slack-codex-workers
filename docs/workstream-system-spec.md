@@ -353,7 +353,7 @@ Primary discovery is filesystem-native:
 - nested `WORKSTREAM.md`
 - actual directories
 
-The bridge should maintain an internal registry for correctness, but agent-facing `list_workstreams` / `get_workstream` tools are not first-class initially.
+The bridge should maintain an internal registry for correctness, and agent-facing discovery should be workstream-first rather than channel-first. A lightweight `list_workstreams` tool is appropriate so workers can route visible child work by workstream path.
 
 ## Public Worker Model
 

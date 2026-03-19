@@ -15,6 +15,7 @@ import {
     slackCreateWorkstreamArgsSchema,
     slackGetCurrentSlackThreadLinkToolName,
     slackSetCronArgsSchema,
+    slackListWorkstreamsToolName,
   slackSetNotificationArgsSchema,
   slackSetNotificationToolName,
   slackSetWebhookArgsSchema,
@@ -35,6 +36,29 @@ describe("dynamic tools", () => {
       initialUserMessage: "Check this later",
       mode: "fresh",
     });
+  });
+
+  it("parses workstream-targeted spawn args", () => {
+    expect(
+      slackSpawnWorkerArgsSchema.parse({
+        workstream: "customers/ef",
+        title: "Follow up",
+        initialUserMessage: "Check this later",
+      }),
+    ).toEqual({
+      workstream: "customers/ef",
+      title: "Follow up",
+      initialUserMessage: "Check this later",
+      mode: "fresh",
+    });
+  });
+
+  it("rejects legacy channel-targeted spawn args", () => {
+    expect(() => slackSpawnWorkerArgsSchema.parse({
+      channel: "#ops",
+      title: "Follow up",
+      initialUserMessage: "Check this later",
+    })).toThrow();
   });
 
   it("parses workstream creation args", () => {
@@ -87,6 +111,13 @@ describe("dynamic tools", () => {
     expect(adminNames).not.toContain(slackGetCurrentSlackThreadLinkToolName);
   });
 
+  it("exposes list_workstreams only on the worker surface", () => {
+    const workerTool = workerDynamicTools.find((entry) => entry.name === slackListWorkstreamsToolName);
+    const adminNames = adminDynamicTools.map((entry) => entry.name);
+    expect(workerTool?.description).toContain("registered active workstreams");
+    expect(adminNames).not.toContain(slackListWorkstreamsToolName);
+  });
+
   it("exposes the current time tool to the admin surface", () => {
     const tool = adminDynamicTools.find((entry) => entry.name === slackGetCurrentTimeToolName);
     expect(tool?.description).toContain("current local time or timezone");
@@ -131,6 +162,7 @@ describe("dynamic tools", () => {
     expect(workerDeveloperInstructions).toContain("Use set_notification(enabled: true|false)");
     expect(workerDeveloperInstructions).toContain("usually call set_notification(enabled: true)");
     expect(workerDeveloperInstructions).toContain("Use get_current_slack_thread_link");
+    expect(workerDeveloperInstructions).toContain("Use list_workstreams");
   });
 
   it("tells admins to be concise by default but fuller during planning", () => {
