@@ -33,7 +33,9 @@ Implemented in this repo:
   - `slack_create_workstream`
   - `slack_upload_files`
   - `get_current_time`
+  - `get_current_slack_thread_link`
   - `get_webhook_mailbox`
+  - `set_notification`
   - `set_heartbeat`
   - `set_cron`
   - `set_webhook`
@@ -46,6 +48,11 @@ Implemented in this repo:
   - `slack_upload_files`
   - `get_current_time`
   - `get_webhook_mailbox`
+  - `list_registrations_admin`
+  - `get_registration_admin`
+  - `disable_registration_admin`
+  - `list_wake_deliveries_admin`
+  - `archive_workstream_admin`
   - `rotate_webhook_secret`
 - channel-thread commands:
   - `.help` / `/help`
@@ -197,11 +204,13 @@ For a supervised production build:
 - Attachment-only messages are supported; images are passed as images and other files are stored locally with file-path notes.
 - `slack_upload_files` uploads one or more local files from allowed roots into the current Slack conversation; worker threads upload into the active thread, and admin DMs upload into the DM conversation.
 - `get_current_time` returns the current UTC time, the configured workspace timezone, and the current local time in that timezone.
+- `get_current_slack_thread_link` is worker-only and returns JSON containing the exact permalink for the current public Slack thread root plus `team_id`, `channel_id`, and `root_ts`.
 - `slack_list_channels` only returns registered workstream channels.
 - `slack_spawn_worker` only targets registered workstream channels.
 - `slack_create_workstream` is available to workers and the admin DM. It is intended to be used after explicit user approval in the conversation, not behind a separate permission layer.
 - `get_webhook_mailbox` returns the shared webhook mailbox URL, current shared secret, accepted auth headers, and the JSON body shape for configuring external systems.
 - `get_webhook_mailbox` also reports the local bind address and whether loopback-proxy trust is enabled.
+- `set_notification(enabled: true|false)` is worker-only, turn-scoped, and opt-in; final worker replies stay visible by default but only mention the root owner when the worker explicitly enables notification for that turn.
 - `rotate_webhook_secret` is available only in the admin DM and rotates the organization-wide shared webhook secret while keeping the previous secret valid for 24 hours.
 - `set_heartbeat` only works in a public worker thread and always targets the current worker with `wake_self`.
 - `set_cron` and `set_webhook` default to `target='self'`; `target='workstream'` creates future public work in the current workstream.
@@ -213,6 +222,7 @@ For a supervised production build:
 - Dot-command aliases such as `.status`, `.health`, `.restart`, and `.workstream-create` are supported everywhere the slash commands are supported. In the Slack client, dot commands are the most reliable form because some slash commands collide with Slack's built-in command UI. If you still prefer slash commands, a leading space also works because the bridge trims message text before parsing.
 - Thread `/model` and `/effort` set thread-local overrides. DM `/model` and `/effort` set the global defaults used by any thread that does not have an override.
 - `/workstream-create` is available in worker threads and admin DMs for explicit bridge-owned creation.
+- `/workstream-archive` is available in the admin DM to archive a child workstream, disable its registrations, quarantine pending wakes, and remove it from live routing while keeping the local scaffold on disk.
 - `/restart <codex|bridge|both>` queues a restart request and waits for the runtime to become idle.
 - `/restart-now` forces the currently queued restart immediately.
 - `/restart-cancel` clears the currently queued restart.

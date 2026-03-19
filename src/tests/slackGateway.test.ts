@@ -11,6 +11,7 @@ vi.mock("@slack/bolt", () => ({
       users: { info: vi.fn().mockResolvedValue({ user: { profile: { display_name: "mock-user" } } }) },
       chat: {
         postMessage: vi.fn().mockResolvedValue({ ok: true, ts: "1.000" }),
+        getPermalink: vi.fn().mockResolvedValue({ ok: true, permalink: "https://app.slack.com/archives/C1/p1000" }),
         update: vi.fn().mockResolvedValue({ ok: true }),
       },
       reactions: {
@@ -105,5 +106,28 @@ describe("SlackGateway uploadFilesToConversation", () => {
         permalink: "https://files.example/F2",
       },
     ]);
+  });
+});
+
+describe("SlackGateway getMessagePermalink", () => {
+  it("returns the Slack permalink for a message", async () => {
+    const gateway = new SlackGateway(makeConfig());
+    const permalink = await gateway.getMessagePermalink("C1", "1.000");
+
+    expect(permalink).toBe("https://app.slack.com/archives/C1/p1000");
+    expect((gateway.app.client.chat.getPermalink as any)).toHaveBeenCalledWith({
+      token: "xoxb-test",
+      channel: "C1",
+      message_ts: "1.000",
+    });
+  });
+
+  it("throws when Slack does not return a permalink", async () => {
+    const gateway = new SlackGateway(makeConfig());
+    (gateway.app.client.chat.getPermalink as any).mockResolvedValueOnce({ ok: true });
+
+    await expect(gateway.getMessagePermalink("C1", "1.000")).rejects.toThrow(
+      "Slack did not return a permalink for the message",
+    );
   });
 });

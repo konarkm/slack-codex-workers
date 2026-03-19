@@ -137,6 +137,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       createWorkstream: async (args, ctx) => this.handleCreateWorkstreamTool(args, ctx),
       uploadFiles: async (args, ctx) => this.handleUploadFilesTool(args, ctx),
       getCurrentTime: async (ctx) => this.handleGetCurrentTimeTool(ctx),
+      getCurrentSlackThreadLink: async (ctx) => this.handleGetCurrentSlackThreadLinkTool(ctx),
       getWebhookMailbox: async (ctx) => this.handleGetWebhookMailboxTool(ctx),
       rotateWebhookSecret: async (ctx) => this.handleRotateWebhookSecretTool(ctx),
       setNotification: async (args, ctx) => this.handleSetNotificationTool(args, ctx),
@@ -1825,6 +1826,20 @@ export class SlackCodexWorkersService extends EventEmitter {
 
   private async handleGetCurrentTimeTool(_ctx: DynamicToolHandlerContext): Promise<string> {
     return formatCurrentTimeInfo(this.config.workspaceTimezone, new Date());
+  }
+
+  private async handleGetCurrentSlackThreadLinkTool(ctx: DynamicToolHandlerContext): Promise<string> {
+    const worker = this.store.getWorkerByAppThreadId(ctx.threadId);
+    if (!worker) {
+      throw new Error("Slack thread link lookup requires a worker thread context.");
+    }
+    const permalink = await this.slack.getMessagePermalink(worker.channelId, worker.rootTs);
+    return JSON.stringify({
+      permalink,
+      team_id: worker.teamId,
+      channel_id: worker.channelId,
+      root_ts: worker.rootTs,
+    }, null, 2);
   }
 
   private async handleGetWebhookMailboxTool(_ctx: DynamicToolHandlerContext): Promise<string> {

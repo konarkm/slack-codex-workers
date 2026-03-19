@@ -7,6 +7,7 @@ export const slackSpawnWorkerToolName = "slack_spawn_worker";
 export const slackCreateWorkstreamToolName = "slack_create_workstream";
 export const slackUploadFilesToolName = "slack_upload_files";
 export const slackGetCurrentTimeToolName = "get_current_time";
+export const slackGetCurrentSlackThreadLinkToolName = "get_current_slack_thread_link";
 export const slackGetWebhookMailboxToolName = "get_webhook_mailbox";
 export const slackRotateWebhookSecretToolName = "rotate_webhook_secret";
 export const slackSetNotificationToolName = "set_notification";
@@ -97,6 +98,16 @@ export const workerDynamicTools = [
     name: slackGetCurrentTimeToolName,
     description:
       "Get the current time along with the configured workspace timezone. Use this when you need the current local time or timezone before choosing a schedule.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {},
+    },
+  },
+  {
+    name: slackGetCurrentSlackThreadLinkToolName,
+    description:
+      "Get the exact Slack permalink for the current public worker thread root message, along with the Slack routing ids for that thread. Use this when you need to reference the current Slack thread from another system such as Linear.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -344,6 +355,7 @@ export const slackUploadFilesArgsSchema = z.object({
   })).min(1),
 });
 
+export const slackGetCurrentSlackThreadLinkArgsSchema = z.object({});
 export const slackGetWebhookMailboxArgsSchema = z.object({});
 export const slackRotateWebhookSecretArgsSchema = z.object({});
 export const slackSetNotificationArgsSchema = z.object({
@@ -411,6 +423,7 @@ export const workerDeveloperInstructions = [
   "Use slack_spawn_worker only for distinct user-facing child tasks that should live as their own top-level Slack thread. Do not use it for internal subagents or minor follow-ups.",
   "Use slack_create_workstream only after the human has explicitly approved creating a new workstream in the current conversation. This is conversational/tool guidance, not a separate permission layer.",
   "Use get_current_time when you need the current local time or configured workspace timezone for time-aware reasoning or scheduling.",
+  "Use get_current_slack_thread_link when you need the exact permalink and Slack routing ids for the current public worker thread so you can reference it from another system.",
   "Use get_webhook_mailbox when you need the bridge's shared webhook endpoint, secret, or accepted payload shape so you can configure external systems end-to-end.",
   "Use set_notification(enabled: true|false) to decide whether the current worker turn should notify the human on completion. The default is no notification unless you opt in.",
   "For direct back-and-forth with the human in this Slack thread, you should usually call set_notification(enabled: true) before finishing your turn unless the human asked you not to notify them.",

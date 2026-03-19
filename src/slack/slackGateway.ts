@@ -27,6 +27,11 @@ interface PostMessageResponse {
   ts?: string;
 }
 
+interface GetPermalinkResponse {
+  ok?: boolean;
+  permalink?: string;
+}
+
 interface UserInfoResponse {
   user?: {
     profile?: {
@@ -165,6 +170,19 @@ export class SlackGateway {
       return this.postThreadReply(channelId, threadTs, text, identity);
     }
     return this.postTopLevelMessage(channelId, text, identity);
+  }
+
+  async getMessagePermalink(channelId: string, messageTs: string): Promise<string> {
+    const response = await this.app.client.chat.getPermalink({
+      token: this.config.slackBotToken,
+      channel: channelId,
+      message_ts: messageTs,
+    }) as GetPermalinkResponse;
+    const permalink = response.permalink?.trim();
+    if (!permalink) {
+      throw new Error("Slack did not return a permalink for the message");
+    }
+    return permalink;
   }
 
   async setStatusReaction(channelId: string, messageTs: string, emoji: string): Promise<void> {

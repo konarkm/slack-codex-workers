@@ -507,6 +507,23 @@ Interrupted turns keep their existing interruption behavior:
 - if buffered assistant text is flushed before the interruption notice, that partial text is posted without forcing a mention
 - notification control is therefore meant for settled completed/failed turn endings, not partial interrupted-turn flushes
 
+## Slack Thread References
+
+Worker turns should be able to retrieve a stable external reference to their own public Slack thread through a worker-only tool:
+
+- `get_current_slack_thread_link`
+
+The tool should return the exact Slack permalink for the current thread root message plus the thread's Slack routing ids:
+
+- `permalink`
+- `team_id`
+- `channel_id`
+- `root_ts`
+
+This is for external references such as Linear, docs, and handoffs.
+
+It should always target the worker thread root message, not the current assistant reply.
+
 ## Spawn / Wake Runtime Model
 
 ### Canonical Spawn Path

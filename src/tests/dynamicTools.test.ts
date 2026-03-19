@@ -12,8 +12,9 @@ import {
   slackGetCurrentTimeToolName,
   slackGetWebhookMailboxToolName,
   slackRotateWebhookSecretToolName,
-  slackCreateWorkstreamArgsSchema,
-  slackSetCronArgsSchema,
+    slackCreateWorkstreamArgsSchema,
+    slackGetCurrentSlackThreadLinkToolName,
+    slackSetCronArgsSchema,
   slackSetNotificationArgsSchema,
   slackSetNotificationToolName,
   slackSetWebhookArgsSchema,
@@ -79,6 +80,13 @@ describe("dynamic tools", () => {
     expect(tool?.description).toContain("current local time or timezone");
   });
 
+  it("exposes the current Slack thread link tool only on the worker surface", () => {
+    const workerTool = workerDynamicTools.find((entry) => entry.name === slackGetCurrentSlackThreadLinkToolName);
+    const adminNames = adminDynamicTools.map((entry) => entry.name);
+    expect(workerTool?.description).toContain("exact Slack permalink for the current public worker thread");
+    expect(adminNames).not.toContain(slackGetCurrentSlackThreadLinkToolName);
+  });
+
   it("exposes the current time tool to the admin surface", () => {
     const tool = adminDynamicTools.find((entry) => entry.name === slackGetCurrentTimeToolName);
     expect(tool?.description).toContain("current local time or timezone");
@@ -122,6 +130,7 @@ describe("dynamic tools", () => {
     expect(workerDeveloperInstructions).toContain("planning, evaluating options, discussing architecture");
     expect(workerDeveloperInstructions).toContain("Use set_notification(enabled: true|false)");
     expect(workerDeveloperInstructions).toContain("usually call set_notification(enabled: true)");
+    expect(workerDeveloperInstructions).toContain("Use get_current_slack_thread_link");
   });
 
   it("tells admins to be concise by default but fuller during planning", () => {

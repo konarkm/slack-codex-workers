@@ -28,6 +28,32 @@ describe("codex client dynamic tool routing", () => {
     });
   });
 
+  it("routes get_current_slack_thread_link through the dynamic tool handler", async () => {
+    const respond = vi.fn().mockResolvedValue(undefined);
+    const getCurrentSlackThreadLink = vi.fn().mockResolvedValue("{\"permalink\":\"https://slack.example/thread\"}");
+    const client = Object.create(CodexClient.prototype) as any;
+    client.rpc = { respond };
+    client.dynamicToolHandlers = { getCurrentSlackThreadLink };
+
+    await client.handleDynamicToolCall("req-1b", {
+      threadId: "thread-1b",
+      turnId: "turn-1b",
+      callId: "call-1b",
+      tool: "get_current_slack_thread_link",
+      arguments: {},
+    });
+
+    expect(getCurrentSlackThreadLink).toHaveBeenCalledWith({
+      threadId: "thread-1b",
+      turnId: "turn-1b",
+      callId: "call-1b",
+    });
+    expect(respond).toHaveBeenCalledWith("req-1b", {
+      contentItems: [{ type: "inputText", text: "{\"permalink\":\"https://slack.example/thread\"}" }],
+      success: true,
+    });
+  });
+
   it("routes get_webhook_mailbox through the dynamic tool handler", async () => {
     const respond = vi.fn().mockResolvedValue(undefined);
     const getWebhookMailbox = vi.fn().mockResolvedValue("webhook_public_url: https://hooks.example.test/webhooks");

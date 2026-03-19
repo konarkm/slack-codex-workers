@@ -22,6 +22,8 @@ import {
   slackCreateWorkstreamArgsSchema,
   slackCreateWorkstreamToolName,
   slackGetCurrentTimeToolName,
+  slackGetCurrentSlackThreadLinkArgsSchema,
+  slackGetCurrentSlackThreadLinkToolName,
   slackGetWebhookMailboxArgsSchema,
   slackGetWebhookMailboxToolName,
   slackGetRegistrationArgsSchema,
@@ -79,6 +81,7 @@ export interface DynamicToolHandlers {
   createWorkstream(args: z.infer<typeof slackCreateWorkstreamArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
   uploadFiles(args: z.infer<typeof slackUploadFilesArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
   getCurrentTime(ctx: DynamicToolHandlerContext): Promise<string>;
+  getCurrentSlackThreadLink(ctx: DynamicToolHandlerContext): Promise<string>;
   getWebhookMailbox(ctx: DynamicToolHandlerContext): Promise<string>;
   rotateWebhookSecret(ctx: DynamicToolHandlerContext): Promise<string>;
   setNotification(args: z.infer<typeof slackSetNotificationArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
@@ -516,6 +519,13 @@ export class CodexClient {
 
     if (parsed.data.tool === slackGetCurrentTimeToolName) {
       const text = await this.dynamicToolHandlers.getCurrentTime(ctx);
+      await this.rpc.respond(id, { contentItems: [{ type: "inputText", text }], success: true });
+      return;
+    }
+
+    if (parsed.data.tool === slackGetCurrentSlackThreadLinkToolName) {
+      slackGetCurrentSlackThreadLinkArgsSchema.parse(parsed.data.arguments);
+      const text = await this.dynamicToolHandlers.getCurrentSlackThreadLink(ctx);
       await this.rpc.respond(id, { contentItems: [{ type: "inputText", text }], success: true });
       return;
     }

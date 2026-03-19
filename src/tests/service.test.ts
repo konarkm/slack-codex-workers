@@ -105,6 +105,7 @@ async function createService(configOverrides: Partial<AppConfig> = {}) {
     app: { event: vi.fn() },
     getTeamId: vi.fn().mockReturnValue("T1"),
     getUserDisplayName: vi.fn().mockResolvedValue("alice"),
+    getMessagePermalink: vi.fn().mockResolvedValue("https://app.slack.com/archives/C1/p1000"),
     extractFiles: vi.fn().mockReturnValue([]),
     resolveChannel: vi.fn(),
     findPublicChannelByName: vi.fn().mockResolvedValue(null),
@@ -1316,6 +1317,37 @@ describe("service lifecycle decisions", () => {
       turnNotificationTurnId: "turn-1",
       turnNotificationEnabled: false,
     });
+    store.close();
+  });
+
+  it("returns the current worker thread permalink payload from the worker tool handler", async () => {
+    const { service, slack, store } = await createService();
+    createWorker(service, {
+      teamId: "T1",
+      channelId: "C1",
+      rootTs: "1.000",
+      appThreadId: "thread-1",
+    });
+
+    await expect(service.handleGetCurrentSlackThreadLinkTool(
+      { threadId: "thread-1", turnId: "turn-1", callId: "call-1" },
+    )).resolves.toBe(JSON.stringify({
+      permalink: "https://app.slack.com/archives/C1/p1000",
+      team_id: "T1",
+      channel_id: "C1",
+      root_ts: "1.000",
+    }, null, 2));
+    expect(slack.getMessagePermalink).toHaveBeenCalledWith("C1", "1.000");
+    store.close();
+  });
+
+  it("rejects current worker thread permalink lookup outside a worker thread", async () => {
+    const { service, store } = await createService();
+    createDmSession(service, { appThreadId: "dm-thread-1" });
+
+    await expect(service.handleGetCurrentSlackThreadLinkTool(
+      { threadId: "dm-thread-1", turnId: "turn-1", callId: "call-1" },
+    )).rejects.toThrow("Slack thread link lookup requires a worker thread context.");
     store.close();
   });
 
