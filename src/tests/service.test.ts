@@ -1403,6 +1403,9 @@ describe("service lifecycle decisions", () => {
     const result = await service.handleDmCommand(session, "workstream-create", ["ops", "parent=root", "Handles", "ops"]);
 
     expect(result.response).toContain("Created workstream ops");
+    expect(result.response).toContain("Open in Slack app:");
+    expect(result.response).toContain("Browser fallback:");
+    expect(result.response).toContain("Join Channel");
     expect(slack.createPublicChannel).toHaveBeenCalledWith("T1", "ops");
     expect(store.getWorkstreamByRelativePath("T1", "ops")).toMatchObject({
       relativePath: "ops",
@@ -1417,6 +1420,7 @@ describe("service lifecycle decisions", () => {
 
   it("creates a workstream from a worker thread command using the current workstream as the default parent", async () => {
     const { service, slack, store } = await createService();
+    createDmSession(service, { appThreadId: "dm-thread-1" });
     const worker = createWorker(service, { workstreamId: "T1:root" });
 
     await service.handleThreadCommand(worker, "workstream-create", ["ops"]);
@@ -1424,6 +1428,9 @@ describe("service lifecycle decisions", () => {
     expect(slack.createPublicChannel).toHaveBeenCalledWith("T1", "ops");
     expect(store.getWorkstreamByRelativePath("T1", "ops")).toBeTruthy();
     expect(slack.postThreadReply).toHaveBeenCalledWith("C1", "1.000", expect.stringContaining("Created workstream ops."));
+    expect(slack.postTopLevelMessage).toHaveBeenCalledWith("D1", expect.stringContaining("Open in Slack app: <slack://channel?team=T1&id=C-ops|#ops>"));
+    expect(slack.postTopLevelMessage).toHaveBeenCalledWith("D1", expect.stringContaining("Browser fallback: <https://app.slack.com/client/T1/C-ops|open channel>"));
+    expect(slack.postTopLevelMessage).toHaveBeenCalledWith("D1", expect.stringContaining("Join Channel"));
     store.close();
   });
 
@@ -1438,9 +1445,11 @@ describe("service lifecycle decisions", () => {
     );
 
     expect(result).toContain("Created workstream research.");
+    expect(result).toContain("Open in Slack app:");
     expect(slack.createPublicChannel).toHaveBeenCalledWith("T1", "research");
     expect(store.getWorkstreamByRelativePath("T1", "research")).toMatchObject({ relativePath: "research" });
     expect(slack.postTopLevelMessage).toHaveBeenCalledWith("D1", expect.stringContaining("Created workstream research."));
+    expect(slack.postTopLevelMessage).toHaveBeenCalledWith("D1", expect.stringContaining("Join Channel"));
     store.close();
   });
 

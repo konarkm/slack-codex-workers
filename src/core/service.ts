@@ -2420,15 +2420,10 @@ export class SlackCodexWorkersService extends EventEmitter {
         },
         async () => this.slack.createPublicChannel(input.teamId, input.slug),
       );
-      const message = [
-        `Created workstream ${formatWorkstreamAddress(workstream)}.`,
-        `channel: #${workstream.channelName}`,
-        `path: ${workstream.relativePath || "."}`,
-      ].join("\n");
+      const message = formatCreatedWorkstreamMessage(workstream);
       await this.notifyAdminControlSurface(
         input.teamId,
         `${message}\ninitiated_from: ${input.initiatedFrom}`,
-        input.excludeAdminChannelId ?? null,
       );
       return message;
     } catch (error) {
@@ -3510,6 +3505,19 @@ function formatWebhookMailboxInfo(config: AppConfig, mailbox: WebhookMailboxStat
     `auth_header_bearer: Authorization: Bearer ${mailbox.currentSecret}`,
     `auth_header_alt: x-bridge-webhook-secret: ${mailbox.currentSecret}`,
     "json_body_shape: {\"source\":\"agentmail\",\"event\":\"email.received\",\"id\":\"optional-id\",\"match\":{\"key\":\"value\"},\"payload\":{...}}",
+  ].join("\n");
+}
+
+function formatCreatedWorkstreamMessage(workstream: WorkstreamRecord): string {
+  const appLink = `slack://channel?team=${workstream.teamId}&id=${workstream.channelId}`;
+  const browserLink = `https://app.slack.com/client/${workstream.teamId}/${workstream.channelId}`;
+  return [
+    `Created workstream ${formatWorkstreamAddress(workstream)}.`,
+    `channel: #${workstream.channelName}`,
+    `path: ${workstream.relativePath || "."}`,
+    `Open in Slack app: <${appLink}|#${workstream.channelName}>`,
+    `Browser fallback: <${browserLink}|open channel>`,
+    "Then click Join Channel and send your first top-level message there.",
   ].join("\n");
 }
 
