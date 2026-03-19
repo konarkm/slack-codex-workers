@@ -520,6 +520,61 @@ describe("service lifecycle decisions", () => {
     store.close();
   });
 
+  it("spawns into the current workstream when workstream is omitted", async () => {
+    const { service, codex, store } = await createService();
+    store.upsertWorkstream({
+      id: "T1:customers/ef",
+      teamId: "T1",
+      parentId: "T1:root",
+      slug: "ef",
+      relativePath: "customers/ef",
+      channelId: "C-ef",
+      channelName: "ef",
+      description: null,
+      archivedAt: null,
+    });
+    store.upsertWorker({
+      key: "T1:C-ef:2.000",
+      teamId: "T1",
+      channelId: "C-ef",
+      rootTs: "2.000",
+      workstreamId: "T1:customers/ef",
+      appThreadId: "thread-parent-ef",
+      activeTurnId: null,
+      ownerUserId: "U1",
+      rootOwnerUserId: "U1",
+      status: "idle",
+      currentAgentSlackTs: null,
+      currentAgentItemId: null,
+      currentWorklogSlackTs: null,
+      settings: { model: "gpt-5.4", effort: "high" },
+      identity: { username: "Gear", iconEmoji: "gear" },
+      parentWorkerKey: null,
+      requestItemId: null,
+      requestItemPath: null,
+      terminalResponseItemId: null,
+      turnNotificationTurnId: null,
+      turnNotificationEnabled: false,
+      lastError: null,
+      lastInboundMessageTs: null,
+      pendingRequest: null,
+    });
+    codex.createWorkerThread.mockResolvedValue({ threadId: "thread-child-current" });
+    codex.startTurnWithResumeFallback.mockResolvedValue("turn-child-current");
+
+    const result = await service.handleSpawnWorkerTool(
+      { title: "Follow up", initialUserMessage: "Do it here", mode: "fresh" },
+      { threadId: "thread-parent-ef", turnId: "turn-1", callId: "call-current" },
+    );
+
+    expect(result).toContain("workstream customers/ef");
+    expect(store.getWorkerByAppThreadId("thread-child-current")).toMatchObject({
+      channelId: "C-ef",
+      workstreamId: "T1:customers/ef",
+    });
+    store.close();
+  });
+
   it("lists active workstreams for the current worker team", async () => {
     const { service, store } = await createService();
     createWorker(service);
@@ -585,6 +640,39 @@ describe("service lifecycle decisions", () => {
 
     expect(result).toContain("workstream root");
     expect(store.getWorkerByAppThreadId("thread-child-root")).toMatchObject({
+      channelId: "C1",
+      workstreamId: "T1:root",
+    });
+    store.close();
+  });
+
+  it("treats bare root and dot aliases as the root workstream when spawning a child worker", async () => {
+    const { service, slack, codex, store } = await createService();
+    createWorker(service);
+    slack.postTopLevelMessage
+      .mockResolvedValueOnce("3.000")
+      .mockResolvedValueOnce("4.000");
+    codex.createWorkerThread
+      .mockResolvedValueOnce({ threadId: "thread-child-root-name" })
+      .mockResolvedValueOnce({ threadId: "thread-child-root-dot" });
+    codex.startTurnWithResumeFallback
+      .mockResolvedValueOnce("turn-child-root-name")
+      .mockResolvedValueOnce("turn-child-root-dot");
+
+    await expect(service.handleSpawnWorkerTool(
+      { workstream: "root", title: "Root child name", initialUserMessage: "Stay in root", mode: "fresh" },
+      { threadId: "thread-1", turnId: "turn-1", callId: "call-root-name" },
+    )).resolves.toContain("workstream root");
+    await expect(service.handleSpawnWorkerTool(
+      { workstream: ".", title: "Root child dot", initialUserMessage: "Stay in root", mode: "fresh" },
+      { threadId: "thread-1", turnId: "turn-1", callId: "call-root-dot" },
+    )).resolves.toContain("workstream root");
+
+    expect(store.getWorkerByAppThreadId("thread-child-root-name")).toMatchObject({
+      channelId: "C1",
+      workstreamId: "T1:root",
+    });
+    expect(store.getWorkerByAppThreadId("thread-child-root-dot")).toMatchObject({
       channelId: "C1",
       workstreamId: "T1:root",
     });
