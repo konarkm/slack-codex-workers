@@ -41,7 +41,7 @@ export const workerDynamicTools = [
   {
     name: slackListWorkstreamsToolName,
     description:
-      "List registered active workstreams so you can decide where visible child work should be created. Prefer this over slack_list_channels when routing follow-up work. Returns workstream paths plus their Slack channel names and ids.",
+      "List registered active workstreams so you can decide where visible child work should be created or handed off. Prefer this over slack_list_channels when routing follow-up work, delegation, or triage into the right workstream. Returns workstream paths plus their Slack channel names and ids.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -53,7 +53,7 @@ export const workerDynamicTools = [
   {
     name: slackSpawnWorkerToolName,
     description:
-      "Create a top-level Slack post in a registered workstream and immediately start a separate Codex worker thread for a distinct user-facing task. Use this only for visible child work, not for internal delegation. If workstream is omitted, use the current workstream. workstream should be a canonical relative path like customers/ef or a root alias such as root, /root, or . Use mode='fresh' unless the child truly needs the parent thread context; use mode='fork' only when inheriting context is important.",
+      "Create a top-level Slack post in a registered workstream and immediately start a separate Codex worker thread for a distinct user-facing task. This is the visible delegation and handoff primitive for splitting work into another workstream lane. If workstream is omitted, use the current workstream. workstream should be a canonical relative path like customers/ef or a root alias such as root, /root, or . The spawned worker is fire-and-forget: it does not return a direct response to the parent, so only use this when a separate visible work lane is the right handoff. Use mode='fresh' unless the child truly needs the parent thread context; use mode='fork' only when inheriting context is important.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -437,8 +437,10 @@ export const workerDeveloperInstructions = [
   "During normal execution and routine updates, communicate like a strong operator or employee: lead with the result or current state, keep routine updates concise, and mention detailed evidence only when it is material, surprising, risky, or requested.",
   "When the user is planning, evaluating options, discussing architecture, or setting up a long-horizon workflow, do not over-compress. In those planning conversations, explain tradeoffs, assumptions, and recommended paths clearly enough to support good decisions.",
   "Use normal assistant messages to communicate substantive progress. Raw reasoning is not shown to the human.",
-  "Use list_workstreams when you need to choose the right registered workstream for visible child work. Use slack_list_channels only when you specifically need a channel-level view.",
-  "Use slack_spawn_worker only for distinct user-facing child tasks that should live as their own top-level Slack thread. Target other workstreams by canonical workstream path, not by Slack channel. Do not use it for internal subagents or minor follow-ups.",
+  "Treat workstream handoff as a normal way to delegate or route work when a separate lane would help. Prefer downward delegation into more specific workstreams when the split is obvious; sideways handoff into peer workstreams is allowed but should be more deliberate.",
+  "Proactively suggest spawning a child worker when a separate visible work lane would improve delegation, triage, or handoff. When that split is obvious and clearly beneficial, you may directly spawn the child worker without waiting for another round of user confirmation.",
+  "Use list_workstreams when you need to choose the right registered workstream for visible child work, delegation, or handoff. Use slack_list_channels only when you specifically need a channel-level view.",
+  "Use slack_spawn_worker only for distinct user-facing child tasks that should live as their own top-level Slack thread. Target other workstreams by canonical workstream path, not by Slack channel. A spawned child worker does not send a direct response back to the parent, so if later follow-up or deliverables matter, rely on durable coordination paths such as workstream files or future wakeups rather than assuming synchronous feedback. Do not use it for internal subagents or minor follow-ups.",
   "Use slack_create_workstream only after the human has explicitly approved creating a new workstream in the current conversation. This is conversational/tool guidance, not a separate permission layer.",
   "Use get_current_time when you need the current local time or configured workspace timezone for time-aware reasoning or scheduling.",
   "Use get_current_slack_thread_link when you need the exact permalink and Slack routing ids for the current public worker thread so you can reference it from another system.",

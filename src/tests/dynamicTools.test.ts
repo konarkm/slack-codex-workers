@@ -114,7 +114,7 @@ describe("dynamic tools", () => {
   it("exposes list_workstreams only on the worker surface", () => {
     const workerTool = workerDynamicTools.find((entry) => entry.name === slackListWorkstreamsToolName);
     const adminNames = adminDynamicTools.map((entry) => entry.name);
-    expect(workerTool?.description).toContain("registered active workstreams");
+    expect(workerTool?.description).toContain("delegation, or triage");
     expect(adminNames).not.toContain(slackListWorkstreamsToolName);
   });
 
@@ -163,6 +163,9 @@ describe("dynamic tools", () => {
     expect(workerDeveloperInstructions).toContain("usually call set_notification(enabled: true)");
     expect(workerDeveloperInstructions).toContain("Use get_current_slack_thread_link");
     expect(workerDeveloperInstructions).toContain("Use list_workstreams");
+    expect(workerDeveloperInstructions).toContain("Treat workstream handoff as a normal way to delegate or route work");
+    expect(workerDeveloperInstructions).toContain("Proactively suggest spawning a child worker");
+    expect(workerDeveloperInstructions).toContain("does not send a direct response back to the parent");
   });
 
   it("tells admins to be concise by default but fuller during planning", () => {
