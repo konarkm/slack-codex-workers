@@ -44,9 +44,18 @@ interface SlackApiErrorLike {
 }
 
 interface FilesUploadV2ResponseLike {
-  files?: Array<{ id?: string; title?: string; name?: string; permalink?: string }>;
+  files?: Array<
+    | { id?: string; title?: string; name?: string; permalink?: string }
+    | {
+      ok?: boolean;
+      files?: Array<{ id?: string; title?: string; name?: string; permalink?: string }>;
+      file?: { id?: string; title?: string; name?: string; permalink?: string };
+    }
+  >;
   file?: { id?: string; title?: string; name?: string; permalink?: string };
 }
+
+type SlackUploadedFileLike = { id?: string; title?: string; name?: string; permalink?: string };
 
 export interface SlackUploadedFile {
   id: string | null;
@@ -192,7 +201,7 @@ export class SlackGateway {
       this.config.slackUploadTimeoutMs,
       "Slack file upload timed out.",
     );
-    const uploaded = response.files ?? (response.file ? [response.file] : []);
+    const uploaded = flattenUploadedFiles(response);
     return uploaded.map((file, index) => ({
       id: typeof file.id === "string" ? file.id : null,
       name: typeof file.name === "string" ? file.name : files[index]?.filename ?? `file-${index + 1}`,
@@ -368,6 +377,29 @@ export class SlackGateway {
       throw error;
     }
   }
+}
+
+function flattenUploadedFiles(response: FilesUploadV2ResponseLike): Array<{ id?: string; title?: string; name?: string; permalink?: string }> {
+  if (response.file) {
+    return [response.file];
+  }
+  if (!response.files) {
+    return [];
+  }
+  const flattened: SlackUploadedFileLike[] = [];
+  for (const entry of response.files) {
+    if (!entry || typeof entry !== "object") continue;
+    if ("files" in entry || "file" in entry) {
+      if (entry.files) {
+        flattened.push(...entry.files);
+      } else if (entry.file) {
+        flattened.push(entry.file);
+      }
+      continue;
+    }
+    flattened.push(entry as SlackUploadedFileLike);
+  }
+  return flattened;
 }
 
 async function promiseWithTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
