@@ -28,4 +28,13 @@ describe("renderer", () => {
     const text = normalizeSlackMrkdwn("**Bold** and __italic__ with [OpenAI](https://openai.com/).");
     expect(text).toBe("*Bold* and _italic_ with <https://openai.com/|OpenAI>.");
   });
+
+  it("flattens local markdown links while preserving plain text paths", () => {
+    const text = normalizeSlackMrkdwn(
+      "See [schema.ts](/Users/konark/code/work/foo/schema.ts#L10), [local](./src/file.ts), [file](file:///tmp/a.txt), and plain /Users/konark/code/work/foo/schema.ts.",
+    );
+    expect(text).toBe(
+      "See schema.ts, local, file, and plain /Users/konark/code/work/foo/schema.ts.",
+    );
+  });
 });
