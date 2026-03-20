@@ -103,6 +103,13 @@ export class RegistrationManager {
     if (!source) {
       throw new Error("Webhook source must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}.");
     }
+    const existingSource = this.store.getWebhookSource(ctx.teamId, source);
+    if (!existingSource) {
+      throw new Error(`Webhook source ${source} does not exist.`);
+    }
+    if (!existingSource.enabled) {
+      throw new Error(`Webhook source ${source} is disabled.`);
+    }
     if (input.target === "workstream" && input.deliveryMode === "steer") {
       throw new Error("Webhook deliveryMode=steer is only valid for target=self.");
     }

@@ -3282,6 +3282,33 @@ describe("service lifecycle decisions", () => {
         target: "self",
       },
     )).rejects.toThrow("Webhook source must match");
+
+    await expect(service.registrations.setWebhook(
+      {
+        teamId: "T1",
+        workstream: workstream!,
+        worker,
+      },
+      {
+        source: "github",
+        events: ["push"],
+        target: "self",
+      },
+    )).rejects.toThrow("Webhook source github does not exist");
+
+    await createWebhookSource(service, { source: "github", enabled: false });
+    await expect(service.registrations.setWebhook(
+      {
+        teamId: "T1",
+        workstream: workstream!,
+        worker,
+      },
+      {
+        source: "github",
+        events: ["push"],
+        target: "self",
+      },
+    )).rejects.toThrow("Webhook source github is disabled");
   });
 
   it("accepts webhook HTTP ingress through the running service and requests wake scheduling", async () => {
