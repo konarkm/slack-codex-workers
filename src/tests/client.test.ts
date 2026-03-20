@@ -138,6 +138,34 @@ describe("codex client dynamic tool routing", () => {
     });
   });
 
+  it("routes list_webhook_registrations through the dynamic tool handler", async () => {
+    const respond = vi.fn().mockResolvedValue(undefined);
+    const listWebhookRegistrations = vi.fn().mockResolvedValue("reg-1 [enabled] workstream=root target=worker:T1:C1:1.000 delivery=steer events=issue.updated match={\"issue_id\":\"LIN-123\"}");
+    const client = Object.create(CodexClient.prototype) as any;
+    client.rpc = { respond };
+    client.dynamicToolHandlers = { listWebhookRegistrations };
+
+    await client.handleDynamicToolCall("req-3a", {
+      threadId: "thread-3a",
+      turnId: "turn-3a",
+      callId: "call-3a",
+      tool: "list_webhook_registrations",
+      arguments: { source: "linear" },
+    });
+
+    expect(listWebhookRegistrations).toHaveBeenCalledWith({
+      source: "linear",
+    }, {
+      threadId: "thread-3a",
+      turnId: "turn-3a",
+      callId: "call-3a",
+    });
+    expect(respond).toHaveBeenCalledWith("req-3a", {
+      contentItems: [{ type: "inputText", text: "reg-1 [enabled] workstream=root target=worker:T1:C1:1.000 delivery=steer events=issue.updated match={\"issue_id\":\"LIN-123\"}" }],
+      success: true,
+    });
+  });
+
   it("routes set_notification through the dynamic tool handler", async () => {
     const respond = vi.fn().mockResolvedValue(undefined);
     const setNotification = vi.fn().mockResolvedValue("Notifications enabled for this turn.");

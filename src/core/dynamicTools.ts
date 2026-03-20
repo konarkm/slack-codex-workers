@@ -12,6 +12,7 @@ export const slackGetCurrentSlackThreadLinkToolName = "get_current_slack_thread_
 export const slackCreateWebhookSourceToolName = "create_webhook_source";
 export const slackListWebhookSourcesToolName = "list_webhook_sources";
 export const slackGetWebhookSourceToolName = "get_webhook_source";
+export const slackListWebhookRegistrationsToolName = "list_webhook_registrations";
 export const slackDisableWebhookSourceToolName = "disable_webhook_source";
 export const slackRotateWebhookSourceRouteToolName = "rotate_webhook_source_route";
 export const slackSetNotificationToolName = "set_notification";
@@ -159,6 +160,19 @@ export const workerDynamicTools = [
     name: slackGetWebhookSourceToolName,
     description:
       "Inspect one webhook source definition, including its public URL when configured and the handler file path that owns its normalization contract.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["source"],
+      properties: {
+        source: { type: "string", minLength: 1, pattern: webhookSourcePattern },
+      },
+    },
+  },
+  {
+    name: slackListWebhookRegistrationsToolName,
+    description:
+      "List all webhook registrations in the current workspace that depend on one webhook source. Use this before changing a shared handler contract so you can preserve existing event names, normalized match fields, and behavior relied on elsewhere.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -317,6 +331,7 @@ export const adminDynamicTools = [
   workerDynamicTools.find((entry) => entry.name === slackCreateWebhookSourceToolName)!,
   workerDynamicTools.find((entry) => entry.name === slackListWebhookSourcesToolName)!,
   workerDynamicTools.find((entry) => entry.name === slackGetWebhookSourceToolName)!,
+  workerDynamicTools.find((entry) => entry.name === slackListWebhookRegistrationsToolName)!,
   workerDynamicTools.find((entry) => entry.name === slackDisableWebhookSourceToolName)!,
   workerDynamicTools.find((entry) => entry.name === slackRotateWebhookSourceRouteToolName)!,
   workerDynamicTools.find((entry) => entry.name === slackCreateWorkstreamToolName)!,
@@ -434,6 +449,9 @@ export const slackListWebhookSourcesArgsSchema = z.object({
 export const slackGetWebhookSourceArgsSchema = z.object({
   source: z.string().min(1),
 });
+export const slackListWebhookRegistrationsArgsSchema = z.object({
+  source: z.string().min(1),
+});
 export const slackDisableWebhookSourceArgsSchema = z.object({
   source: z.string().min(1),
 });
@@ -510,7 +528,8 @@ export const workerDeveloperInstructions = [
   "Use slack_create_workstream only after the human has explicitly approved creating a new workstream in the current conversation. This is conversational/tool guidance, not a separate permission layer.",
   "Use get_current_time when you need the current local time or configured workspace timezone for time-aware reasoning or scheduling.",
   "Use get_current_slack_thread_link when you need the exact permalink and Slack routing ids for the current public worker thread so you can reference it from another system.",
-  "Use create_webhook_source, list_webhook_sources, get_webhook_source, disable_webhook_source, and rotate_webhook_source_route to manage workspace-global raw webhook intake routes and their handler files. A webhook source has one authoritative source name, one secret route, and one handler contract.",
+  "Use create_webhook_source, list_webhook_sources, get_webhook_source, list_webhook_registrations, disable_webhook_source, and rotate_webhook_source_route to manage workspace-global raw webhook intake routes and their handler files. A webhook source has one authoritative source name, one secret route, and one handler contract.",
+  "Before changing a shared webhook handler contract, use list_webhook_registrations for that source and preserve existing event names and normalized match fields unless you are intentionally updating dependent registrations too.",
   "Use set_notification(enabled: true|false) to decide whether the current worker turn should notify the human on completion. The default is no notification unless you opt in.",
   "For direct back-and-forth with the human in this Slack thread, you should usually call set_notification(enabled: true) before finishing your turn unless the human asked you not to notify them.",
   "For autonomous heartbeat, cron, or webhook wake work, usually leave notification off unless there is a material update, blocker, risk, or decision that warrants pinging the human.",
@@ -528,7 +547,8 @@ export const adminDeveloperInstructions = [
   "When the user is planning, evaluating options, discussing architecture, or setting up a long-horizon workflow, do not over-compress. In those planning conversations, explain tradeoffs, assumptions, and recommended paths clearly enough to support good decisions.",
   "Use slack_create_workstream only after the human has explicitly approved creating a new workstream in the conversation.",
   "Use get_current_time when you need the current local time or configured workspace timezone.",
-  "Use create_webhook_source, list_webhook_sources, get_webhook_source, disable_webhook_source, and rotate_webhook_source_route to manage workspace-global raw webhook intake routes and their handler files.",
+  "Use create_webhook_source, list_webhook_sources, get_webhook_source, list_webhook_registrations, disable_webhook_source, and rotate_webhook_source_route to manage workspace-global raw webhook intake routes and their handler files.",
+  "Before changing a shared webhook handler contract, inspect list_webhook_registrations for that source and preserve existing event names and normalized match fields unless you are intentionally updating dependent registrations too.",
   "Prefer admin-specific tools before shell exploration for operational tasks in the admin DM.",
   "For registration inspection and cleanup, use list_registrations_admin, get_registration_admin, disable_registration_admin, and list_wake_deliveries_admin first. These tools accept explicit workstream or registration filters instead of using current worker-thread scope.",
   "Use archive_workstream_admin when the human wants to retire a child workstream from the admin DM. This is the admin path for archiving a workstream, not a worker-thread operation.",

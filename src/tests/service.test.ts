@@ -2289,6 +2289,16 @@ describe("service lifecycle decisions", () => {
       createdAt: "2026-03-17T00:00:00.000Z",
       updatedAt: "2026-03-17T00:00:00.000Z",
     });
+    store.createWebhookSource({
+      id: "src-1b",
+      teamId: "T2",
+      source: "linear",
+      routeToken: "route-1b",
+      handlerPath: "/tmp/linear-t2/handler.mjs",
+      enabled: true,
+      createdAt: "2026-03-17T00:00:00.000Z",
+      updatedAt: "2026-03-17T00:00:00.000Z",
+    });
 
     const result = await (service as any).handleRotateWebhookSourceRouteTool({
       source: "linear",
@@ -2309,6 +2319,167 @@ describe("service lifecycle decisions", () => {
       turnId: "turn-2",
       callId: "call-2",
     })).rejects.toThrow("worker thread or admin DM context");
+    store.close();
+  });
+
+  it("lists webhook registrations for a shared source across the workspace", async () => {
+    const { service, store } = await createService();
+    createWorker(service, { workstreamId: "T1:root" });
+    createDmSession(service, { appThreadId: "dm-thread-1" });
+    store.createWebhookSource({
+      id: "src-1",
+      teamId: "T1",
+      source: "linear",
+      routeToken: "route-1",
+      handlerPath: "/tmp/linear/handler.mjs",
+      enabled: true,
+      createdAt: "2026-03-17T00:00:00.000Z",
+      updatedAt: "2026-03-17T00:00:00.000Z",
+    });
+    store.upsertWorkstream({
+      id: "T1:customers",
+      teamId: "T1",
+      relativePath: "customers",
+      parentId: "T1:root",
+      slug: "customers",
+      channelId: "C-customers",
+      channelName: "customers",
+      description: null,
+      createdAt: "2026-03-17T00:00:00.000Z",
+      updatedAt: "2026-03-17T00:00:00.000Z",
+      archivedAt: null,
+    });
+    store.upsertRegistration({
+      id: "reg-root",
+      teamId: "T1",
+      workstreamId: "T1:root",
+      workerKey: "T1:C1:1.000",
+      ownerUserId: "U1",
+      rootOwnerUserId: "U1",
+      description: null,
+      enabled: true,
+      target: { kind: "worker", workstreamId: "T1:root", workerKey: "T1:C1:1.000" },
+      action: { kind: "wake_self" },
+      trigger: { kind: "webhook", source: "linear", events: ["issue.updated"], deliveryMode: "steer", match: { issue_id: "LIN-123" } },
+      createdAt: "2026-03-17T00:00:00.000Z",
+      updatedAt: "2026-03-17T00:00:00.000Z",
+    });
+    store.upsertRegistration({
+      id: "reg-child",
+      teamId: "T1",
+      workstreamId: "T1:customers",
+      workerKey: null,
+      ownerUserId: "U1",
+      rootOwnerUserId: "U1",
+      description: null,
+      enabled: false,
+      target: { kind: "workstream", workstreamId: "T1:customers", workerKey: null },
+      action: { kind: "spawn" },
+      trigger: { kind: "webhook", source: "linear", events: ["project.updated"], deliveryMode: "queue", match: { project_id: "proj_123" } },
+      createdAt: "2026-03-17T00:00:00.000Z",
+      updatedAt: "2026-03-17T00:00:00.000Z",
+    });
+    store.upsertRegistration({
+      id: "reg-other-source",
+      teamId: "T1",
+      workstreamId: "T1:root",
+      workerKey: "T1:C1:1.000",
+      ownerUserId: "U1",
+      rootOwnerUserId: "U1",
+      description: null,
+      enabled: true,
+      target: { kind: "worker", workstreamId: "T1:root", workerKey: "T1:C1:1.000" },
+      action: { kind: "wake_self" },
+      trigger: { kind: "webhook", source: "stripe", events: ["invoice.paid"], deliveryMode: "queue", match: { customer_id: "cus_123" } },
+      createdAt: "2026-03-17T00:00:00.000Z",
+      updatedAt: "2026-03-17T00:00:00.000Z",
+    });
+    store.upsertRegistration({
+      id: "reg-heartbeat",
+      teamId: "T1",
+      workstreamId: "T1:root",
+      workerKey: "T1:C1:1.000",
+      ownerUserId: "U1",
+      rootOwnerUserId: "U1",
+      description: null,
+      enabled: true,
+      target: { kind: "worker", workstreamId: "T1:root", workerKey: "T1:C1:1.000" },
+      action: { kind: "wake_self" },
+      trigger: { kind: "heartbeat", intervalMinutes: 15 },
+      createdAt: "2026-03-17T00:00:00.000Z",
+      updatedAt: "2026-03-17T00:00:00.000Z",
+    });
+    store.upsertRegistration({
+      id: "reg-t2",
+      teamId: "T2",
+      workstreamId: "T1:root",
+      workerKey: "T2:C2:1.000",
+      ownerUserId: "U2",
+      rootOwnerUserId: "U2",
+      description: null,
+      enabled: true,
+      target: { kind: "worker", workstreamId: "T1:root", workerKey: "T2:C2:1.000" },
+      action: { kind: "wake_self" },
+      trigger: { kind: "webhook", source: "linear", events: ["issue.updated"], deliveryMode: "queue", match: { issue_id: "LIN-999" } },
+      createdAt: "2026-03-17T00:00:00.000Z",
+      updatedAt: "2026-03-17T00:00:00.000Z",
+    });
+
+    const workerView = await (service as any).handleListWebhookRegistrationsTool(
+      { source: "linear" },
+      { threadId: "thread-1", turnId: "turn-1", callId: "call-1" },
+    );
+    expect(workerView).toContain("reg-root [enabled] workstream=root target=worker:T1:C1:1.000 delivery=steer events=issue.updated match={\"issue_id\":\"LIN-123\"}");
+    expect(workerView).toContain("reg-child [disabled] workstream=customers target=workstream:T1:customers delivery=queue events=project.updated match={\"project_id\":\"proj_123\"}");
+    expect(workerView).not.toContain("reg-other-source");
+    expect(workerView).not.toContain("reg-heartbeat");
+    expect(workerView).not.toContain("reg-t2");
+
+    const adminView = await (service as any).handleListWebhookRegistrationsTool(
+      { source: "linear" },
+      { threadId: "dm-thread-1", turnId: "turn-2", callId: "call-2" },
+    );
+    expect(adminView).toContain("reg-root");
+    expect(adminView).toContain("reg-child");
+    expect(adminView).not.toContain("reg-other-source");
+    expect(adminView).not.toContain("reg-heartbeat");
+    expect(adminView).not.toContain("reg-t2");
+
+    const emptySource = await (service as any).handleListWebhookRegistrationsTool(
+      { source: "linear" },
+      { threadId: "thread-1", turnId: "turn-4", callId: "call-4" },
+    );
+    store.disableRegistration("reg-root");
+    store.disableRegistration("reg-child");
+    const disabledOnly = await (service as any).handleListWebhookRegistrationsTool(
+      { source: "linear" },
+      { threadId: "thread-1", turnId: "turn-5", callId: "call-5" },
+    );
+    expect(emptySource).toContain("reg-root");
+    expect(disabledOnly).toContain("reg-root [disabled] workstream=root target=worker:T1:C1:1.000 delivery=steer events=issue.updated match={\"issue_id\":\"LIN-123\"}");
+    expect(disabledOnly).toContain("reg-child [disabled] workstream=customers target=workstream:T1:customers delivery=queue events=project.updated match={\"project_id\":\"proj_123\"}");
+    expect(disabledOnly).not.toContain("[enabled]");
+
+    store.createWebhookSource({
+      id: "src-2",
+      teamId: "T1",
+      source: "github",
+      routeToken: "route-2",
+      handlerPath: "/tmp/github/handler.mjs",
+      enabled: true,
+      createdAt: "2026-03-17T00:00:00.000Z",
+      updatedAt: "2026-03-17T00:00:00.000Z",
+    });
+    const noDependents = await (service as any).handleListWebhookRegistrationsTool(
+      { source: "github" },
+      { threadId: "thread-1", turnId: "turn-6", callId: "call-6" },
+    );
+    expect(noDependents).toBe("No webhook registrations depend on source github.");
+
+    await expect((service as any).handleListWebhookRegistrationsTool(
+      { source: "missing" },
+      { threadId: "thread-1", turnId: "turn-7", callId: "call-7" },
+    )).rejects.toThrow("Webhook source missing does not exist.");
     store.close();
   });
 

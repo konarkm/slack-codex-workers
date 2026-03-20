@@ -145,6 +145,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       createWebhookSource: async (args, ctx) => this.handleCreateWebhookSourceTool(args, ctx),
       listWebhookSources: async (args, ctx) => this.handleListWebhookSourcesTool(args, ctx),
       getWebhookSource: async (args, ctx) => this.handleGetWebhookSourceTool(args, ctx),
+      listWebhookRegistrations: async (args, ctx) => this.handleListWebhookRegistrationsTool(args, ctx),
       disableWebhookSource: async (args, ctx) => this.handleDisableWebhookSourceTool(args, ctx),
       rotateWebhookSourceRoute: async (args, ctx) => this.handleRotateWebhookSourceRouteTool(args, ctx),
       setNotification: async (args, ctx) => this.handleSetNotificationTool(args, ctx),
@@ -1888,6 +1889,24 @@ export class SlackCodexWorkersService extends EventEmitter {
     return JSON.stringify(this.formatWebhookSourceInfo(source), null, 2);
   }
 
+  private async handleListWebhookRegistrationsTool(
+    args: { source: string },
+    ctx: DynamicToolHandlerContext,
+  ): Promise<string> {
+    const teamId = this.resolveDynamicToolTeamId(ctx);
+    const source = this.webhookSources.getSource(teamId, args.source);
+    if (!source) {
+      throw new Error(`Webhook source ${args.source} does not exist.`);
+    }
+    const registrations = this.store
+      .listRegistrationsForTeam(teamId)
+      .filter((registration) => registration.trigger.kind === "webhook" && registration.trigger.source === source.source);
+    if (registrations.length === 0) {
+      return `No webhook registrations depend on source ${source.source}.`;
+    }
+    return registrations.map((registration) => this.formatWebhookRegistrationLine(registration)).join("\n");
+  }
+
   private async handleDisableWebhookSourceTool(
     args: { source: string },
     ctx: DynamicToolHandlerContext,
@@ -3538,6 +3557,27 @@ export class SlackCodexWorkersService extends EventEmitter {
       `workstream=${workstream ? formatWorkstreamAddress(workstream) : registration.workstreamId}`,
       registration.description ? `description=${registration.description}` : "",
     ].filter(Boolean).join(" ");
+  }
+
+  private formatWebhookRegistrationLine(registration: RegistrationRecord): string {
+    const workstream = this.store.getWorkstreamById(registration.workstreamId, { includeArchived: true });
+    const target = registration.target.kind === "worker"
+      ? `worker:${registration.target.workerKey ?? "(missing)"}`
+      : `workstream:${registration.target.workstreamId}`;
+    const events = registration.trigger.kind === "webhook" ? registration.trigger.events.join(",") : "";
+    const delivery = registration.trigger.kind === "webhook" ? registration.trigger.deliveryMode : "";
+    const match = registration.trigger.kind === "webhook" && registration.trigger.match
+      ? JSON.stringify(registration.trigger.match)
+      : "{}";
+    return [
+      registration.id,
+      `[${registration.enabled ? "enabled" : "disabled"}]`,
+      `workstream=${workstream ? formatWorkstreamAddress(workstream) : registration.workstreamId}`,
+      `target=${target}`,
+      `delivery=${delivery}`,
+      `events=${events}`,
+      `match=${match}`,
+    ].join(" ");
   }
 
   private formatAdminWakeLine(wake: {

@@ -635,6 +635,7 @@ The first-class bridge tool surface is:
 - `create_webhook_source(...)`
 - `list_webhook_sources(...)`
 - `get_webhook_source(...)`
+- `list_webhook_registrations(...)`
 - `disable_webhook_source(...)`
 - `rotate_webhook_source_route(...)`
 - `set_heartbeat(...)`

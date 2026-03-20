@@ -38,6 +38,7 @@ Implemented in this repo:
   - `create_webhook_source`
   - `list_webhook_sources`
   - `get_webhook_source`
+  - `list_webhook_registrations`
   - `disable_webhook_source`
   - `rotate_webhook_source_route`
   - `set_notification`
@@ -55,6 +56,7 @@ Implemented in this repo:
   - `create_webhook_source`
   - `list_webhook_sources`
   - `get_webhook_source`
+  - `list_webhook_registrations`
   - `disable_webhook_source`
   - `rotate_webhook_source_route`
   - `list_registrations_admin`
@@ -216,6 +218,7 @@ For a supervised production build:
 - `slack_spawn_worker` targets workstreams, not Slack channels. Omit `workstream` to target the current workstream, or pass a canonical workstream relative path such as `customers/ef`.
 - `slack_create_workstream` is available to workers and the admin DM. It is intended to be used after explicit user approval in the conversation, not behind a separate permission layer.
 - `create_webhook_source`, `list_webhook_sources`, `get_webhook_source`, `disable_webhook_source`, and `rotate_webhook_source_route` manage workspace-global raw webhook source definitions. Each source has one source name, one secret route, and one handler file.
+- `list_webhook_registrations` lists all registrations in the workspace that currently depend on one webhook source so agents can preserve existing event names, normalized match fields, and delivery behavior before changing a shared handler contract.
 - `set_notification(enabled: true|false)` is worker-only, turn-scoped, and opt-in; final worker replies stay visible by default but only mention the root owner when the worker explicitly enables notification for that turn.
 - `set_heartbeat` only works in a public worker thread and always targets the current worker with `wake_self`.
 - `set_cron` defaults to `target='self'`.

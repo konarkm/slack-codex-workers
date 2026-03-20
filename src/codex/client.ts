@@ -26,6 +26,8 @@ import {
   slackGetCurrentTimeToolName,
   slackGetCurrentSlackThreadLinkArgsSchema,
   slackGetCurrentSlackThreadLinkToolName,
+  slackListWebhookRegistrationsArgsSchema,
+  slackListWebhookRegistrationsToolName,
   slackGetWebhookSourceArgsSchema,
   slackGetWebhookSourceToolName,
   slackGetRegistrationArgsSchema,
@@ -94,6 +96,7 @@ export interface DynamicToolHandlers {
   createWebhookSource(args: z.infer<typeof slackCreateWebhookSourceArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
   listWebhookSources(args: z.infer<typeof slackListWebhookSourcesArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
   getWebhookSource(args: z.infer<typeof slackGetWebhookSourceArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
+  listWebhookRegistrations(args: z.infer<typeof slackListWebhookRegistrationsArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
   disableWebhookSource(args: z.infer<typeof slackDisableWebhookSourceArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
   rotateWebhookSourceRoute(args: z.infer<typeof slackRotateWebhookSourceRouteArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
   setNotification(args: z.infer<typeof slackSetNotificationArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
@@ -566,6 +569,13 @@ export class CodexClient {
     if (parsed.data.tool === slackGetWebhookSourceToolName) {
       const args = slackGetWebhookSourceArgsSchema.parse(parsed.data.arguments);
       const text = await this.dynamicToolHandlers.getWebhookSource(args, ctx);
+      await this.rpc.respond(id, { contentItems: [{ type: "inputText", text }], success: true });
+      return;
+    }
+
+    if (parsed.data.tool === slackListWebhookRegistrationsToolName) {
+      const args = slackListWebhookRegistrationsArgsSchema.parse(parsed.data.arguments);
+      const text = await this.dynamicToolHandlers.listWebhookRegistrations(args, ctx);
       await this.rpc.respond(id, { contentItems: [{ type: "inputText", text }], success: true });
       return;
     }

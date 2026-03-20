@@ -15,6 +15,7 @@ import {
   slackCreateWorkstreamArgsSchema,
   slackGetCurrentSlackThreadLinkToolName,
   slackGetWebhookSourceToolName,
+  slackListWebhookRegistrationsToolName,
   slackListWebhookSourcesToolName,
   slackRotateWebhookSourceRouteToolName,
   slackSetCronArgsSchema,
@@ -132,6 +133,7 @@ describe("dynamic tools", () => {
       slackCreateWebhookSourceToolName,
       slackListWebhookSourcesToolName,
       slackGetWebhookSourceToolName,
+      slackListWebhookRegistrationsToolName,
       slackDisableWebhookSourceToolName,
       slackRotateWebhookSourceRouteToolName,
     ];
@@ -169,10 +171,11 @@ describe("dynamic tools", () => {
     expect(workerDeveloperInstructions).toContain("usually call set_notification(enabled: true)");
     expect(workerDeveloperInstructions).toContain("Use get_current_slack_thread_link");
     expect(workerDeveloperInstructions).toContain("Use list_workstreams");
-    expect(workerDeveloperInstructions).toContain("create_webhook_source, list_webhook_sources, get_webhook_source");
+    expect(workerDeveloperInstructions).toContain("create_webhook_source, list_webhook_sources, get_webhook_source, list_webhook_registrations");
     expect(workerDeveloperInstructions).toContain("Treat workstream handoff as a normal way to delegate or route work");
     expect(workerDeveloperInstructions).toContain("Proactively suggest spawning a child worker");
     expect(workerDeveloperInstructions).toContain("does not send a direct response back to the parent");
+    expect(workerDeveloperInstructions).toContain("Before changing a shared webhook handler contract");
     expect(workerDeveloperInstructions).toContain("interleaved assistant messages into the Slack thread");
     expect(workerDeveloperInstructions).toContain("meaningful progress, blockers, or user-relevant state changes");
     expect(workerDeveloperInstructions).toContain("narrowly scoped output format");
@@ -182,6 +185,8 @@ describe("dynamic tools", () => {
     expect(adminDeveloperInstructions).toContain("communicate like a strong operator or employee");
     expect(adminDeveloperInstructions).toContain("do not over-compress");
     expect(adminDeveloperInstructions).toContain("planning, evaluating options, discussing architecture");
+    expect(adminDeveloperInstructions).toContain("list_webhook_registrations");
+    expect(adminDeveloperInstructions).toContain("Before changing a shared webhook handler contract");
   });
 
   it("exposes admin registration management tools only on the admin surface", () => {
