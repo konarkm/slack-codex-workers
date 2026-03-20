@@ -2453,22 +2453,28 @@ export class SlackCodexWorkersService extends EventEmitter {
         }
         try {
           const turnInput = buildWakeTurnInput(registration, wake);
+          let delivered = false;
           if (steerWebhook && worker.activeTurnId) {
             try {
               await this.codex.steerTurn(worker.appThreadId, worker.activeTurnId, turnInput);
+              delivered = true;
             } catch (error) {
               if (isMissingThreadError(error)) {
                 worker = await this.markWorkerRecoveryRequired(worker, "Backing Codex thread is missing. Run /recover to attach a fresh Codex thread to this Slack conversation.");
+                continue;
               } else if (shouldStartFreshTurnAfterSteerError(error)) {
                 worker = await this.clearWorkerStaleActiveTurn(worker, "Recovered stale active turn while processing a webhook steer.");
                 await this.startWorkerTurn(worker, turnInput);
+                delivered = true;
               } else {
                 throw error;
               }
             }
           } else {
             await this.startWorkerTurn(worker, turnInput);
+            delivered = true;
           }
+          if (!delivered) continue;
           this.store.updatePendingWake(wake.id, {
             status: "delivered",
             summary: `${wake.summary} (${steerWebhook && worker.activeTurnId ? "steered" : "delivered"})`,

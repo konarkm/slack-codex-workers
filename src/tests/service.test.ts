@@ -2243,7 +2243,7 @@ describe("service lifecycle decisions", () => {
     expect(details.source).toBe("linear");
     expect(details.route_path).toMatch(/^\/webhooks\/[a-f0-9]+$/);
     expect(details.public_url).toMatch(/^https:\/\/hooks\.example\.test\/webhooks\/[a-f0-9]+$/);
-    expect(details.handler_path).toContain("/.slack-workers/bridge/webhook-sources/linear/handler.mjs");
+    expect(details.handler_path).toContain("/.slack-workers/bridge/webhook-sources/T1/linear/handler.mjs");
 
     const inspected = await (service as any).handleGetWebhookSourceTool(
       { source: "linear" },
@@ -3024,6 +3024,9 @@ describe("service lifecycle decisions", () => {
     expect(store.getWorkerByKey("T1:C1:1.000")).toMatchObject({
       status: "recovery_required",
       lastError: expect.stringContaining("Backing Codex thread is missing"),
+    });
+    expect(store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000")[0]).toMatchObject({
+      status: "queued",
     });
     expect(codex.startTurnWithResumeFallback).not.toHaveBeenCalled();
     store.close();

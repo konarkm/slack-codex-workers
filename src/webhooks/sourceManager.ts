@@ -32,7 +32,7 @@ export class WebhookSourceManager {
     if (this.store.getWebhookSource(teamId, normalized)) {
       throw new Error(`Webhook source ${normalized} already exists.`);
     }
-    const handlerPath = this.buildHandlerPath(normalized);
+    const handlerPath = this.buildHandlerPath(teamId, normalized);
     await fs.mkdir(path.dirname(handlerPath), { recursive: true });
     await fs.writeFile(handlerPath, buildWebhookHandlerScaffold(normalized), { flag: "wx" });
     return this.store.createWebhookSource({
@@ -73,8 +73,8 @@ export class WebhookSourceManager {
     return current;
   }
 
-  private buildHandlerPath(source: string): string {
-    return path.join(this.config.workspaceRoot, ".slack-workers", "bridge", "webhook-sources", source, "handler.mjs");
+  private buildHandlerPath(teamId: string, source: string): string {
+    return path.join(this.config.workspaceRoot, ".slack-workers", "bridge", "webhook-sources", teamId, source, "handler.mjs");
   }
 }
 
