@@ -173,6 +173,8 @@ describe("dynamic tools", () => {
     expect(workerDeveloperInstructions).toContain("communicate like a strong operator or employee");
     expect(workerDeveloperInstructions).toContain("do not over-compress");
     expect(workerDeveloperInstructions).toContain("planning, evaluating options, discussing architecture");
+    expect(workerDeveloperInstructions).toContain("shared evolving context, not a fresh report each turn");
+    expect(workerDeveloperInstructions).toContain("lead with the delta or direct answer first");
     expect(workerDeveloperInstructions).toContain("Use set_notification(enabled: true|false)");
     expect(workerDeveloperInstructions).toContain("needs to reply, take action, make a decision");
     expect(workerDeveloperInstructions).toContain("still chugging along fine");
