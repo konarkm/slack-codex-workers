@@ -176,6 +176,9 @@ describe("dynamic tools", () => {
     expect(workerDeveloperInstructions).toContain("Use set_notification(enabled: true|false)");
     expect(workerDeveloperInstructions).toContain("needs to reply, take action, make a decision");
     expect(workerDeveloperInstructions).toContain("still chugging along fine");
+    expect(workerDeveloperInstructions).toContain("read the current workstream lineage context in root-to-leaf order");
+    expect(workerDeveloperInstructions).toContain("for each level from root through the current workstream");
+    expect(workerDeveloperInstructions).toContain("If the task later moves into a deeper nested workstream subtree");
     expect(workerDeveloperInstructions).toContain("Use get_current_slack_thread_link");
     expect(workerDeveloperInstructions).toContain("Use list_workstreams");
     expect(workerDeveloperInstructions).toContain("create_webhook_source, list_webhook_sources, get_webhook_source, list_webhook_registrations");
