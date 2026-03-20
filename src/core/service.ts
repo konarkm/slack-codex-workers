@@ -747,6 +747,7 @@ export class SlackCodexWorkersService extends EventEmitter {
     workstream: WorkstreamRecord;
     channelId: string;
     title: string;
+    visibleRootText?: string;
     itemBody: string;
     turnInput: TurnInput;
     rootOwnerUserId: string;
@@ -802,7 +803,7 @@ export class SlackCodexWorkersService extends EventEmitter {
 
     const rootTs = shell.rootTs
       ?? await this.enqueueSlackWrite(`spawn:${input.workstream.id}:${input.channelId}`, async () =>
-        this.slack.postTopLevelMessage(input.channelId, input.title, shell!.identity),
+        this.slack.postTopLevelMessage(input.channelId, input.visibleRootText ?? input.title, shell!.identity),
       );
     shell = this.store.upsertPendingWorkerShell({
       ...shell,
@@ -973,6 +974,23 @@ export class SlackCodexWorkersService extends EventEmitter {
     })();
     this.startingWorkerTurns.set(worker.key, turnPromise);
     return turnPromise;
+  }
+
+  private async postWakeDeliverySystemMessage(worker: WorkerRecord, text: string, mode: "delivered" | "steered"): Promise<void> {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    const label = mode === "steered" ? "Wake steered to Codex" : "Wake delivered to Codex";
+    try {
+      await this.enqueueSlackWrite(`wake-visible:${worker.key}`, async () => {
+        await this.slack.postThreadReply(worker.channelId, worker.rootTs, renderSystemMessage(`${label}:\n${trimmed}`));
+      });
+    } catch (error) {
+      logWarn("wake delivery visibility post failed", {
+        error: error instanceof Error ? error.message : String(error),
+        workerKey: worker.key,
+        mode,
+      });
+    }
   }
 
   private async startDmTurn(session: DmSessionRecord, input: TurnInput): Promise<string> {
@@ -1752,6 +1770,7 @@ export class SlackCodexWorkersService extends EventEmitter {
         workstream: targetWorkstream,
         channelId: targetWorkstream.channelId,
         title: args.title,
+        visibleRootText: buildSpawnWorkerRootText(args.title, args.initialUserMessage),
         itemBody: args.initialUserMessage,
         turnInput: { text: args.initialUserMessage, imagePaths: [] },
         rootOwnerUserId: parent.rootOwnerUserId,
@@ -2492,10 +2511,12 @@ export class SlackCodexWorkersService extends EventEmitter {
         try {
           const turnInput = buildWakeTurnInput(registration, wake);
           let delivered = false;
+          let deliveryLabel: "delivered" | "steered" = "delivered";
           if (steerWebhook && worker.activeTurnId) {
             try {
               await this.codex.steerTurn(worker.appThreadId, worker.activeTurnId, turnInput);
               delivered = true;
+              deliveryLabel = "steered";
             } catch (error) {
               if (isMissingThreadError(error)) {
                 worker = await this.markWorkerRecoveryRequired(worker, "Backing Codex thread is missing. Run /recover to attach a fresh Codex thread to this Slack conversation.");
@@ -2504,6 +2525,7 @@ export class SlackCodexWorkersService extends EventEmitter {
                 worker = await this.clearWorkerStaleActiveTurn(worker, "Recovered stale active turn while processing a webhook steer.");
                 await this.startWorkerTurn(worker, turnInput);
                 delivered = true;
+                deliveryLabel = "delivered";
               } else {
                 throw error;
               }
@@ -2511,14 +2533,16 @@ export class SlackCodexWorkersService extends EventEmitter {
           } else {
             await this.startWorkerTurn(worker, turnInput);
             delivered = true;
+            deliveryLabel = "delivered";
           }
           if (!delivered) continue;
           this.store.updatePendingWake(wake.id, {
             status: "delivered",
-            summary: `${wake.summary} (${steerWebhook && worker.activeTurnId ? "steered" : "delivered"})`,
+            summary: `${wake.summary} (${deliveryLabel})`,
             nextAttemptAt: null,
             lastError: null,
           });
+          await this.postWakeDeliverySystemMessage(worker, turnInput.text, deliveryLabel);
         } catch (error) {
           await this.recordTransientWakeFailure(registration, wake, `wake_self failure: ${error instanceof Error ? error.message : String(error)}`);
         }
@@ -2537,6 +2561,7 @@ export class SlackCodexWorkersService extends EventEmitter {
             workstream,
             channelId: workstream.channelId,
             title: buildScheduledSpawnTitle(registration),
+            visibleRootText: buildSpawnWorkerRootText(buildScheduledSpawnTitle(registration), buildWakeTurnInput(registration, wake).text),
             itemBody: buildWakeTurnInput(registration, wake).text,
             turnInput: buildWakeTurnInput(registration, wake),
             rootOwnerUserId: registration.rootOwnerUserId,
@@ -3845,6 +3870,14 @@ function buildScheduledSpawnTitle(registration: RegistrationRecord): string {
     return `Scheduled work: ${registration.description.trim()}`;
   }
   return `Scheduled work (${registration.trigger.kind})`;
+}
+
+function buildSpawnWorkerRootText(title: string, initialUserMessage: string): string {
+  const normalizedTitle = title.trim();
+  const normalizedBody = initialUserMessage.trim();
+  if (!normalizedTitle) return normalizedBody;
+  if (!normalizedBody || normalizedTitle === normalizedBody) return normalizedTitle;
+  return `${normalizedTitle}\n\n${normalizedBody}`;
 }
 
 function shutdownWebhookIngressError(): Error & { code: string } {

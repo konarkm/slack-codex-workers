@@ -575,7 +575,7 @@ describe("service lifecycle decisions", () => {
   });
 
   it("spawns into the current workstream when workstream is omitted", async () => {
-    const { service, codex, store } = await createService();
+    const { service, slack, codex, store } = await createService();
     store.upsertWorkstream({
       id: "T1:customers/ef",
       teamId: "T1",
@@ -622,6 +622,11 @@ describe("service lifecycle decisions", () => {
     );
 
     expect(result).toContain("workstream customers/ef");
+    expect(slack.postTopLevelMessage).toHaveBeenCalledWith(
+      "C-ef",
+      "Follow up\n\nDo it here",
+      expect.objectContaining({ username: expect.any(String) }),
+    );
     expect(store.getWorkerByAppThreadId("thread-child-current")).toMatchObject({
       channelId: "C-ef",
       workstreamId: "T1:customers/ef",
@@ -2756,7 +2761,7 @@ describe("service lifecycle decisions", () => {
   });
 
   it("queues and delivers heartbeat wakes into an idle worker", async () => {
-    const { service, codex, store } = await createService();
+    const { service, codex, slack, store } = await createService();
     createWorker(service, { workstreamId: "T1:root" });
     codex.reconcileThreadForSend.mockResolvedValue("idle");
     codex.startTurnWithResumeFallback.mockResolvedValue("turn-heartbeat");
@@ -2794,6 +2799,11 @@ describe("service lifecycle decisions", () => {
       }),
       expect.any(Object),
       expect.any(Object),
+    );
+    expect(slack.postThreadReply).toHaveBeenCalledWith(
+      "C1",
+      "1.000",
+      expect.stringContaining("_System_: Wake delivered to Codex:\n[system wake event]"),
     );
     const worker = store.getWorkerByKey("T1:C1:1.000");
     expect(worker).toMatchObject({ activeTurnId: "turn-heartbeat", status: "running" });
@@ -2920,7 +2930,7 @@ describe("service lifecycle decisions", () => {
 
     expect(slack.postTopLevelMessage).toHaveBeenCalledWith(
       "C1",
-      expect.stringContaining("Scheduled work: Daily digest"),
+      expect.stringContaining("Scheduled work: Daily digest\n\n[system wake event]"),
       expect.anything(),
     );
     expect(store.listWorkers()).toHaveLength(2);
@@ -3051,7 +3061,7 @@ describe("service lifecycle decisions", () => {
   });
 
   it("steers an active worker turn for webhook registrations with deliveryMode=steer", async () => {
-    const { service, codex, store } = await createService();
+    const { service, codex, slack, store } = await createService();
     service.runtimeStarted = true;
     service.scheduleRegistrationLoop = vi.fn();
     createWorker(service, { workstreamId: "T1:root", activeTurnId: "turn-active", status: "running" });
@@ -3101,6 +3111,11 @@ describe("service lifecycle decisions", () => {
         text: expect.stringContaining("fired_event: issue.updated"),
       }),
     );
+    expect(slack.postThreadReply).toHaveBeenCalledWith(
+      "C1",
+      "1.000",
+      expect.stringContaining("_System_: Wake steered to Codex:\n[system wake event]"),
+    );
     expect(codex.startTurnWithResumeFallback).not.toHaveBeenCalled();
     expect(store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000")[0]).toMatchObject({
       status: "delivered",
@@ -3109,7 +3124,7 @@ describe("service lifecycle decisions", () => {
   });
 
   it("starts a fresh turn for webhook steer registrations when the worker is idle", async () => {
-    const { service, codex, store } = await createService();
+    const { service, codex, slack, store } = await createService();
     service.runtimeStarted = true;
     service.scheduleRegistrationLoop = vi.fn();
     createWorker(service, { workstreamId: "T1:root", activeTurnId: null, status: "idle" });
@@ -3161,6 +3176,11 @@ describe("service lifecycle decisions", () => {
       }),
       expect.any(Object),
       expect.any(Object),
+    );
+    expect(slack.postThreadReply).toHaveBeenCalledWith(
+      "C1",
+      "1.000",
+      expect.stringContaining("_System_: Wake delivered to Codex:\n[system wake event]"),
     );
     expect(codex.steerTurn).not.toHaveBeenCalled();
     store.close();
@@ -3223,7 +3243,7 @@ describe("service lifecycle decisions", () => {
   });
 
   it("starts a fresh turn when webhook steer finds a stale active turn", async () => {
-    const { service, codex, store } = await createService();
+    const { service, codex, slack, store } = await createService();
     service.runtimeStarted = true;
     service.scheduleRegistrationLoop = vi.fn();
     createWorker(service, { workstreamId: "T1:root", activeTurnId: "turn-stale", status: "running" });
@@ -3276,6 +3296,11 @@ describe("service lifecycle decisions", () => {
       }),
       expect.any(Object),
       expect.any(Object),
+    );
+    expect(slack.postThreadReply).toHaveBeenCalledWith(
+      "C1",
+      "1.000",
+      expect.stringContaining("_System_: Wake delivered to Codex:\n[system wake event]"),
     );
     expect(store.getWorkerByKey("T1:C1:1.000")).toMatchObject({
       activeTurnId: "turn-recovered",
@@ -3386,7 +3411,7 @@ describe("service lifecycle decisions", () => {
 
     expect(slack.postTopLevelMessage).toHaveBeenCalledWith(
       "C1",
-      expect.stringContaining("Scheduled work: Triage incoming incidents"),
+      expect.stringContaining("Scheduled work: Triage incoming incidents\n\n[system wake event]"),
       expect.anything(),
     );
     expect(store.listWorkers()).toHaveLength(2);
@@ -3762,6 +3787,43 @@ describe("service lifecycle decisions", () => {
     wakes = store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000");
     expect(wakes[0]).toMatchObject({ status: "delivered" });
     expect(codex.startTurnWithResumeFallback).toHaveBeenCalledTimes(2);
+    store.close();
+  });
+
+  it("keeps wake delivery successful when posting the visibility system message fails", async () => {
+    const { service, codex, slack, store } = await createService();
+    createWorker(service, { workstreamId: "T1:root" });
+    codex.reconcileThreadForSend.mockResolvedValue("idle");
+    codex.startTurnWithResumeFallback.mockResolvedValue("turn-heartbeat");
+    slack.postThreadReply.mockRejectedValueOnce(new Error("slack write failed"));
+
+    store.upsertRegistration({
+      id: "reg-heartbeat",
+      teamId: "T1",
+      workstreamId: "T1:root",
+      workerKey: "T1:C1:1.000",
+      ownerUserId: "U1",
+      rootOwnerUserId: "U1",
+      description: null,
+      enabled: true,
+      target: {
+        kind: "worker",
+        workstreamId: "T1:root",
+        workerKey: "T1:C1:1.000",
+      },
+      action: { kind: "wake_self" },
+      trigger: { kind: "heartbeat", intervalMinutes: 1 },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    await service.enqueueDueRegistrationWakes();
+    await service.deliverQueuedWakes();
+
+    expect(codex.startTurnWithResumeFallback).toHaveBeenCalledTimes(1);
+    expect(store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000")[0]).toMatchObject({
+      status: "delivered",
+    });
     store.close();
   });
 

@@ -57,6 +57,12 @@ describe("dynamic tools", () => {
     });
   });
 
+  it("describes spawned child work as visibly including the delegated body", () => {
+    const tool = workerDynamicTools.find((entry) => entry.name === "slack_spawn_worker");
+    expect(tool?.description).toContain("full initialUserMessage body");
+    expect(tool?.description).toContain("stays visible in Slack");
+  });
+
   it("rejects legacy channel-targeted spawn args", () => {
     expect(() => slackSpawnWorkerArgsSchema.parse({
       channel: "#ops",
@@ -168,7 +174,8 @@ describe("dynamic tools", () => {
     expect(workerDeveloperInstructions).toContain("do not over-compress");
     expect(workerDeveloperInstructions).toContain("planning, evaluating options, discussing architecture");
     expect(workerDeveloperInstructions).toContain("Use set_notification(enabled: true|false)");
-    expect(workerDeveloperInstructions).toContain("usually call set_notification(enabled: true)");
+    expect(workerDeveloperInstructions).toContain("needs to reply, take action, make a decision");
+    expect(workerDeveloperInstructions).toContain("still chugging along fine");
     expect(workerDeveloperInstructions).toContain("Use get_current_slack_thread_link");
     expect(workerDeveloperInstructions).toContain("Use list_workstreams");
     expect(workerDeveloperInstructions).toContain("create_webhook_source, list_webhook_sources, get_webhook_source, list_webhook_registrations");

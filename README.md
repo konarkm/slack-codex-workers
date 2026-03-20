@@ -219,12 +219,14 @@ For a supervised production build:
 - `slack_create_workstream` is available to workers and the admin DM. It is intended to be used after explicit user approval in the conversation, not behind a separate permission layer.
 - `create_webhook_source`, `list_webhook_sources`, `get_webhook_source`, `disable_webhook_source`, and `rotate_webhook_source_route` manage workspace-global raw webhook source definitions. Each source has one source name, one secret route, and one handler file.
 - `list_webhook_registrations` lists all registrations in the workspace that currently depend on one webhook source so agents can preserve existing event names, normalized match fields, and delivery behavior before changing a shared handler contract.
-- `set_notification(enabled: true|false)` is worker-only, turn-scoped, and opt-in; final worker replies stay visible by default but only mention the root owner when the worker explicitly enables notification for that turn.
+- `set_notification(enabled: true|false)` is worker-only, turn-scoped, and opt-in; final worker replies stay visible by default but only mention the root owner when the worker explicitly enables notification for a turn where the human needs to reply, take action, or notice something now.
 - `set_heartbeat` only works in a public worker thread and always targets the current worker with `wake_self`.
 - `set_cron` defaults to `target='self'`.
 - `set_webhook` defaults to `target='self'` and `deliveryMode='queue'`.
 - `set_webhook(target='self')` accepts `deliveryMode='queue' | 'steer'`. Queue creates separate wake work; steer forwards matching events into the current turn with app-server `turn/steer` when a turn is active and starts a fresh turn when idle.
 - `set_webhook(target='workstream')` creates future public work in the current workstream and only supports queue-style delivery.
+- When visible child work is spawned into a workstream, the root Slack post includes the scheduled or delegated title plus the full AI input body for that spawned worker.
+- When `target='self'` wake work is actually delivered to a worker, the bridge posts a system message in the Slack thread showing the exact wake input sent to Codex.
 - `set_cron` expects a 5-field numeric cron string and uses `WORKSPACE_TIMEZONE` when evaluating schedules.
 - `list_wake_deliveries` returns runtime wake delivery records in scope, including queued, delivered, failed, and quarantined entries.
 - Webhook ingress listens under `WEBHOOK_PATH`, resolves requests by source-specific secret route tokens, rate-limits repeated handler auth failures per client, times out slow request bodies, and hands raw request bodies plus best-effort parsed JSON to the source handler.

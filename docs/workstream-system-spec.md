@@ -500,12 +500,22 @@ The current worker-turn default should be opt-in:
 - if the worker calls `set_notification(enabled: false)`, the final assistant reply remains visible without the mention
 - if the worker calls the tool multiple times in one turn, the latest value wins
 
+The intended policy is action-oriented:
+
+- notify when the human needs to reply, take action, make a decision, or otherwise notice the outcome now
+- leave notification off when the worker is still progressing autonomously and the human does not need to do anything yet
+
 This explicit turn-scoped notification state should persist for the lifetime of the turn, including bridge restarts that reconnect to the same active turn.
 
 Interrupted turns keep their existing interruption behavior:
 
 - if buffered assistant text is flushed before the interruption notice, that partial text is posted without forcing a mention
 - notification control is therefore meant for settled completed/failed turn endings, not partial interrupted-turn flushes
+
+Wake delivery should remain observable in Slack:
+
+- when the bridge spawns visible child work into a workstream, whether from `slack_spawn_worker` or from a cron or webhook registration, the root Slack post should include both the visible title and the full AI input body sent to the spawned worker
+- when the bridge delivers `target='self'` wake work into an existing worker thread, it should post a system message in that Slack thread showing the exact wake input delivered or steered into Codex
 
 ## Slack Thread References
 

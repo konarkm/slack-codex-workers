@@ -57,7 +57,7 @@ export const workerDynamicTools = [
   {
     name: slackSpawnWorkerToolName,
     description:
-      "Create a top-level Slack post in a registered workstream and immediately start a separate Codex worker thread for a distinct user-facing task. This is the visible delegation and handoff primitive for splitting work into another workstream lane. If workstream is omitted, use the current workstream. workstream should be a canonical relative path like customers/ef or a root alias such as root, /root, or . The spawned worker is fire-and-forget: it does not return a direct response to the parent, so only use this when a separate visible work lane is the right handoff. Use mode='fresh' unless the child truly needs the parent thread context; use mode='fork' only when inheriting context is important.",
+      "Create a top-level Slack post in a registered workstream and immediately start a separate Codex worker thread for a distinct user-facing task. This is the visible delegation and handoff primitive for splitting work into another workstream lane. The spawned root Slack post includes the title plus the full initialUserMessage body so the delegated instruction stays visible in Slack. If workstream is omitted, use the current workstream. workstream should be a canonical relative path like customers/ef or a root alias such as root, /root, or . The spawned worker is fire-and-forget: it does not return a direct response to the parent, so only use this when a separate visible work lane is the right handoff. Use mode='fresh' unless the child truly needs the parent thread context; use mode='fork' only when inheriting context is important.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -211,7 +211,7 @@ export const workerDynamicTools = [
   {
     name: slackSetNotificationToolName,
     description:
-      "Control whether the current worker turn should notify the human when it completes. enabled=true means mention the root owner on the final reply for this turn. enabled=false means keep the final reply visible in the Slack thread without the mention. This is turn-scoped and defaults to false unless you opt in.",
+      "Control whether the current worker turn should notify the human when it completes. enabled=true means mention the root owner on the final reply for this turn when they need to reply, take action, or notice something now. enabled=false means keep the final reply visible in the Slack thread without the mention. This is turn-scoped and defaults to false unless you opt in.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -531,8 +531,8 @@ export const workerDeveloperInstructions = [
   "Use create_webhook_source, list_webhook_sources, get_webhook_source, list_webhook_registrations, disable_webhook_source, and rotate_webhook_source_route to manage workspace-global raw webhook intake routes and their handler files. A webhook source has one authoritative source name, one secret route, and one handler contract.",
   "Before changing a shared webhook handler contract, use list_webhook_registrations for that source and preserve existing event names and normalized match fields unless you are intentionally updating dependent registrations too.",
   "Use set_notification(enabled: true|false) to decide whether the current worker turn should notify the human on completion. The default is no notification unless you opt in.",
-  "For direct back-and-forth with the human in this Slack thread, you should usually call set_notification(enabled: true) before finishing your turn unless the human asked you not to notify them.",
-  "For autonomous heartbeat, cron, or webhook wake work, usually leave notification off unless there is a material update, blocker, risk, or decision that warrants pinging the human.",
+  "Call set_notification(enabled: true) before finishing your turn when the human needs to reply, take action, make a decision, or otherwise notice this outcome now. If they do not need to do anything yet, usually leave notification off.",
+  "For autonomous heartbeat, cron, or webhook wake work, usually leave notification off when you are still chugging along fine and the human does not need to do anything yet. Turn notification on when they need to notice a blocker, risk, decision, handoff, or other action-relevant update.",
   "Use set_heartbeat, set_cron, set_webhook, disable_registration, list_registrations, get_registration, and list_wake_deliveries to manage durable wakeup registrations and inspect wake execution history for the current worker/workstream when you need ongoing automation. For set_webhook(target=self), use deliveryMode='queue' when every event should become separate work and deliveryMode='steer' when matching events should steer the active turn immediately.",
   "Use slack_upload_files when you need to share one or more existing local files into the current Slack thread. Only upload files that materially help the user.",
   "If you create a child worker, it is fire-and-forget. Do not wait on the child unless the human explicitly asks you to.",
