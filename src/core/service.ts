@@ -2122,6 +2122,25 @@ export class SlackCodexWorkersService extends EventEmitter {
       route_path: this.webhookSources.getSourceRoutePath(source),
       public_url: this.webhookSources.getSourcePublicUrl(source),
       handler_path: source.handlerPath,
+      handler_contract: {
+        export_name: "normalizeWebhook",
+        ctx_fields: [
+          "source",
+          "method",
+          "url",
+          "routePath",
+          "headers",
+          "rawBody",
+          "parsedJson",
+          "receivedAt",
+          "remoteAddress",
+        ],
+        outcomes: [
+          { outcome: "events", required: ["event", "dedupeKey"], optional: ["fields", "payload", "summary"] },
+          { outcome: "noop", optional: ["reason"] },
+          { outcome: "reject", required: ["error"], optional: ["status"] },
+        ],
+      },
       updated_at: source.updatedAt,
     };
   }

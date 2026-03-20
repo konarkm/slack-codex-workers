@@ -2244,6 +2244,25 @@ describe("service lifecycle decisions", () => {
     expect(details.route_path).toMatch(/^\/webhooks\/[a-f0-9]+$/);
     expect(details.public_url).toMatch(/^https:\/\/hooks\.example\.test\/webhooks\/[a-f0-9]+$/);
     expect(details.handler_path).toContain("/.slack-workers/bridge/webhook-sources/T1/linear/handler.mjs");
+    expect(details.handler_contract).toMatchObject({
+      export_name: "normalizeWebhook",
+      ctx_fields: [
+        "source",
+        "method",
+        "url",
+        "routePath",
+        "headers",
+        "rawBody",
+        "parsedJson",
+        "receivedAt",
+        "remoteAddress",
+      ],
+    });
+    expect(details.handler_contract.outcomes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ outcome: "events" }),
+      expect.objectContaining({ outcome: "noop" }),
+      expect.objectContaining({ outcome: "reject" }),
+    ]));
 
     const inspected = await (service as any).handleGetWebhookSourceTool(
       { source: "linear" },

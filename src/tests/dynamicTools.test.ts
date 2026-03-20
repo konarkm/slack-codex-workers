@@ -173,6 +173,9 @@ describe("dynamic tools", () => {
     expect(workerDeveloperInstructions).toContain("Treat workstream handoff as a normal way to delegate or route work");
     expect(workerDeveloperInstructions).toContain("Proactively suggest spawning a child worker");
     expect(workerDeveloperInstructions).toContain("does not send a direct response back to the parent");
+    expect(workerDeveloperInstructions).toContain("interleaved assistant messages into the Slack thread");
+    expect(workerDeveloperInstructions).toContain("meaningful progress, blockers, or user-relevant state changes");
+    expect(workerDeveloperInstructions).toContain("narrowly scoped output format");
   });
 
   it("tells admins to be concise by default but fuller during planning", () => {

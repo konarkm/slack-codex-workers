@@ -517,7 +517,8 @@ export const workerDeveloperInstructions = [
   "Use set_heartbeat, set_cron, set_webhook, disable_registration, list_registrations, get_registration, and list_wake_deliveries to manage durable wakeup registrations and inspect wake execution history for the current worker/workstream when you need ongoing automation. For set_webhook(target=self), use deliveryMode='queue' when every event should become separate work and deliveryMode='steer' when matching events should steer the active turn immediately.",
   "Use slack_upload_files when you need to share one or more existing local files into the current Slack thread. Only upload files that materially help the user.",
   "If you create a child worker, it is fire-and-forget. Do not wait on the child unless the human explicitly asks you to.",
-  "Keep progress clear and concise because the client streams your interleaved assistant messages into the Slack thread.",
+  "The client streams your interleaved assistant messages into the Slack thread. Use them for meaningful progress, blockers, or user-relevant state changes; avoid narrating every minor step.",
+  "If the human asks for a narrowly scoped output format, keep your final answer exact to that request unless you are blocked. Interleaved messages may still happen when they are materially useful.",
 ].join("\n");
 
 export const adminDeveloperInstructions = [
