@@ -98,6 +98,9 @@ export class WebhookIngressServer {
 
       const normalized = await this.normalizeRequest(req);
       if ("status" in normalized) {
+        if (normalized.authFailure) {
+          this.recordAuthFailure(clientKey);
+        }
         this.respondJson(res, normalized.status, normalized.body, normalized.headers);
         return;
       }
@@ -121,7 +124,7 @@ export class WebhookIngressServer {
 
   private async normalizeRequest(
     req: IncomingMessage,
-  ): Promise<RawWebhookIngress | { status: number; body: Record<string, unknown>; headers?: Record<string, string> }> {
+  ): Promise<RawWebhookIngress | { status: number; body: Record<string, unknown>; headers?: Record<string, string>; authFailure?: boolean }> {
     if (req.method !== "POST") {
       return { status: 405, body: { ok: false, error: "method_not_allowed" } };
     }
@@ -133,7 +136,7 @@ export class WebhookIngressServer {
 
     const source = this.resolveSource(routePath.routeToken);
     if (!source || !source.enabled) {
-      return { status: 404, body: { ok: false, error: "not_found" } };
+      return { status: 404, body: { ok: false, error: "not_found" }, authFailure: true };
     }
 
     if (!this.canAcceptRequest()) {

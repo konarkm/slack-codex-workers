@@ -87,6 +87,30 @@ describe("webhook ingress server", () => {
     expect(handler).not.toHaveBeenCalled();
   });
 
+  it("rate limits repeated secret-route misses under the webhook base path", async () => {
+    const handler = vi.fn();
+    const server = new WebhookIngressServer(makeConfig(), () => null, handler);
+    activeServers.push(server);
+    await server.start();
+
+    let response: Response | null = null;
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      response = await fetch(`http://127.0.0.1:${server.getListeningPort()}/webhooks/unknown`, {
+        method: "POST",
+        body: "hello",
+      });
+      expect(response.status).toBe(404);
+    }
+
+    response = await fetch(`http://127.0.0.1:${server.getListeningPort()}/webhooks/unknown`, {
+      method: "POST",
+      body: "hello",
+    });
+
+    expect(response.status).toBe(429);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
   it("returns not_found for disabled sources", async () => {
     const handler = vi.fn();
     const server = new WebhookIngressServer(makeConfig(), () => makeSource({ enabled: false }), handler);
