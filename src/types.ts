@@ -129,6 +129,7 @@ export interface WebhookRegistrationTrigger {
   kind: "webhook";
   source: string;
   events: string[];
+  deliveryMode: "queue" | "steer";
   match: Record<string, string> | null;
 }
 
@@ -177,19 +178,59 @@ export interface WebhookEventRecord {
   source: string;
   event: string;
   dedupeKey: string;
-  match: Record<string, string> | null;
+  fields: Record<string, string> | null;
+  rawRequestPath: string;
   payloadPath: string;
   summary: string;
   createdAt: string;
   updatedAt: string;
 }
 
-export interface WebhookMailboxState {
-  currentSecret: string;
-  previousSecret: string | null;
-  previousSecretExpiresAt: string | null;
+export interface WebhookSourceRecord {
+  id: string;
+  teamId: string;
+  source: string;
+  routeToken: string;
+  handlerPath: string;
+  enabled: boolean;
+  createdAt: string;
   updatedAt: string;
 }
+
+export interface WebhookSourceContext {
+  source: WebhookSourceRecord;
+  method: string;
+  url: string;
+  routePath: string;
+  receivedAt: string;
+  headers: Record<string, string>;
+  rawBody: string;
+  parsedJson: unknown | null;
+  remoteAddress: string | null;
+}
+
+export interface NormalizedWebhookEventInput {
+  event: string;
+  dedupeKey: string;
+  fields?: Record<string, string> | null;
+  payload?: unknown;
+  summary?: string | null;
+}
+
+export type WebhookHandlerResult =
+  | {
+      outcome: "events";
+      events: NormalizedWebhookEventInput[];
+    }
+  | {
+      outcome: "noop";
+      reason?: string | null;
+    }
+  | {
+      outcome: "reject";
+      error: string;
+      status?: 400 | 401 | 403;
+    };
 
 export interface PendingWorkerShellSource {
   sourceKind: string;

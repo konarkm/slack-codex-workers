@@ -21,21 +21,27 @@ import {
   slackDisableRegistrationToolName,
   slackCreateWorkstreamArgsSchema,
   slackCreateWorkstreamToolName,
+  slackCreateWebhookSourceArgsSchema,
+  slackCreateWebhookSourceToolName,
   slackGetCurrentTimeToolName,
   slackGetCurrentSlackThreadLinkArgsSchema,
   slackGetCurrentSlackThreadLinkToolName,
-  slackGetWebhookMailboxArgsSchema,
-  slackGetWebhookMailboxToolName,
+  slackGetWebhookSourceArgsSchema,
+  slackGetWebhookSourceToolName,
   slackGetRegistrationArgsSchema,
   slackGetRegistrationToolName,
+  slackListWebhookSourcesArgsSchema,
+  slackListWebhookSourcesToolName,
   slackListChannelsArgsSchema,
   slackListChannelsToolName,
   slackListWorkstreamsArgsSchema,
   slackListWorkstreamsToolName,
   slackListWakeDeliveriesToolName,
   slackListRegistrationsToolName,
-  slackRotateWebhookSecretArgsSchema,
-  slackRotateWebhookSecretToolName,
+  slackDisableWebhookSourceArgsSchema,
+  slackDisableWebhookSourceToolName,
+  slackRotateWebhookSourceRouteArgsSchema,
+  slackRotateWebhookSourceRouteToolName,
   slackSetCronArgsSchema,
   slackSetCronToolName,
   slackSetHeartbeatArgsSchema,
@@ -85,8 +91,11 @@ export interface DynamicToolHandlers {
   uploadFiles(args: z.infer<typeof slackUploadFilesArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
   getCurrentTime(ctx: DynamicToolHandlerContext): Promise<string>;
   getCurrentSlackThreadLink(ctx: DynamicToolHandlerContext): Promise<string>;
-  getWebhookMailbox(ctx: DynamicToolHandlerContext): Promise<string>;
-  rotateWebhookSecret(ctx: DynamicToolHandlerContext): Promise<string>;
+  createWebhookSource(args: z.infer<typeof slackCreateWebhookSourceArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
+  listWebhookSources(args: z.infer<typeof slackListWebhookSourcesArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
+  getWebhookSource(args: z.infer<typeof slackGetWebhookSourceArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
+  disableWebhookSource(args: z.infer<typeof slackDisableWebhookSourceArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
+  rotateWebhookSourceRoute(args: z.infer<typeof slackRotateWebhookSourceRouteArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
   setNotification(args: z.infer<typeof slackSetNotificationArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
   setHeartbeat(args: z.infer<typeof slackSetHeartbeatArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
   setCron(args: z.infer<typeof slackSetCronArgsSchema>, ctx: DynamicToolHandlerContext): Promise<string>;
@@ -540,16 +549,37 @@ export class CodexClient {
       return;
     }
 
-    if (parsed.data.tool === slackGetWebhookMailboxToolName) {
-      slackGetWebhookMailboxArgsSchema.parse(parsed.data.arguments);
-      const text = await this.dynamicToolHandlers.getWebhookMailbox(ctx);
+    if (parsed.data.tool === slackCreateWebhookSourceToolName) {
+      const args = slackCreateWebhookSourceArgsSchema.parse(parsed.data.arguments);
+      const text = await this.dynamicToolHandlers.createWebhookSource(args, ctx);
       await this.rpc.respond(id, { contentItems: [{ type: "inputText", text }], success: true });
       return;
     }
 
-    if (parsed.data.tool === slackRotateWebhookSecretToolName) {
-      slackRotateWebhookSecretArgsSchema.parse(parsed.data.arguments);
-      const text = await this.dynamicToolHandlers.rotateWebhookSecret(ctx);
+    if (parsed.data.tool === slackListWebhookSourcesToolName) {
+      const args = slackListWebhookSourcesArgsSchema.parse(parsed.data.arguments);
+      const text = await this.dynamicToolHandlers.listWebhookSources(args, ctx);
+      await this.rpc.respond(id, { contentItems: [{ type: "inputText", text }], success: true });
+      return;
+    }
+
+    if (parsed.data.tool === slackGetWebhookSourceToolName) {
+      const args = slackGetWebhookSourceArgsSchema.parse(parsed.data.arguments);
+      const text = await this.dynamicToolHandlers.getWebhookSource(args, ctx);
+      await this.rpc.respond(id, { contentItems: [{ type: "inputText", text }], success: true });
+      return;
+    }
+
+    if (parsed.data.tool === slackDisableWebhookSourceToolName) {
+      const args = slackDisableWebhookSourceArgsSchema.parse(parsed.data.arguments);
+      const text = await this.dynamicToolHandlers.disableWebhookSource(args, ctx);
+      await this.rpc.respond(id, { contentItems: [{ type: "inputText", text }], success: true });
+      return;
+    }
+
+    if (parsed.data.tool === slackRotateWebhookSourceRouteToolName) {
+      const args = slackRotateWebhookSourceRouteArgsSchema.parse(parsed.data.arguments);
+      const text = await this.dynamicToolHandlers.rotateWebhookSourceRoute(args, ctx);
       await this.rpc.respond(id, { contentItems: [{ type: "inputText", text }], success: true });
       return;
     }

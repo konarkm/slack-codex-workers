@@ -9,13 +9,16 @@ import {
   slackAdminListWakeDeliveriesToolName,
   adminDynamicTools,
   adminDeveloperInstructions,
+  slackCreateWebhookSourceToolName,
+  slackDisableWebhookSourceToolName,
   slackGetCurrentTimeToolName,
-  slackGetWebhookMailboxToolName,
-  slackRotateWebhookSecretToolName,
-    slackCreateWorkstreamArgsSchema,
-    slackGetCurrentSlackThreadLinkToolName,
-    slackSetCronArgsSchema,
-    slackListWorkstreamsToolName,
+  slackCreateWorkstreamArgsSchema,
+  slackGetCurrentSlackThreadLinkToolName,
+  slackGetWebhookSourceToolName,
+  slackListWebhookSourcesToolName,
+  slackRotateWebhookSourceRouteToolName,
+  slackSetCronArgsSchema,
+  slackListWorkstreamsToolName,
   slackSetNotificationArgsSchema,
   slackSetNotificationToolName,
   slackSetWebhookArgsSchema,
@@ -90,6 +93,7 @@ describe("dynamic tools", () => {
       source: "github",
       events: ["push"],
       target: "self",
+      deliveryMode: "queue",
     });
   });
 
@@ -123,11 +127,18 @@ describe("dynamic tools", () => {
     expect(tool?.description).toContain("current local time or timezone");
   });
 
-  it("exposes the shared webhook mailbox tool to workers and admins", () => {
-    const workerTool = workerDynamicTools.find((entry) => entry.name === slackGetWebhookMailboxToolName);
-    const adminTool = adminDynamicTools.find((entry) => entry.name === slackGetWebhookMailboxToolName);
-    expect(workerTool?.description).toContain("shared webhook mailbox");
-    expect(adminTool?.description).toContain("shared webhook mailbox");
+  it("exposes webhook source lifecycle tools to workers and admins", () => {
+    const names = [
+      slackCreateWebhookSourceToolName,
+      slackListWebhookSourcesToolName,
+      slackGetWebhookSourceToolName,
+      slackDisableWebhookSourceToolName,
+      slackRotateWebhookSourceRouteToolName,
+    ];
+    for (const name of names) {
+      expect(workerDynamicTools.map((entry) => entry.name)).toContain(name);
+      expect(adminDynamicTools.map((entry) => entry.name)).toContain(name);
+    }
   });
 
   it("parses set_notification arguments", () => {
@@ -145,11 +156,6 @@ describe("dynamic tools", () => {
     expect(adminNames).not.toContain(slackSetNotificationToolName);
   });
 
-  it("exposes webhook secret rotation only on the admin surface", () => {
-    expect(workerDynamicTools.map((entry) => entry.name)).not.toContain(slackRotateWebhookSecretToolName);
-    expect(adminDynamicTools.map((entry) => entry.name)).toContain(slackRotateWebhookSecretToolName);
-  });
-
   it("tells workers not to echo Slack speaker prefixes back to the human", () => {
     expect(workerDeveloperInstructions).toContain("Do not echo the speaker prefix back in your own replies.");
     expect(workerDeveloperInstructions).toContain("'Konark:'");
@@ -163,6 +169,7 @@ describe("dynamic tools", () => {
     expect(workerDeveloperInstructions).toContain("usually call set_notification(enabled: true)");
     expect(workerDeveloperInstructions).toContain("Use get_current_slack_thread_link");
     expect(workerDeveloperInstructions).toContain("Use list_workstreams");
+    expect(workerDeveloperInstructions).toContain("create_webhook_source, list_webhook_sources, get_webhook_source");
     expect(workerDeveloperInstructions).toContain("Treat workstream handoff as a normal way to delegate or route work");
     expect(workerDeveloperInstructions).toContain("Proactively suggest spawning a child worker");
     expect(workerDeveloperInstructions).toContain("does not send a direct response back to the parent");

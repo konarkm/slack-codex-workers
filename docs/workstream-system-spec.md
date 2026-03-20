@@ -632,6 +632,11 @@ The bridge should not over-own semantic expiry logic.
 
 The first-class bridge tool surface is:
 
+- `create_webhook_source(...)`
+- `list_webhook_sources(...)`
+- `get_webhook_source(...)`
+- `disable_webhook_source(...)`
+- `rotate_webhook_source_route(...)`
 - `set_heartbeat(...)`
 - `set_cron(...)`
 - `set_webhook(...)`
@@ -700,42 +705,38 @@ Workers should be able to inspect registrations and wake delivery state/history,
 
 ### Ingress Surface
 
-Use one bridge-owned webhook server / ingress surface.
+Use one bridge-owned webhook server / ingress surface with source-specific secret routes under a shared base path.
 
 ### Ingress Discipline
 
 Thin ingress model:
 
-1. authenticate
+1. resolve source route
 2. enforce body limit
-3. minimally normalize
-4. dedupe/idempotency
-5. persist first
-6. then spawn or wake
+3. persist raw request first
+4. run source handler
+5. persist normalized events
+6. then spawn, wake, or steer
 
 During shutdown, ingress should remain fail-closed:
 
-- authenticate before exposing lifecycle state
-- reject new authorized requests before persistence once shutdown begins
+- reject new requests before persistence once shutdown begins
 
 ### Payload Handling
 
-Normalize only the outer event envelope, not arbitrary provider payloads.
+Accept arbitrary raw webhook shapes at ingress.
 
-Current implementation note:
+Each source has one handler module that verifies and normalizes raw requests into one or more normalized events.
 
-- when a request does not provide an explicit `id`, the fallback dedupe hash currently derives from the fully canonicalized parsed JSON body
-- that means nested provider payload objects are recursively key-sorted as part of the fallback hash
-- this is slightly broader than the idealized "outer envelope only" wording above and should be treated as the current contract unless/until the runtime changes
+Raw requests should be stored durably before handler execution.
 
-Raw payloads should be stored durably.
+Normalized events should be stored durably after handler execution.
 
 Workers receive:
 
 - a bounded event summary
-- a pointer/path to the raw payload
-
-Workers retrieve raw payloads by normal file access if needed.
+- a pointer/path to the normalized event payload
+- a raw request path inside that normalized event payload when deeper inspection is needed
 
 ### Matching
 
@@ -743,7 +744,7 @@ Webhook matching should be explicit and bounded:
 
 - source/provider
 - event type(s)
-- optional narrow exact-match fields
+- optional exact-match normalized string fields
 
 Do not build a generic predicate/routing engine.
 

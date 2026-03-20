@@ -151,7 +151,7 @@ Settled conceptually:
 
 - `set_heartbeat(interval, description?)`
 - `set_cron(schedule, target, description?)`
-- `set_webhook(source, events, target, match?, description?)`
+- `set_webhook(source, events, target, deliveryMode?, match?, description?)`
 - plus list/get/disable and wake-delivery inspection
 
 Current implementation contract:
@@ -161,6 +161,7 @@ Current implementation contract:
 - cron registrations use the configured workspace timezone
 - webhook `source` must match `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`
 - `events` is an explicit string list
+- webhook `deliveryMode` is `queue | steer`, defaults to `queue`, and `steer` is only valid for `target=self`
 - `match` is an optional exact-match string map
 - `description` remains optional
 - wake inspection is exposed as `list_wake_deliveries()` and returns queued plus historical delivery records in scope

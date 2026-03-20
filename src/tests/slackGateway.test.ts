@@ -64,8 +64,6 @@ function makeConfig(): AppConfig {
     webhookBodyMaxBytes: 256 * 1024,
     webhookBodyReadTimeoutMs: 30_000,
     webhookPayloadStorageDir: "/tmp/webhooks",
-    webhookSharedSecret: "secret-shared",
-    webhookPreviousSharedSecret: "secret-previous",
     webhookPublicBaseUrl: "https://hooks.example.test",
     webhookTrustLoopbackProxy: false,
   };

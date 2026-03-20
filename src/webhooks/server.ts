@@ -1,10 +1,8 @@
-import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { logInfo, logWarn } from "../logger.js";
 import type { AppConfig } from "../config.js";
-import type { WebhookMailboxState } from "../types.js";
+import type { WebhookSourceRecord } from "../types.js";
 
-const webhookSourcePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const AUTH_FAILURE_WINDOW_MS = 5 * 60 * 1000;
 const AUTH_FAILURE_MAX_ATTEMPTS = 10;
 const AUTH_FAILURE_BLOCK_MS = 15 * 60 * 1000;
@@ -14,25 +12,22 @@ interface AuthFailureState {
   blockedUntil: number;
 }
 
-export function normalizeWebhookSource(value: string | null | undefined): string | null {
-  const source = value?.trim() ?? "";
-  return webhookSourcePattern.test(source) ? source : null;
-}
-
-export interface NormalizedWebhookIngress {
-  source: string;
-  event: string;
-  dedupeKey: string;
-  match: Record<string, string> | null;
-  payload: unknown;
-  receivedAt: string;
+export interface RawWebhookIngress {
+  source: WebhookSourceRecord;
+  routePath: string;
+  method: string;
+  url: string;
+  headers: Record<string, string>;
   rawBody: string;
+  parsedJson: unknown | null;
+  receivedAt: string;
+  remoteAddress: string | null;
 }
 
-interface WebhookIngressResult {
-  duplicate: boolean;
-  matchedRegistrations: number;
-  eventId: string;
+export interface WebhookIngressResponse {
+  status: number;
+  body: Record<string, unknown>;
+  headers?: Record<string, string>;
 }
 
 export class WebhookIngressServer {
@@ -41,8 +36,8 @@ export class WebhookIngressServer {
 
   constructor(
     private readonly config: AppConfig,
-    private readonly handler: (input: NormalizedWebhookIngress) => Promise<WebhookIngressResult>,
-    private readonly getMailboxState: () => WebhookMailboxState | null,
+    private readonly resolveSource: (routeToken: string) => WebhookSourceRecord | null,
+    private readonly handler: (input: RawWebhookIngress) => Promise<WebhookIngressResponse>,
     private readonly canAcceptRequest: () => boolean = () => true,
   ) {}
 
@@ -63,7 +58,6 @@ export class WebhookIngressServer {
       webhookPort: this.config.webhookPort,
       webhookBindHost: this.config.webhookBindHost,
       webhookPath: this.config.webhookPath,
-      mailboxConfigured: Boolean(this.getMailboxState()?.currentSecret),
       webhookTrustLoopbackProxy: this.config.webhookTrustLoopbackProxy,
     });
   }
@@ -90,27 +84,35 @@ export class WebhookIngressServer {
 
   private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
-      const parsed = await this.normalizeRequest(req);
-      if ("status" in parsed) {
-        this.respondJson(res, parsed.status, parsed.body, parsed.headers);
+      const clientKey = this.resolveClientKey(req);
+      const blockedUntil = this.getAuthBlockUntil(clientKey);
+      if (blockedUntil > Date.now()) {
+        const retryAfterSeconds = Math.max(1, Math.ceil((blockedUntil - Date.now()) / 1000));
+        this.respondJson(res, 429, {
+          ok: false,
+          error: "auth_rate_limited",
+          retryAfterSeconds,
+        }, { "retry-after": `${retryAfterSeconds}` });
+        return;
+      }
+
+      const normalized = await this.normalizeRequest(req);
+      if ("status" in normalized) {
+        this.respondJson(res, normalized.status, normalized.body, normalized.headers);
         return;
       }
       if (!this.canAcceptRequest()) {
         this.respondJson(res, 503, { ok: false, error: "shutting_down" });
         return;
       }
-      const result = await this.handler(parsed);
-      this.respondJson(res, 202, {
-        ok: true,
-        duplicate: result.duplicate,
-        matchedRegistrations: result.matchedRegistrations,
-        eventId: result.eventId,
-      });
-    } catch (error) {
-      if (isWebhookShutdownError(error)) {
-        this.respondJson(res, 503, { ok: false, error: "shutting_down" });
-        return;
+      const result = await this.handler(normalized);
+      if (result.status === 401 || result.status === 403) {
+        this.recordAuthFailure(clientKey);
+      } else {
+        this.resetAuthFailures(clientKey);
       }
+      this.respondJson(res, result.status, result.body, result.headers);
+    } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       logWarn("Webhook ingress request failed", { error: message });
       this.respondJson(res, 500, { ok: false, error: "internal_error" });
@@ -119,51 +121,21 @@ export class WebhookIngressServer {
 
   private async normalizeRequest(
     req: IncomingMessage,
-  ): Promise<NormalizedWebhookIngress | { status: number; body: Record<string, unknown>; headers?: Record<string, string> }> {
+  ): Promise<RawWebhookIngress | { status: number; body: Record<string, unknown>; headers?: Record<string, string> }> {
     if (req.method !== "POST") {
       return { status: 405, body: { ok: false, error: "method_not_allowed" } };
     }
 
-    if (!this.matchesWebhookPath(req.url)) {
+    const routePath = this.extractRoutePath(req.url);
+    if (!routePath) {
       return { status: 404, body: { ok: false, error: "not_found" } };
     }
 
-    const mailboxState = this.getMailboxState();
-    if (!mailboxState?.currentSecret) {
-      return { status: 503, body: { ok: false, error: "mailbox_unavailable" } };
+    const source = this.resolveSource(routePath.routeToken);
+    if (!source || !source.enabled) {
+      return { status: 404, body: { ok: false, error: "not_found" } };
     }
-    const clientKey = this.resolveClientKey(req);
-    const providedSecret = this.extractSecret(req);
-    const previousSecretValid = Boolean(
-      mailboxState.previousSecret
-      && mailboxState.previousSecretExpiresAt
-      && Date.parse(mailboxState.previousSecretExpiresAt) > Date.now(),
-    );
-    const authorized = Boolean(
-      providedSecret
-      && (
-        safeSecretEquals(providedSecret, mailboxState.currentSecret)
-        || (previousSecretValid && safeSecretEquals(providedSecret, mailboxState.previousSecret!))
-      ),
-    );
-    if (!authorized) {
-      const blockedUntil = this.getAuthBlockUntil(clientKey);
-      if (blockedUntil > Date.now()) {
-        const retryAfterSeconds = Math.max(1, Math.ceil((blockedUntil - Date.now()) / 1000));
-        return {
-          status: 429,
-          body: {
-            ok: false,
-            error: "auth_rate_limited",
-            retryAfterSeconds,
-          },
-          headers: { "retry-after": `${retryAfterSeconds}` },
-        };
-      }
-      this.recordAuthFailure(clientKey);
-      return { status: 401, body: { ok: false, error: "unauthorized" } };
-    }
-    this.resetAuthFailures(clientKey);
+
     if (!this.canAcceptRequest()) {
       return { status: 503, body: { ok: false, error: "shutting_down" } };
     }
@@ -186,61 +158,42 @@ export class WebhookIngressServer {
       };
     }
 
-    let parsedBody: Record<string, unknown>;
+    let parsedJson: unknown | null = null;
     try {
-      const parsed = JSON.parse(rawBody) as unknown;
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        return { status: 400, body: { ok: false, error: "invalid_json_object" } };
-      }
-      parsedBody = parsed as Record<string, unknown>;
+      parsedJson = JSON.parse(rawBody);
     } catch {
-      return { status: 400, body: { ok: false, error: "invalid_json" } };
+      parsedJson = null;
     }
 
-    const source = normalizeWebhookSource(typeof parsedBody.source === "string" ? parsedBody.source : null);
-    if (!source) {
-      return { status: 400, body: { ok: false, error: "missing_source" } };
-    }
-    const event = typeof parsedBody.event === "string" && parsedBody.event.trim()
-      ? parsedBody.event.trim()
-      : null;
-    if (!event) {
-      return { status: 400, body: { ok: false, error: "missing_event" } };
-    }
-
-    const id = typeof parsedBody.id === "string" && parsedBody.id.trim()
-      ? parsedBody.id.trim()
-      : createHash("sha256").update(`${source}\n${event}\n${stableJsonStringify(parsedBody)}`).digest("hex");
-    const match = extractStringMap(parsedBody.match);
     return {
       source,
-      event,
-      dedupeKey: id,
-      match,
-      payload: Object.hasOwn(parsedBody, "payload") ? parsedBody.payload : parsedBody,
-      receivedAt: new Date().toISOString(),
+      routePath: routePath.fullPath,
+      method: req.method,
+      url: routePath.url.toString(),
+      headers: normalizeHeaders(req.headers),
       rawBody,
+      parsedJson,
+      receivedAt: new Date().toISOString(),
+      remoteAddress: req.socket.remoteAddress ?? null,
     };
   }
 
-  private matchesWebhookPath(rawUrl: string | undefined): boolean {
-    if (!rawUrl) return false;
+  private extractRoutePath(rawUrl: string | undefined): { fullPath: string; routeToken: string; url: URL } | null {
+    if (!rawUrl) return null;
     const url = new URL(rawUrl, "http://127.0.0.1");
-    const normalizedBase = this.config.webhookPath || "/";
-    return url.pathname === normalizedBase;
-  }
-
-  private extractSecret(req: IncomingMessage): string | null {
-    const authHeader = req.headers.authorization;
-    if (typeof authHeader === "string" && /^Bearer /i.test(authHeader)) {
-      const token = authHeader.slice(authHeader.indexOf(" ") + 1).trim();
-      if (token) return token;
+    const base = this.config.webhookPath === "/" ? "" : this.config.webhookPath;
+    if (!url.pathname.startsWith(`${base}/`)) {
+      return null;
     }
-    const secretHeader = req.headers["x-bridge-webhook-secret"];
-    if (typeof secretHeader === "string" && secretHeader.trim()) {
-      return secretHeader.trim();
+    const suffix = url.pathname.slice(base.length + 1);
+    if (!suffix || suffix.includes("/")) {
+      return null;
     }
-    return null;
+    return {
+      fullPath: url.pathname,
+      routeToken: suffix,
+      url,
+    };
   }
 
   private resolveClientKey(req: IncomingMessage): string {
@@ -344,34 +297,18 @@ async function readRequestBody(req: IncomingMessage, maxBytes: number, timeoutMs
   });
 }
 
-function extractStringMap(value: unknown): Record<string, string> | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return null;
+function normalizeHeaders(headers: IncomingMessage["headers"]): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    if (typeof value === "string") {
+      result[key.toLowerCase()] = value;
+      continue;
+    }
+    if (Array.isArray(value)) {
+      result[key.toLowerCase()] = value.join(", ");
+    }
   }
-  const entries = Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === "string");
-  return entries.length > 0 ? Object.fromEntries(entries) : null;
-}
-
-function safeSecretEquals(left: string, right: string): boolean {
-  const leftBuffer = Buffer.from(left);
-  const rightBuffer = Buffer.from(right);
-  if (leftBuffer.length !== rightBuffer.length) {
-    return false;
-  }
-  return timingSafeEqual(leftBuffer, rightBuffer);
-}
-
-function isWebhookShutdownError(error: unknown): boolean {
-  return Boolean(
-    error
-    && typeof error === "object"
-    && "code" in error
-    && (error as { code?: unknown }).code === "WEBHOOK_SHUTDOWN",
-  );
-}
-
-function stableJsonStringify(value: unknown): string {
-  return JSON.stringify(sortJsonValue(value));
+  return result;
 }
 
 function isLoopbackAddress(value: string): boolean {
@@ -379,18 +316,4 @@ function isLoopbackAddress(value: string): boolean {
   return normalized === "127.0.0.1"
     || normalized === "::1"
     || normalized === "::ffff:127.0.0.1";
-}
-
-function sortJsonValue(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map((entry) => sortJsonValue(entry));
-  }
-  if (!value || typeof value !== "object") {
-    return value;
-  }
-  return Object.fromEntries(
-    Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, entry]) => [key, sortJsonValue(entry)]),
-  );
 }

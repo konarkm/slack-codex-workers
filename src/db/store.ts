@@ -20,7 +20,7 @@ import type {
   SessionStatus,
   TeamDefaults,
   WebhookEventRecord,
-  WebhookMailboxState,
+  WebhookSourceRecord,
   WorkstreamRecord,
   WorkerIdentity,
   WorkerRecord,
@@ -148,6 +148,7 @@ function parseRegistrationTrigger(value: string | null | undefined): Registratio
         kind: "webhook",
         source: typeof parsed.source === "string" ? parsed.source : "",
         events: Array.isArray(parsed.events) ? parsed.events.filter((entry): entry is string => typeof entry === "string") : [],
+        deliveryMode: parsed.deliveryMode === "steer" ? "steer" : "queue",
         match,
       };
     }
@@ -304,10 +305,24 @@ export class Store {
         event TEXT NOT NULL,
         dedupe_key TEXT NOT NULL,
         match_json TEXT,
+        raw_request_path TEXT,
         payload_path TEXT NOT NULL,
         summary TEXT NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS webhook_sources (
+        id TEXT PRIMARY KEY,
+        team_id TEXT NOT NULL,
+        source TEXT NOT NULL,
+        route_token TEXT NOT NULL,
+        handler_path TEXT NOT NULL,
+        enabled INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(team_id, source),
+        UNIQUE(route_token)
       );
 
       CREATE TABLE IF NOT EXISTS dm_sessions (
@@ -393,6 +408,7 @@ export class Store {
     this.ensureColumn("pending_wakes", "next_attempt_at", "TEXT");
     this.ensureColumn("pending_wakes", "last_error", "TEXT");
     this.ensureColumn("pending_wakes", "fired_event", "TEXT");
+    this.ensureColumn("webhook_events", "raw_request_path", "TEXT");
     this.ensureColumn("dm_sessions", "channel_id", "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn("dm_sessions", "status", "TEXT NOT NULL DEFAULT 'idle'");
     this.ensureColumn("dm_sessions", "last_error", "TEXT");
@@ -421,6 +437,7 @@ export class Store {
           event TEXT NOT NULL,
           dedupe_key TEXT NOT NULL,
           match_json TEXT,
+          raw_request_path TEXT,
           payload_path TEXT NOT NULL,
           summary TEXT NOT NULL,
           created_at TEXT NOT NULL,
@@ -428,10 +445,10 @@ export class Store {
         );
 
         INSERT INTO webhook_events (
-          id, team_id, source, event, dedupe_key, match_json, payload_path, summary, created_at, updated_at
+          id, team_id, source, event, dedupe_key, match_json, raw_request_path, payload_path, summary, created_at, updated_at
         )
         SELECT
-          id, team_id, source, event, dedupe_key, match_json, payload_path, summary, created_at, updated_at
+          id, team_id, source, event, dedupe_key, match_json, NULL, payload_path, summary, created_at, updated_at
         FROM webhook_events_legacy;
 
         DROP TABLE webhook_events_legacy;
@@ -692,12 +709,78 @@ export class Store {
     this.writeJsonMetadata("restart:notice", record);
   }
 
-  getWebhookMailboxState(): WebhookMailboxState | null {
-    return this.readJsonMetadata<WebhookMailboxState>("webhook:mailbox");
+  getWebhookSource(teamId: string, source: string): WebhookSourceRecord | null {
+    const row = this.db.prepare(`
+      SELECT * FROM webhook_sources
+      WHERE team_id = ? AND source = ?
+      LIMIT 1
+    `).get(teamId, source) as Record<string, unknown> | undefined;
+    return row ? this.toWebhookSource(row) : null;
   }
 
-  setWebhookMailboxState(state: WebhookMailboxState): void {
-    this.writeJsonMetadata("webhook:mailbox", state);
+  getWebhookSourceByRouteToken(routeToken: string): WebhookSourceRecord | null {
+    const row = this.db.prepare(`
+      SELECT * FROM webhook_sources
+      WHERE route_token = ?
+      LIMIT 1
+    `).get(routeToken) as Record<string, unknown> | undefined;
+    return row ? this.toWebhookSource(row) : null;
+  }
+
+  listWebhookSources(teamId: string): WebhookSourceRecord[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM webhook_sources
+      WHERE team_id = ?
+      ORDER BY source ASC
+    `).all(teamId) as Record<string, unknown>[];
+    return rows.map((row) => this.toWebhookSource(row));
+  }
+
+  createWebhookSource(
+    input: Omit<WebhookSourceRecord, "createdAt" | "updatedAt"> & { createdAt?: string; updatedAt?: string },
+  ): WebhookSourceRecord {
+    const createdAt = input.createdAt ?? nowIso();
+    const updatedAt = input.updatedAt ?? createdAt;
+    this.db.prepare(`
+      INSERT INTO webhook_sources (
+        id, team_id, source, route_token, handler_path, enabled, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      input.id,
+      input.teamId,
+      input.source,
+      input.routeToken,
+      input.handlerPath,
+      input.enabled ? 1 : 0,
+      createdAt,
+      updatedAt,
+    );
+    return this.getWebhookSource(input.teamId, input.source)!;
+  }
+
+  updateWebhookSource(
+    teamId: string,
+    source: string,
+    patch: Partial<Pick<WebhookSourceRecord, "routeToken" | "handlerPath" | "enabled">>,
+  ): WebhookSourceRecord | null {
+    const current = this.getWebhookSource(teamId, source);
+    if (!current) return null;
+    this.db.prepare(`
+      UPDATE webhook_sources SET
+        route_token = ?,
+        handler_path = ?,
+        enabled = ?,
+        updated_at = ?
+      WHERE team_id = ? AND source = ?
+    `).run(
+      Object.hasOwn(patch, "routeToken") ? patch.routeToken : current.routeToken,
+      Object.hasOwn(patch, "handlerPath") ? patch.handlerPath : current.handlerPath,
+      (Object.hasOwn(patch, "enabled") ? patch.enabled : current.enabled) ? 1 : 0,
+      nowIso(),
+      teamId,
+      source,
+    );
+    return this.getWebhookSource(teamId, source);
   }
 
   upsertChannels(channels: ChannelRecord[]): void {
@@ -1031,8 +1114,8 @@ export class Store {
     let created = false;
     const insertEvent = this.db.prepare(`
       INSERT OR IGNORE INTO webhook_events (
-        id, team_id, source, event, dedupe_key, match_json, payload_path, summary, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        id, team_id, source, event, dedupe_key, match_json, raw_request_path, payload_path, summary, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const insertWake = this.db.prepare(`
       INSERT INTO pending_wakes (
@@ -1046,7 +1129,8 @@ export class Store {
         input.source,
         input.event,
         input.dedupeKey,
-        input.match ? JSON.stringify(input.match) : null,
+        input.fields ? JSON.stringify(input.fields) : null,
+        input.rawRequestPath,
         input.payloadPath,
         input.summary,
         createdAt,
@@ -1453,9 +1537,23 @@ export class Store {
       source: String(row.source),
       event: String(row.event),
       dedupeKey: String(row.dedupe_key),
-      match: parseStringMap(typeof row.match_json === "string" ? row.match_json : null),
+      fields: parseStringMap(typeof row.match_json === "string" ? row.match_json : null),
+      rawRequestPath: row.raw_request_path ? String(row.raw_request_path) : "",
       payloadPath: String(row.payload_path),
       summary: String(row.summary),
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+    };
+  }
+
+  private toWebhookSource(row: Record<string, unknown>): WebhookSourceRecord {
+    return {
+      id: String(row.id),
+      teamId: String(row.team_id),
+      source: String(row.source),
+      routeToken: String(row.route_token),
+      handlerPath: String(row.handler_path),
+      enabled: Boolean(row.enabled),
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
     };

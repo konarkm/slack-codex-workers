@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AppConfig } from "../config.js";
 import { SlackCodexWorkersService } from "../core/service.js";
 import { WorkstreamManager } from "../workstreams/manager.js";
-import type { DmSessionRecord, SlackMessageContext, WorkerRecord } from "../types.js";
+import type { DmSessionRecord, SlackMessageContext, WebhookSourceRecord, WorkerRecord } from "../types.js";
 
 vi.mock("@slack/bolt", () => ({
   App: class {
@@ -80,8 +80,6 @@ function makeConfig(dir: string, overrides: Partial<AppConfig> = {}): AppConfig 
     webhookBodyMaxBytes: 256 * 1024,
     webhookBodyReadTimeoutMs: 30_000,
     webhookPayloadStorageDir: path.join(dir, "webhooks"),
-    webhookSharedSecret: "secret-shared",
-    webhookPreviousSharedSecret: "secret-previous",
     webhookPublicBaseUrl: "https://hooks.example.test",
     webhookTrustLoopbackProxy: false,
     ...overrides,
@@ -159,6 +157,62 @@ async function createService(configOverrides: Partial<AppConfig> = {}) {
     archivedAt: null,
   });
   return { dir, service, slack, codex, store };
+}
+
+async function createWebhookSource(
+  service: any,
+  overrides: Partial<WebhookSourceRecord> = {},
+  handlerBody?: string,
+): Promise<WebhookSourceRecord> {
+  const sourceName = overrides.source ?? "github";
+  const routeToken = overrides.routeToken ?? `route-${sourceName}`;
+  const handlerPath = overrides.handlerPath ?? path.join(service.config.workspaceRoot, `${sourceName}-handler.mjs`);
+  await fs.mkdir(path.dirname(handlerPath), { recursive: true });
+  await fs.writeFile(handlerPath, handlerBody ?? `
+export async function normalizeWebhook(ctx) {
+  const body = ctx.parsedJson && typeof ctx.parsedJson === "object" ? ctx.parsedJson : {};
+  if (body && body.reject === true) {
+    return { outcome: "reject", error: "signature_invalid", status: 401 };
+  }
+  if (body && body.noop === true) {
+    return { outcome: "noop", reason: "ignored" };
+  }
+  const events = Array.isArray(body.events) ? body.events : [{
+    event: typeof body.event === "string" ? body.event : "unknown",
+    dedupeKey: typeof body.dedupeKey === "string" ? body.dedupeKey : (typeof body.id === "string" ? body.id : "evt-default"),
+    fields: body.fields ?? body.match ?? null,
+    payload: Object.hasOwn(body, "payload") ? body.payload : body,
+    summary: typeof body.summary === "string" ? body.summary : null,
+  }];
+  return { outcome: "events", events };
+}
+`);
+  return service.store.createWebhookSource({
+    id: overrides.id ?? `src-${sourceName}-${routeToken}`,
+    teamId: "T1",
+    source: sourceName,
+    routeToken,
+    handlerPath,
+    enabled: true,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+    ...overrides,
+  });
+}
+
+function makeRawWebhookIngress(source: WebhookSourceRecord, overrides: Record<string, unknown> = {}) {
+  return {
+    source,
+    routePath: `/webhooks/${source.routeToken}`,
+    method: "POST",
+    url: `https://hooks.example.test/webhooks/${source.routeToken}`,
+    headers: { "content-type": "application/json" },
+    rawBody: "{}",
+    parsedJson: {},
+    receivedAt: "2026-01-01T00:01:00.000Z",
+    remoteAddress: "127.0.0.1",
+    ...overrides,
+  };
 }
 
 function createWorker(service: any, overrides: Partial<WorkerRecord> = {}): WorkerRecord {
@@ -1656,7 +1710,7 @@ describe("service lifecycle decisions", () => {
     expect(slack.postThreadReply.mock.calls[1]?.[2]).toContain("database_path:");
     expect(slack.postThreadReply.mock.calls[1]?.[2]).toContain("codex_thread_state: idle");
     expect(slack.postThreadReply.mock.calls[1]?.[2]).toContain("webhook_bind: 127.0.0.1:");
-    expect(slack.postThreadReply.mock.calls[1]?.[2]).toContain("webhook_public_url: https://hooks.example.test/webhooks");
+    expect(slack.postThreadReply.mock.calls[1]?.[2]).toContain("webhook_public_url_base: https://hooks.example.test/webhooks");
     expect(slack.postThreadReply.mock.calls[1]?.[2]).toContain("webhook_proxy_trust: disabled");
     store.close();
   });
@@ -1846,7 +1900,7 @@ describe("service lifecycle decisions", () => {
       enabled: true,
       target: { kind: "workstream", workstreamId: "T1:ops", workerKey: null },
       action: { kind: "spawn" },
-      trigger: { kind: "webhook", source: "ops", events: ["ready"], match: null },
+      trigger: { kind: "webhook", source: "ops", events: ["ready"], deliveryMode: "queue", match: null },
     });
     store.createPendingWake({
       id: "wake-ops-queued",
@@ -2061,7 +2115,7 @@ describe("service lifecycle decisions", () => {
       enabled: true,
       target: { kind: "workstream", workstreamId: "T1:ops", workerKey: null },
       action: { kind: "spawn" },
-      trigger: { kind: "webhook", source: "ops", events: ["ready"], match: null },
+      trigger: { kind: "webhook", source: "ops", events: ["ready"], deliveryMode: "queue", match: null },
     });
     store.createPendingWake({
       id: "wake-ops-queued",
@@ -2118,7 +2172,7 @@ describe("service lifecycle decisions", () => {
       enabled: true,
       target: { kind: "workstream", workstreamId: "T1:ops", workerKey: null },
       action: { kind: "spawn" },
-      trigger: { kind: "webhook", source: "ops", events: ["ready"], match: null },
+      trigger: { kind: "webhook", source: "ops", events: ["ready"], deliveryMode: "queue", match: null },
     });
     slack.archivePublicChannel.mockResolvedValueOnce(undefined);
     vi.spyOn(service.registrations, "disableRegistrationById").mockRejectedValueOnce(new Error("projection write failed"));
@@ -2176,119 +2230,66 @@ describe("service lifecycle decisions", () => {
     }
   });
 
-  it("reports the shared webhook mailbox bundle through the mailbox tool", async () => {
+  it("creates and inspects a webhook source from a worker thread", async () => {
     const { service, store } = await createService();
+    createWorker(service, { workstreamId: "T1:root" });
 
-    const result = await (service as any).handleGetWebhookMailboxTool({
-      threadId: "thread-1",
-      turnId: "turn-1",
-      callId: "call-1",
+    const created = await (service as any).handleCreateWebhookSourceTool(
+      { source: "linear" },
+      { threadId: "thread-1", turnId: "turn-1", callId: "call-1" },
+    );
+    const details = JSON.parse(created);
+
+    expect(details.source).toBe("linear");
+    expect(details.route_path).toMatch(/^\/webhooks\/[a-f0-9]+$/);
+    expect(details.public_url).toMatch(/^https:\/\/hooks\.example\.test\/webhooks\/[a-f0-9]+$/);
+    expect(details.handler_path).toContain("/.slack-workers/bridge/webhook-sources/linear/handler.mjs");
+
+    const inspected = await (service as any).handleGetWebhookSourceTool(
+      { source: "linear" },
+      { threadId: "thread-1", turnId: "turn-1", callId: "call-2" },
+    );
+    expect(JSON.parse(inspected)).toMatchObject({
+      source: "linear",
+      enabled: true,
     });
-
-    expect(result).toContain("webhook_public_url: https://hooks.example.test/webhooks");
-    expect(result).toContain("webhook_bind: 127.0.0.1:");
-    expect(result).toContain("webhook_proxy_trust: disabled");
-    expect(result).toContain("webhook_shared_secret: secret-shared");
-    expect(result).toContain("webhook_previous_secret_expires_at:");
-    expect(result).toContain("auth_header_bearer: Authorization: Bearer secret-shared");
-    expect(result).toContain("\"source\":\"agentmail\"");
+    expect(store.getWebhookSource("T1", "linear")).toBeTruthy();
     store.close();
   });
 
-  it("generates a webhook mailbox secret when no bootstrap secret is configured", async () => {
-    const { service, store } = await createService({
-      webhookSharedSecret: null,
-      webhookPreviousSharedSecret: null,
-      webhookPublicBaseUrl: null,
-    });
-
-    const result = await (service as any).handleGetWebhookMailboxTool({
-      threadId: "thread-1",
-      turnId: "turn-1",
-      callId: "call-1",
-    });
-
-    const mailbox = store.getWebhookMailboxState();
-    expect(mailbox?.currentSecret).toBeTruthy();
-    expect(mailbox?.previousSecret).toBeNull();
-    expect(mailbox?.previousSecretExpiresAt).toBeNull();
-    expect(result).toContain("webhook_public_url: (not configured)");
-    store.close();
-  });
-
-  it("keeps persisted mailbox secrets instead of replacing them with bootstrap config", async () => {
-    const { service, store } = await createService({
-      webhookSharedSecret: "bootstrap-secret",
-      webhookPreviousSharedSecret: "bootstrap-previous",
-    });
-    store.setWebhookMailboxState({
-      currentSecret: "persisted-secret",
-      previousSecret: "persisted-previous",
-      previousSecretExpiresAt: "2099-01-01T00:00:00.000Z",
-      updatedAt: "2026-03-17T00:00:00.000Z",
-    });
-
-    const result = await (service as any).handleGetWebhookMailboxTool({
-      threadId: "thread-1",
-      turnId: "turn-1",
-      callId: "call-1",
-    });
-
-    expect(result).toContain("webhook_shared_secret: persisted-secret");
-    expect(store.getWebhookMailboxState()).toMatchObject({
-      currentSecret: "persisted-secret",
-      previousSecret: "persisted-previous",
-      previousSecretExpiresAt: "2099-01-01T00:00:00.000Z",
-    });
-    store.close();
-  });
-
-  it("does not re-seed a previous secret from bootstrap config after mailbox state exists", async () => {
-    const { service, store } = await createService({
-      webhookSharedSecret: "bootstrap-secret",
-      webhookPreviousSharedSecret: "bootstrap-previous",
-    });
-    store.setWebhookMailboxState({
-      currentSecret: "persisted-secret",
-      previousSecret: null,
-      previousSecretExpiresAt: null,
-      updatedAt: "2026-03-17T00:00:00.000Z",
-    });
-
-    await (service as any).handleGetWebhookMailboxTool({
-      threadId: "thread-1",
-      turnId: "turn-1",
-      callId: "call-1",
-    });
-
-    expect(store.getWebhookMailboxState()).toMatchObject({
-      currentSecret: "persisted-secret",
-      previousSecret: null,
-      previousSecretExpiresAt: null,
-    });
-    store.close();
-  });
-
-  it("clears expired previous secrets from persisted mailbox state during initialization", async () => {
+  it("creates and rotates a webhook source only from a worker thread or admin DM context", async () => {
     const { service, store } = await createService();
-    store.setWebhookMailboxState({
-      currentSecret: "persisted-secret",
-      previousSecret: "expired-secret",
-      previousSecretExpiresAt: "2026-01-01T00:00:00.000Z",
+    createDmSession(service, { appThreadId: "dm-thread-1" });
+    store.createWebhookSource({
+      id: "src-1",
+      teamId: "T1",
+      source: "linear",
+      routeToken: "oldroute",
+      handlerPath: "/tmp/linear/handler.mjs",
+      enabled: true,
+      createdAt: "2026-03-17T00:00:00.000Z",
       updatedAt: "2026-03-17T00:00:00.000Z",
     });
 
-    await (service as any).handleGetWebhookMailboxTool({
-      threadId: "thread-1",
+    const result = await (service as any).handleRotateWebhookSourceRouteTool({
+      source: "linear",
+    }, {
+      threadId: "dm-thread-1",
       turnId: "turn-1",
       callId: "call-1",
     });
 
-    expect(store.getWebhookMailboxState()).toMatchObject({
-      currentSecret: "persisted-secret",
-      previousSecret: null,
-      previousSecretExpiresAt: null,
-    });
+    const source = JSON.parse(result);
+    expect(source.route_path).not.toBe("/webhooks/oldroute");
+    expect(store.getWebhookSource("T1", "linear")?.routeToken).not.toBe("oldroute");
+
+    await expect((service as any).handleRotateWebhookSourceRouteTool({
+      source: "linear",
+    }, {
+      threadId: "unknown-thread",
+      turnId: "turn-2",
+      callId: "call-2",
+    })).rejects.toThrow("worker thread or admin DM context");
     store.close();
   });
 
@@ -2382,6 +2383,7 @@ describe("service lifecycle decisions", () => {
         kind: "webhook",
         source: "qa",
         events: ["root.check"],
+        deliveryMode: "queue",
         match: null,
       },
     });
@@ -2485,6 +2487,7 @@ describe("service lifecycle decisions", () => {
         kind: "webhook",
         source: "qa",
         events: ["root.check"],
+        deliveryMode: "queue",
         match: null,
       },
     });
@@ -2742,6 +2745,7 @@ describe("service lifecycle decisions", () => {
     createWorker(service, { workstreamId: "T1:root" });
     codex.reconcileThreadForSend.mockResolvedValue("idle");
     codex.startTurnWithResumeFallback.mockResolvedValue("turn-webhook");
+    const webhookSource = await createWebhookSource(service, { source: "github" });
 
     store.upsertRegistration({
       id: "reg-webhook",
@@ -2762,30 +2766,31 @@ describe("service lifecycle decisions", () => {
         kind: "webhook",
         source: "github",
         events: ["push"],
+        deliveryMode: "queue",
         match: { repo: "acme/api" },
       },
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:00.000Z",
     });
 
-    const result = await service.ingestWebhookEvent({
-      source: "github",
-      event: "push",
-      dedupeKey: "evt-1",
-      match: { repo: "acme/api" },
-      payload: { ref: "refs/heads/main", commits: 3 },
-      receivedAt: "2026-01-01T00:01:00.000Z",
+    const result = await service.ingestWebhookEvent(makeRawWebhookIngress(webhookSource, {
+      parsedJson: {
+        event: "push",
+        dedupeKey: "evt-1",
+        fields: { repo: "acme/api" },
+        payload: { ref: "refs/heads/main", commits: 3 },
+      },
       rawBody: "{\"event\":\"push\"}",
-    });
+    }));
 
-    expect(result).toMatchObject({ duplicate: false, matchedRegistrations: 1 });
+    expect(result).toMatchObject({ status: 202, body: expect.objectContaining({ createdEvents: 1, matchedRegistrations: 1 }) });
     expect(service.scheduleRegistrationLoop).toHaveBeenCalledWith(0);
     await service.deliverQueuedWakes();
 
     const wakes = store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000");
     expect(wakes).toHaveLength(1);
     expect(wakes[0]).toMatchObject({ status: "delivered", firedEvent: "push" });
-    expect(wakes[0]?.payloadPath).toContain(path.join(dir, "webhooks", "github"));
+    expect(wakes[0]?.payloadPath).toContain(path.join(dir, "webhooks", "events", "github"));
     await expect(fs.readFile(wakes[0]!.payloadPath!, "utf8")).resolves.toContain("\"source\": \"github\"");
     expect(codex.startTurnWithResumeFallback).toHaveBeenCalledWith(
       "thread-1",
@@ -2811,6 +2816,7 @@ describe("service lifecycle decisions", () => {
     service.runtimeStarted = true;
     service.scheduleRegistrationLoop = vi.fn();
     createWorker(service, { workstreamId: "T1:root" });
+    const webhookSource = await createWebhookSource(service, { source: "github" });
 
     store.upsertRegistration({
       id: "reg-webhook",
@@ -2831,34 +2837,142 @@ describe("service lifecycle decisions", () => {
         kind: "webhook",
         source: "github",
         events: ["push"],
+        deliveryMode: "queue",
         match: null,
       },
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:00.000Z",
     });
 
-    const first = await service.ingestWebhookEvent({
-      source: "github",
-      event: "push",
-      dedupeKey: "evt-1",
-      match: null,
-      payload: { seq: 1 },
-      receivedAt: "2026-01-01T00:01:00.000Z",
+    const first = await service.ingestWebhookEvent(makeRawWebhookIngress(webhookSource, {
+      parsedJson: { event: "push", dedupeKey: "evt-1", payload: { seq: 1 } },
       rawBody: "{\"event\":\"push\",\"id\":\"evt-1\"}",
-    });
-    const second = await service.ingestWebhookEvent({
-      source: "github",
-      event: "push",
-      dedupeKey: "evt-1",
-      match: null,
-      payload: { seq: 2 },
+    }));
+    const second = await service.ingestWebhookEvent(makeRawWebhookIngress(webhookSource, {
+      parsedJson: { event: "push", dedupeKey: "evt-1", payload: { seq: 2 } },
+      rawBody: "{\"event\":\"push\",\"id\":\"evt-1\"}",
       receivedAt: "2026-01-01T00:02:00.000Z",
-      rawBody: "{\"event\":\"push\",\"id\":\"evt-1\"}",
+    }));
+
+    expect(first).toMatchObject({ status: 202, body: expect.objectContaining({ createdEvents: 1, matchedRegistrations: 1 }) });
+    expect(second).toMatchObject({ status: 202, body: expect.objectContaining({ duplicateEvents: 1, matchedRegistrations: 0 }) });
+    expect(store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000")).toHaveLength(1);
+    store.close();
+  });
+
+  it("steers an active worker turn for webhook registrations with deliveryMode=steer", async () => {
+    const { service, codex, store } = await createService();
+    service.runtimeStarted = true;
+    service.scheduleRegistrationLoop = vi.fn();
+    createWorker(service, { workstreamId: "T1:root", activeTurnId: "turn-active", status: "running" });
+    const webhookSource = await createWebhookSource(service, { source: "linear" });
+
+    store.upsertRegistration({
+      id: "reg-webhook-steer",
+      teamId: "T1",
+      workstreamId: "T1:root",
+      workerKey: "T1:C1:1.000",
+      ownerUserId: "U1",
+      rootOwnerUserId: "U1",
+      description: "Track issue state",
+      enabled: true,
+      target: {
+        kind: "worker",
+        workstreamId: "T1:root",
+        workerKey: "T1:C1:1.000",
+      },
+      action: { kind: "wake_self" },
+      trigger: {
+        kind: "webhook",
+        source: "linear",
+        events: ["issue.updated"],
+        deliveryMode: "steer",
+        match: { issue_id: "LIN-123" },
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
     });
 
-    expect(first).toMatchObject({ duplicate: false, matchedRegistrations: 1 });
-    expect(second).toMatchObject({ duplicate: true, matchedRegistrations: 0 });
-    expect(store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000")).toHaveLength(1);
+    await service.ingestWebhookEvent(makeRawWebhookIngress(webhookSource, {
+      parsedJson: {
+        event: "issue.updated",
+        dedupeKey: "evt-linear-1",
+        fields: { issue_id: "LIN-123" },
+        payload: { status: "todo" },
+      },
+    }));
+
+    await service.deliverQueuedWakes();
+
+    expect(codex.steerTurn).toHaveBeenCalledWith(
+      "thread-1",
+      "turn-active",
+      expect.objectContaining({
+        text: expect.stringContaining("fired_event: issue.updated"),
+      }),
+    );
+    expect(codex.startTurnWithResumeFallback).not.toHaveBeenCalled();
+    expect(store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000")[0]).toMatchObject({
+      status: "delivered",
+    });
+    store.close();
+  });
+
+  it("starts a fresh turn for webhook steer registrations when the worker is idle", async () => {
+    const { service, codex, store } = await createService();
+    service.runtimeStarted = true;
+    service.scheduleRegistrationLoop = vi.fn();
+    createWorker(service, { workstreamId: "T1:root", activeTurnId: null, status: "idle" });
+    codex.reconcileThreadForSend.mockResolvedValue("idle");
+    codex.startTurnWithResumeFallback.mockResolvedValue("turn-fresh");
+    const webhookSource = await createWebhookSource(service, { source: "linear" });
+
+    store.upsertRegistration({
+      id: "reg-webhook-steer-idle",
+      teamId: "T1",
+      workstreamId: "T1:root",
+      workerKey: "T1:C1:1.000",
+      ownerUserId: "U1",
+      rootOwnerUserId: "U1",
+      description: "Track issue state",
+      enabled: true,
+      target: {
+        kind: "worker",
+        workstreamId: "T1:root",
+        workerKey: "T1:C1:1.000",
+      },
+      action: { kind: "wake_self" },
+      trigger: {
+        kind: "webhook",
+        source: "linear",
+        events: ["issue.updated"],
+        deliveryMode: "steer",
+        match: { issue_id: "LIN-123" },
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    await service.ingestWebhookEvent(makeRawWebhookIngress(webhookSource, {
+      parsedJson: {
+        event: "issue.updated",
+        dedupeKey: "evt-linear-2",
+        fields: { issue_id: "LIN-123" },
+        payload: { status: "backlog" },
+      },
+    }));
+
+    await service.deliverQueuedWakes();
+
+    expect(codex.startTurnWithResumeFallback).toHaveBeenCalledWith(
+      "thread-1",
+      expect.objectContaining({
+        text: expect.stringContaining("fired_event: issue.updated"),
+      }),
+      expect.any(Object),
+      expect.any(Object),
+    );
+    expect(codex.steerTurn).not.toHaveBeenCalled();
     store.close();
   });
 
@@ -2867,6 +2981,8 @@ describe("service lifecycle decisions", () => {
     service.runtimeStarted = true;
     service.scheduleRegistrationLoop = vi.fn();
     createWorker(service, { workstreamId: "T1:root" });
+    const githubSource = await createWebhookSource(service, { source: "github" });
+    const stripeSource = await createWebhookSource(service, { source: "stripe", routeToken: "route-stripe" });
     store.upsertRegistration({
       id: "reg-webhook",
       teamId: "T1",
@@ -2886,39 +3002,24 @@ describe("service lifecycle decisions", () => {
         kind: "webhook",
         source: "github",
         events: ["push"],
+        deliveryMode: "queue",
         match: { repo: "acme/api" },
       },
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:00.000Z",
     });
 
-    await expect(service.ingestWebhookEvent({
-      source: "stripe",
-      event: "push",
-      dedupeKey: "evt-a",
-      match: { repo: "acme/api" },
-      payload: {},
-      receivedAt: "2026-01-01T00:01:00.000Z",
-      rawBody: "{}",
-    })).resolves.toMatchObject({ duplicate: false, matchedRegistrations: 0 });
-    await expect(service.ingestWebhookEvent({
-      source: "github",
-      event: "pull_request",
-      dedupeKey: "evt-b",
-      match: { repo: "acme/api" },
-      payload: {},
+    await expect(service.ingestWebhookEvent(makeRawWebhookIngress(stripeSource, {
+      parsedJson: { event: "push", dedupeKey: "evt-a", fields: { repo: "acme/api" }, payload: {} },
+    }))).resolves.toMatchObject({ status: 202, body: expect.objectContaining({ matchedRegistrations: 0 }) });
+    await expect(service.ingestWebhookEvent(makeRawWebhookIngress(githubSource, {
+      parsedJson: { event: "pull_request", dedupeKey: "evt-b", fields: { repo: "acme/api" }, payload: {} },
       receivedAt: "2026-01-01T00:02:00.000Z",
-      rawBody: "{}",
-    })).resolves.toMatchObject({ duplicate: false, matchedRegistrations: 0 });
-    await expect(service.ingestWebhookEvent({
-      source: "github",
-      event: "push",
-      dedupeKey: "evt-c",
-      match: { repo: "other/repo" },
-      payload: {},
+    }))).resolves.toMatchObject({ status: 202, body: expect.objectContaining({ matchedRegistrations: 0 }) });
+    await expect(service.ingestWebhookEvent(makeRawWebhookIngress(githubSource, {
+      parsedJson: { event: "push", dedupeKey: "evt-c", fields: { repo: "other/repo" }, payload: {} },
       receivedAt: "2026-01-01T00:03:00.000Z",
-      rawBody: "{}",
-    })).resolves.toMatchObject({ duplicate: false, matchedRegistrations: 0 });
+    }))).resolves.toMatchObject({ status: 202, body: expect.objectContaining({ matchedRegistrations: 0 }) });
 
     expect(store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000")).toHaveLength(0);
     expect(store.listWorkers()).toHaveLength(1);
@@ -2930,6 +3031,7 @@ describe("service lifecycle decisions", () => {
     service.runtimeStarted = true;
     service.scheduleRegistrationLoop = vi.fn();
     createWorker(service, { workstreamId: "T1:root" });
+    const webhookSource = await createWebhookSource(service, { source: "stripe", routeToken: "route-stripe" });
     codex.createWorkerThread.mockResolvedValue({ threadId: "thread-webhook-spawn" });
     codex.startTurnWithResumeFallback.mockResolvedValue("turn-webhook-spawn");
 
@@ -2952,23 +3054,25 @@ describe("service lifecycle decisions", () => {
         kind: "webhook",
         source: "stripe",
         events: ["invoice.failed"],
+        deliveryMode: "queue",
         match: { account: "acct_123" },
       },
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:00.000Z",
     });
 
-    const result = await service.ingestWebhookEvent({
-      source: "stripe",
-      event: "invoice.failed",
-      dedupeKey: "evt-stripe-1",
-      match: { account: "acct_123" },
-      payload: { invoiceId: "in_123" },
-      receivedAt: "2026-01-01T00:03:00.000Z",
+    const result = await service.ingestWebhookEvent(makeRawWebhookIngress(webhookSource, {
+      parsedJson: {
+        event: "invoice.failed",
+        dedupeKey: "evt-stripe-1",
+        fields: { account: "acct_123" },
+        payload: { invoiceId: "in_123" },
+      },
       rawBody: "{\"event\":\"invoice.failed\"}",
-    });
+      receivedAt: "2026-01-01T00:03:00.000Z",
+    }));
 
-    expect(result).toMatchObject({ duplicate: false, matchedRegistrations: 1 });
+    expect(result).toMatchObject({ status: 202, body: expect.objectContaining({ matchedRegistrations: 1 }) });
     expect(service.scheduleRegistrationLoop).toHaveBeenCalledWith(0);
     await service.deliverQueuedWakes();
 
@@ -2995,6 +3099,7 @@ describe("service lifecycle decisions", () => {
     service.runtimeStarted = true;
     service.scheduleRegistrationLoop = vi.fn();
     createWorker(service, { workstreamId: "T1:root" });
+    const webhookSource = await createWebhookSource(service, { source: "github" });
     codex.reconcileThreadForSend.mockResolvedValue("idle");
     codex.startTurnWithResumeFallback.mockRejectedValue(new Error("temporary outage"));
 
@@ -3017,21 +3122,16 @@ describe("service lifecycle decisions", () => {
         kind: "webhook",
         source: "github",
         events: ["push"],
+        deliveryMode: "queue",
         match: null,
       },
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:00.000Z",
     });
 
-    await service.ingestWebhookEvent({
-      source: "github",
-      event: "push",
-      dedupeKey: "evt-1",
-      match: null,
-      payload: {},
-      receivedAt: "2026-01-01T00:01:00.000Z",
-      rawBody: "{}",
-    });
+    await service.ingestWebhookEvent(makeRawWebhookIngress(webhookSource, {
+      parsedJson: { event: "push", dedupeKey: "evt-1", payload: {} },
+    }));
 
     await service.deliverQueuedWakes();
     const wakeId = store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000")[0]!.id;
@@ -3075,6 +3175,7 @@ describe("service lifecycle decisions", () => {
     const scheduleSpy = vi.spyOn(service, "scheduleRegistrationLoop");
     scheduleSpy.mockClear();
     createWorker(service, { workstreamId: "T1:root" });
+    const source = await createWebhookSource(service, { source: "github", routeToken: "route-http" });
     store.upsertRegistration({
       id: "reg-webhook-http",
       teamId: "T1",
@@ -3094,6 +3195,7 @@ describe("service lifecycle decisions", () => {
         kind: "webhook",
         source: "github",
         events: ["push"],
+        deliveryMode: "queue",
         match: { repo: "acme/api" },
       },
       createdAt: "2026-01-01T00:00:00.000Z",
@@ -3102,17 +3204,15 @@ describe("service lifecycle decisions", () => {
 
     const port = service.webhooks.getListeningPort();
     expect(port).not.toBeNull();
-    const response = await fetch(`http://127.0.0.1:${port}/webhooks`, {
+    const response = await fetch(`http://127.0.0.1:${port}/webhooks/${source.routeToken}`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        authorization: "Bearer secret-shared",
       },
       body: JSON.stringify({
-        source: "github",
         event: "push",
-        id: "evt-http-1",
-        match: { repo: "acme/api" },
+        dedupeKey: "evt-http-1",
+        fields: { repo: "acme/api" },
         payload: { commits: 1 },
       }),
     });
@@ -3120,7 +3220,7 @@ describe("service lifecycle decisions", () => {
     expect(response.status).toBe(202);
     await expect(response.json()).resolves.toMatchObject({
       ok: true,
-      duplicate: false,
+      createdEvents: 1,
       matchedRegistrations: 1,
     });
     expect(scheduleSpy).toHaveBeenCalledWith(0);
@@ -3129,28 +3229,34 @@ describe("service lifecycle decisions", () => {
     await service.stop();
   });
 
-  it("rotates the shared webhook secret only from the admin DM context", async () => {
+  it("disables a webhook source", async () => {
     const { service, store } = await createService();
-    createDmSession(service, { appThreadId: "dm-thread-1" });
+    createWorker(service, { workstreamId: "T1:root" });
+    store.createWebhookSource({
+      id: "src-1",
+      teamId: "T1",
+      source: "linear",
+      routeToken: "oldroute",
+      handlerPath: "/tmp/linear/handler.mjs",
+      enabled: true,
+      createdAt: "2026-03-17T00:00:00.000Z",
+      updatedAt: "2026-03-17T00:00:00.000Z",
+    });
 
-    const result = await (service as any).handleRotateWebhookSecretTool({
-      threadId: "dm-thread-1",
+    const result = await (service as any).handleDisableWebhookSourceTool({
+      source: "linear",
+    }, {
+      threadId: "thread-1",
       turnId: "turn-1",
       callId: "call-1",
     });
 
-    const mailbox = store.getWebhookMailboxState();
-    expect(result).toContain("webhook_shared_secret:");
-    expect(mailbox?.previousSecret).toBe("secret-shared");
-    expect(mailbox?.currentSecret).not.toBe("secret-shared");
-    expect(mailbox?.previousSecretExpiresAt).toBeTruthy();
-    expect(result).toContain("webhook_previous_secret_expires_at:");
-
-    await expect((service as any).handleRotateWebhookSecretTool({
-      threadId: "thread-1",
-      turnId: "turn-1",
-      callId: "call-2",
-    })).rejects.toThrow("admin DM");
+    expect(JSON.parse(result)).toMatchObject({
+      source: "linear",
+      enabled: false,
+    });
+    expect(store.getWebhookSource("T1", "linear")?.enabled).toBe(false);
+    store.close();
   });
 
   it("coalesces missed heartbeat runs instead of draining backlog", async () => {

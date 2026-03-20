@@ -25,8 +25,8 @@ Implemented in this repo:
 - root workstream bootstrap under `WORKSPACE_ROOT`
 - explicit workstream scaffolding under nested directories with `WORKSTREAM.md`, `AGENTS.md`, and local `.slack-workers/`
 - canonical workstream item landing for new public work
-- durable heartbeat / cron / webhook registrations with wake-self delivery and scheduled workstream spawns
-- authenticated webhook ingress with durable raw payload storage and event dedupe
+- durable heartbeat / cron / webhook registrations with wake-self delivery, steer-style webhook delivery, and scheduled workstream spawns
+- raw webhook ingress with source-specific secret routes, durable raw request storage, normalized event dedupe, and agent-authored handler modules
 - worker dynamic tools:
   - `slack_list_channels`
   - `list_workstreams`
@@ -35,7 +35,11 @@ Implemented in this repo:
   - `slack_upload_files`
   - `get_current_time`
   - `get_current_slack_thread_link`
-  - `get_webhook_mailbox`
+  - `create_webhook_source`
+  - `list_webhook_sources`
+  - `get_webhook_source`
+  - `disable_webhook_source`
+  - `rotate_webhook_source_route`
   - `set_notification`
   - `set_heartbeat`
   - `set_cron`
@@ -48,13 +52,16 @@ Implemented in this repo:
   - `slack_create_workstream`
   - `slack_upload_files`
   - `get_current_time`
-  - `get_webhook_mailbox`
+  - `create_webhook_source`
+  - `list_webhook_sources`
+  - `get_webhook_source`
+  - `disable_webhook_source`
+  - `rotate_webhook_source_route`
   - `list_registrations_admin`
   - `get_registration_admin`
   - `disable_registration_admin`
   - `list_wake_deliveries_admin`
   - `archive_workstream_admin`
-  - `rotate_webhook_secret`
 - channel-thread commands:
   - `.help` / `/help`
   - `.status` / `/status`
@@ -138,16 +145,14 @@ Key variables:
 - `SLACK_UPLOAD_MAX_FILES`: max files accepted by one `slack_upload_files` tool call
 - `SHOW_SLACK_WORKLOG`: when enabled, stream completed tool/worklog items like `Run command: ...` into Slack. Default: off, so only assistant messages and final responses are shown.
 - `WORKSPACE_TIMEZONE`: timezone used for cron registrations. Defaults to the host timezone and falls back to `UTC` if invalid
-- `WEBHOOK_PORT`: local port for authenticated webhook ingress. Default: `3014`
+- `WEBHOOK_PORT`: local port for webhook ingress. Default: `3014`
 - `WEBHOOK_BIND_HOST`: bind host for webhook ingress. Default: `127.0.0.1`
-- `WEBHOOK_PATH`: base webhook path. Default: `/webhooks`
+- `WEBHOOK_PATH`: base webhook path prefix used for source-specific secret routes. Default: `/webhooks`
 - `WEBHOOK_BODY_MAX_BYTES`: max accepted webhook request body size
-- `WEBHOOK_BODY_READ_TIMEOUT_MS`: max time to wait for an authenticated webhook request body before returning `408`. Default: `30000`
+- `WEBHOOK_BODY_READ_TIMEOUT_MS`: max time to wait for a webhook request body before returning `408`. Default: `30000`
 - `WEBHOOK_TRUST_LOOPBACK_PROXY`: when enabled, trust `CF-Connecting-IP` and then `X-Forwarded-For` only if the immediate peer is loopback. Recommended for local `cloudflared` on the same machine.
-- `WEBHOOK_PAYLOAD_STORAGE_DIR`: optional raw webhook payload storage override. Default: `WORKSPACE_ROOT/.slack-workers/bridge/webhooks`
-- `WEBHOOK_SHARED_SECRET`: optional bootstrap secret for the shared webhook mailbox; if unset, the bridge generates and persists one on first boot
-- `WEBHOOK_PREVIOUS_SHARED_SECRET`: optional bootstrap fallback secret accepted during an initial 24-hour overlap window when mailbox state is first created; it is not reapplied after persisted mailbox state exists
-- `WEBHOOK_PUBLIC_BASE_URL`: external base URL used when the bridge reports the mailbox endpoint to agents, for example `https://hooks.example.com`
+- `WEBHOOK_PAYLOAD_STORAGE_DIR`: optional raw request and normalized webhook event storage override. Default: `WORKSPACE_ROOT/.slack-workers/bridge/webhooks`
+- `WEBHOOK_PUBLIC_BASE_URL`: external base URL used when the bridge reports source public URLs to agents, for example `https://hooks.example.com`
 
 ## Run
 
@@ -210,12 +215,13 @@ For a supervised production build:
 - `list_workstreams` returns active registered workstreams as `path (#channel, channel_id)` and is the preferred discovery surface for visible child work.
 - `slack_spawn_worker` targets workstreams, not Slack channels. Omit `workstream` to target the current workstream, or pass a canonical workstream relative path such as `customers/ef`.
 - `slack_create_workstream` is available to workers and the admin DM. It is intended to be used after explicit user approval in the conversation, not behind a separate permission layer.
-- `get_webhook_mailbox` returns the shared webhook mailbox URL, current shared secret, accepted auth headers, and the JSON body shape for configuring external systems.
-- `get_webhook_mailbox` also reports the local bind address and whether loopback-proxy trust is enabled.
+- `create_webhook_source`, `list_webhook_sources`, `get_webhook_source`, `disable_webhook_source`, and `rotate_webhook_source_route` manage workspace-global raw webhook source definitions. Each source has one source name, one secret route, and one handler file.
 - `set_notification(enabled: true|false)` is worker-only, turn-scoped, and opt-in; final worker replies stay visible by default but only mention the root owner when the worker explicitly enables notification for that turn.
-- `rotate_webhook_secret` is available only in the admin DM and rotates the organization-wide shared webhook secret while keeping the previous secret valid for 24 hours.
 - `set_heartbeat` only works in a public worker thread and always targets the current worker with `wake_self`.
-- `set_cron` and `set_webhook` default to `target='self'`; `target='workstream'` creates future public work in the current workstream.
+- `set_cron` defaults to `target='self'`.
+- `set_webhook` defaults to `target='self'` and `deliveryMode='queue'`.
+- `set_webhook(target='self')` accepts `deliveryMode='queue' | 'steer'`. Queue creates separate wake work; steer forwards matching events into the current turn with app-server `turn/steer` when a turn is active and starts a fresh turn when idle.
+- `set_webhook(target='workstream')` creates future public work in the current workstream and only supports queue-style delivery.
 - `set_cron` expects a 5-field numeric cron string and uses `WORKSPACE_TIMEZONE` when evaluating schedules.
 - `list_wake_deliveries` returns runtime wake delivery records in scope, including queued, delivered, failed, and quarantined entries.
 - Webhook ingress listens at `WEBHOOK_PATH`, requires either `Authorization: Bearer <secret>` or `x-bridge-webhook-secret`, rate-limits repeated auth failures per client, times out slow authenticated request bodies, and accepts JSON shaped like `{ source, event, id?, match?, payload? }`.

@@ -82,54 +82,58 @@ describe("codex client dynamic tool routing", () => {
     });
   });
 
-  it("routes get_webhook_mailbox through the dynamic tool handler", async () => {
+  it("routes create_webhook_source through the dynamic tool handler", async () => {
     const respond = vi.fn().mockResolvedValue(undefined);
-    const getWebhookMailbox = vi.fn().mockResolvedValue("webhook_public_url: https://hooks.example.test/webhooks");
+    const createWebhookSource = vi.fn().mockResolvedValue("{\"source\":\"linear\"}");
     const client = Object.create(CodexClient.prototype) as any;
     client.rpc = { respond };
-    client.dynamicToolHandlers = { getWebhookMailbox };
+    client.dynamicToolHandlers = { createWebhookSource };
 
     await client.handleDynamicToolCall("req-2", {
       threadId: "thread-2",
       turnId: "turn-2",
       callId: "call-2",
-      tool: "get_webhook_mailbox",
-      arguments: {},
+      tool: "create_webhook_source",
+      arguments: { source: "linear" },
     });
 
-    expect(getWebhookMailbox).toHaveBeenCalledWith({
+    expect(createWebhookSource).toHaveBeenCalledWith({
+      source: "linear",
+    }, {
       threadId: "thread-2",
       turnId: "turn-2",
       callId: "call-2",
     });
     expect(respond).toHaveBeenCalledWith("req-2", {
-      contentItems: [{ type: "inputText", text: "webhook_public_url: https://hooks.example.test/webhooks" }],
+      contentItems: [{ type: "inputText", text: "{\"source\":\"linear\"}" }],
       success: true,
     });
   });
 
-  it("routes rotate_webhook_secret through the dynamic tool handler", async () => {
+  it("routes rotate_webhook_source_route through the dynamic tool handler", async () => {
     const respond = vi.fn().mockResolvedValue(undefined);
-    const rotateWebhookSecret = vi.fn().mockResolvedValue("webhook_shared_secret: rotated-secret");
+    const rotateWebhookSourceRoute = vi.fn().mockResolvedValue("{\"source\":\"linear\",\"route_path\":\"/webhooks/new\"}");
     const client = Object.create(CodexClient.prototype) as any;
     client.rpc = { respond };
-    client.dynamicToolHandlers = { rotateWebhookSecret };
+    client.dynamicToolHandlers = { rotateWebhookSourceRoute };
 
     await client.handleDynamicToolCall("req-3", {
       threadId: "thread-3",
       turnId: "turn-3",
       callId: "call-3",
-      tool: "rotate_webhook_secret",
-      arguments: {},
+      tool: "rotate_webhook_source_route",
+      arguments: { source: "linear" },
     });
 
-    expect(rotateWebhookSecret).toHaveBeenCalledWith({
+    expect(rotateWebhookSourceRoute).toHaveBeenCalledWith({
+      source: "linear",
+    }, {
       threadId: "thread-3",
       turnId: "turn-3",
       callId: "call-3",
     });
     expect(respond).toHaveBeenCalledWith("req-3", {
-      contentItems: [{ type: "inputText", text: "webhook_shared_secret: rotated-secret" }],
+      contentItems: [{ type: "inputText", text: "{\"source\":\"linear\",\"route_path\":\"/webhooks/new\"}" }],
       success: true,
     });
   });

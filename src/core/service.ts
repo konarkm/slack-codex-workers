@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { DEFAULT_EFFORTS, type AppConfig } from "../config.js";
@@ -22,7 +22,9 @@ import { SlackGateway, type SlackUploadedFile } from "../slack/slackGateway.js";
 import { validateSlackUploadFiles } from "../slack/uploads.js";
 import { assignWorkerIdentity } from "../slack/workerIdentity.js";
 import { WorkstreamManager, buildRequestTitle, buildWorkstreamId, formatWorkstreamAddress } from "../workstreams/manager.js";
-import { WebhookIngressServer, type NormalizedWebhookIngress } from "../webhooks/server.js";
+import { WebhookIngressServer, type RawWebhookIngress } from "../webhooks/server.js";
+import { WebhookSourceManager } from "../webhooks/sourceManager.js";
+import { runWebhookHandler } from "../webhooks/handlers.js";
 import type {
   DmSessionRecord,
   InboundMessageKind,
@@ -38,7 +40,7 @@ import type {
   SlackMessageContext,
   TurnInput,
   WebhookEventRecord,
-  WebhookMailboxState,
+  WebhookSourceRecord,
   WorkstreamRecord,
   WorkerRecord,
   WorklogItem,
@@ -84,7 +86,6 @@ const BLOCKED_RUNNING_TURN_POLL_INTERVAL_MS = 2_000;
 const BLOCKED_RUNNING_TURN_POLL_WINDOW_MS = 30_000;
 const REGISTRATION_POLL_INTERVAL_MS = 5_000;
 const WAKE_RETRY_MAX_ATTEMPTS = 3;
-const WEBHOOK_PREVIOUS_SECRET_OVERLAP_MS = 24 * 60 * 60 * 1000;
 const COMPACTION_STALE_TIMEOUT_MS = 10 * 60 * 1000;
 const webhookShutdownErrorCode = "WEBHOOK_SHUTDOWN";
 const STATUS_REACTIONS = {
@@ -101,6 +102,7 @@ export class SlackCodexWorkersService extends EventEmitter {
   private readonly slack: SlackGateway;
   private readonly workstreams: WorkstreamManager;
   private readonly registrations: RegistrationManager;
+  private readonly webhookSources: WebhookSourceManager;
   private readonly webhooks: WebhookIngressServer;
   private readonly renderState = new Map<string, RenderSessionState>();
   private readonly slackWriteQueues = new Map<string, Promise<unknown>>();
@@ -125,10 +127,11 @@ export class SlackCodexWorkersService extends EventEmitter {
     this.slack = new SlackGateway(config);
     this.workstreams = new WorkstreamManager(config, this.store);
     this.registrations = new RegistrationManager(config, this.store, this.workstreams);
+    this.webhookSources = new WebhookSourceManager(config, this.store);
     this.webhooks = new WebhookIngressServer(
       config,
+      (routeToken) => this.store.getWebhookSourceByRouteToken(routeToken),
       async (input) => this.ingestWebhookEvent(input),
-      () => this.store.getWebhookMailboxState(),
       () => this.runtimeStarted && !this.stopping,
     );
     this.codex.registerDynamicToolHandlers({
@@ -139,8 +142,11 @@ export class SlackCodexWorkersService extends EventEmitter {
       uploadFiles: async (args, ctx) => this.handleUploadFilesTool(args, ctx),
       getCurrentTime: async (ctx) => this.handleGetCurrentTimeTool(ctx),
       getCurrentSlackThreadLink: async (ctx) => this.handleGetCurrentSlackThreadLinkTool(ctx),
-      getWebhookMailbox: async (ctx) => this.handleGetWebhookMailboxTool(ctx),
-      rotateWebhookSecret: async (ctx) => this.handleRotateWebhookSecretTool(ctx),
+      createWebhookSource: async (args, ctx) => this.handleCreateWebhookSourceTool(args, ctx),
+      listWebhookSources: async (args, ctx) => this.handleListWebhookSourcesTool(args, ctx),
+      getWebhookSource: async (args, ctx) => this.handleGetWebhookSourceTool(args, ctx),
+      disableWebhookSource: async (args, ctx) => this.handleDisableWebhookSourceTool(args, ctx),
+      rotateWebhookSourceRoute: async (args, ctx) => this.handleRotateWebhookSourceRouteTool(args, ctx),
       setNotification: async (args, ctx) => this.handleSetNotificationTool(args, ctx),
       setHeartbeat: async (args, ctx) => this.handleSetHeartbeatTool(args, ctx),
       setCron: async (args, ctx) => this.handleSetCronTool(args, ctx),
@@ -165,7 +171,6 @@ export class SlackCodexWorkersService extends EventEmitter {
       await this.codex.start();
       this.registerSlackHandlers();
       await this.slack.start();
-      this.ensureWebhookMailboxInitialized();
       await this.webhooks.start();
       await this.bootstrapWorkstreams();
       await this.postPendingRestartNotice();
@@ -1546,7 +1551,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       lines.push(`database_path: ${this.config.databasePath}`);
       lines.push(`attachment_storage: ${this.config.attachmentStorageDir}`);
       lines.push(`webhook_bind: ${this.config.webhookBindHost}:${this.config.webhookPort}`);
-      lines.push(`webhook_public_url: ${buildWebhookPublicUrl(this.config) ?? "(not configured)"}`);
+      lines.push(`webhook_public_url_base: ${buildWebhookIngressBaseUrl(this.config) ?? "(not configured)"}`);
       lines.push(`webhook_proxy_trust: ${this.config.webhookTrustLoopbackProxy ? "loopback" : "disabled"}`);
       lines.push(`codex_process: ${this.codex.isRunning() ? "running" : "down"}`);
       lines.push(`codex_thread_state: ${codexThreadState}`);
@@ -1580,7 +1585,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       lines.push(`database_path: ${this.config.databasePath}`);
       lines.push(`attachment_storage: ${this.config.attachmentStorageDir}`);
       lines.push(`webhook_bind: ${this.config.webhookBindHost}:${this.config.webhookPort}`);
-      lines.push(`webhook_public_url: ${buildWebhookPublicUrl(this.config) ?? "(not configured)"}`);
+      lines.push(`webhook_public_url_base: ${buildWebhookIngressBaseUrl(this.config) ?? "(not configured)"}`);
       lines.push(`webhook_proxy_trust: ${this.config.webhookTrustLoopbackProxy ? "loopback" : "disabled"}`);
       lines.push(`supervisor_restart: ${this.config.supervisorRestartEnabled ? "enabled" : "disabled"}`);
       lines.push(`launch_mode: ${this.config.launchMode}`);
@@ -1850,9 +1855,55 @@ export class SlackCodexWorkersService extends EventEmitter {
     }, null, 2);
   }
 
-  private async handleGetWebhookMailboxTool(_ctx: DynamicToolHandlerContext): Promise<string> {
-    const mailbox = this.requireWebhookMailboxState();
-    return formatWebhookMailboxInfo(this.config, mailbox);
+  private async handleCreateWebhookSourceTool(
+    args: { source: string },
+    ctx: DynamicToolHandlerContext,
+  ): Promise<string> {
+    const teamId = this.resolveDynamicToolTeamId(ctx);
+    const source = await this.webhookSources.createSource(teamId, args.source);
+    return JSON.stringify(this.formatWebhookSourceInfo(source), null, 2);
+  }
+
+  private async handleListWebhookSourcesTool(
+    args: { query?: string | undefined },
+    ctx: DynamicToolHandlerContext,
+  ): Promise<string> {
+    const teamId = this.resolveDynamicToolTeamId(ctx);
+    const query = args.query?.trim().toLowerCase() ?? "";
+    const sources = this.webhookSources
+      .listSources(teamId)
+      .filter((source) => !query || source.source.toLowerCase().includes(query));
+    return JSON.stringify(sources.map((source) => this.formatWebhookSourceInfo(source)), null, 2);
+  }
+
+  private async handleGetWebhookSourceTool(
+    args: { source: string },
+    ctx: DynamicToolHandlerContext,
+  ): Promise<string> {
+    const teamId = this.resolveDynamicToolTeamId(ctx);
+    const source = this.webhookSources.getSource(teamId, args.source);
+    if (!source) {
+      throw new Error(`Webhook source ${args.source} does not exist.`);
+    }
+    return JSON.stringify(this.formatWebhookSourceInfo(source), null, 2);
+  }
+
+  private async handleDisableWebhookSourceTool(
+    args: { source: string },
+    ctx: DynamicToolHandlerContext,
+  ): Promise<string> {
+    const teamId = this.resolveDynamicToolTeamId(ctx);
+    const source = this.webhookSources.disableSource(teamId, args.source);
+    return JSON.stringify(this.formatWebhookSourceInfo(source), null, 2);
+  }
+
+  private async handleRotateWebhookSourceRouteTool(
+    args: { source: string },
+    ctx: DynamicToolHandlerContext,
+  ): Promise<string> {
+    const teamId = this.resolveDynamicToolTeamId(ctx);
+    const source = this.webhookSources.rotateSourceRoute(teamId, args.source);
+    return JSON.stringify(this.formatWebhookSourceInfo(source), null, 2);
   }
 
   private async handleSetNotificationTool(
@@ -1881,19 +1932,6 @@ export class SlackCodexWorkersService extends EventEmitter {
     return args.enabled
       ? "Notifications enabled for this turn."
       : "Notifications disabled for this turn.";
-  }
-
-  private async handleRotateWebhookSecretTool(ctx: DynamicToolHandlerContext): Promise<string> {
-    this.requireAdminDmContext(ctx);
-    const current = this.requireWebhookMailboxState();
-    const updated: WebhookMailboxState = {
-      currentSecret: generateWebhookSecret(),
-      previousSecret: current.currentSecret,
-      previousSecretExpiresAt: new Date(Date.now() + WEBHOOK_PREVIOUS_SECRET_OVERLAP_MS).toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-    this.store.setWebhookMailboxState(updated);
-    return formatWebhookMailboxInfo(this.config, updated);
   }
 
   private async handleSetHeartbeatTool(
@@ -1929,6 +1967,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       source: string;
       events: string[];
       target: "self" | "workstream";
+      deliveryMode: "queue" | "steer";
       description?: string | undefined;
       match?: Record<string, string> | undefined;
     },
@@ -1940,6 +1979,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       source: args.source,
       events: args.events,
       target: args.target,
+      deliveryMode: args.deliveryMode,
       description: args.description,
       match: args.match,
     });
@@ -2063,6 +2103,29 @@ export class SlackCodexWorkersService extends EventEmitter {
     };
   }
 
+  private resolveDynamicToolTeamId(ctx: DynamicToolHandlerContext): string {
+    const worker = this.store.getWorkerByAppThreadId(ctx.threadId);
+    if (worker) {
+      return worker.teamId;
+    }
+    const session = this.store.listDmSessions().find((candidate) => candidate.appThreadId === ctx.threadId) ?? null;
+    if (session) {
+      return session.teamId;
+    }
+    throw new Error("This tool requires a worker thread or admin DM context.");
+  }
+
+  private formatWebhookSourceInfo(source: WebhookSourceRecord): Record<string, unknown> {
+    return {
+      source: source.source,
+      enabled: source.enabled,
+      route_path: this.webhookSources.getSourceRoutePath(source),
+      public_url: this.webhookSources.getSourcePublicUrl(source),
+      handler_path: source.handlerPath,
+      updated_at: source.updatedAt,
+    };
+  }
+
   private scheduleRegistrationLoop(delayMs = REGISTRATION_POLL_INTERVAL_MS): void {
     if (this.stopping || !this.runtimeStarted) return;
     if (this.registrationPollTimer) {
@@ -2150,121 +2213,202 @@ export class SlackCodexWorkersService extends EventEmitter {
     }
   }
 
-  private async ingestWebhookEvent(input: NormalizedWebhookIngress): Promise<{
-    duplicate: boolean;
-    matchedRegistrations: number;
-    eventId: string;
+  private async ingestWebhookEvent(input: RawWebhookIngress): Promise<{
+    status: number;
+    body: Record<string, unknown>;
   }> {
     if (!this.runtimeStarted || this.stopping) {
       throw shutdownWebhookIngressError();
     }
-    const teamId = this.slack.getTeamId() ?? this.config.allowedTeamId ?? "single-workspace";
-    const existing = this.store.getWebhookEvent(teamId, input.source, input.event, input.dedupeKey);
-    if (existing) {
+    const rawRequestPath = await this.writeRawWebhookRequest(input);
+    const result = await runWebhookHandler(input.source, {
+      routePath: input.routePath,
+      method: input.method,
+      url: input.url,
+      headers: input.headers,
+      rawBody: input.rawBody,
+      parsedJson: input.parsedJson,
+      receivedAt: input.receivedAt,
+      remoteAddress: input.remoteAddress,
+    });
+
+    if (result.outcome === "reject") {
       return {
-        duplicate: true,
-        matchedRegistrations: 0,
-        eventId: existing.id,
+        status: result.status ?? 400,
+        body: {
+          ok: false,
+          source: input.source.source,
+          error: result.error,
+        },
       };
     }
-    const payloadPath = await this.writeWebhookPayload(input);
-    const registrations = this.store
-      .listRegistrationsForTeam(teamId)
-      .filter((registration) => this.matchesWebhookRegistration(registration, input));
-    const wakes = registrations.map((registration) => ({
-      id: `wake-${randomUUID().slice(0, 8)}`,
-      teamId: registration.teamId,
-      registrationId: registration.id,
-      workstreamId: registration.workstreamId,
-      workerKey: registration.workerKey,
-      status: "queued" as const,
-      summary: `webhook ${input.source}/${input.event} fired for ${registration.id}`,
-      payloadPath,
-      firedEvent: input.event,
-      dueAt: input.receivedAt,
-      attempts: 0,
-      nextAttemptAt: null,
-      lastError: null,
-    }));
-    let persisted: { record: WebhookEventRecord; created: boolean };
-    try {
-      // Known limitation: shutdown that begins after ingress reaches this point can still
-      // allow the in-flight request to persist before the broader runtime finishes draining.
-      // Fully eliminating that race needs a stronger shutdown barrier than the current model.
-      persisted = this.store.createWebhookEventWithPendingWakesIfAbsent({
-        id: `evt-${randomUUID().slice(0, 8)}`,
-        teamId,
-        source: input.source,
-        event: input.event,
-        dedupeKey: input.dedupeKey,
-        match: input.match,
+
+    if (result.outcome === "noop") {
+      return {
+        status: 202,
+        body: {
+          ok: true,
+          source: input.source.source,
+          emittedEvents: 0,
+          createdEvents: 0,
+          duplicateEvents: 0,
+          matchedRegistrations: 0,
+          outcome: "noop",
+          reason: result.reason ?? null,
+        },
+      };
+    }
+
+    const teamId = input.source.teamId;
+    let createdEvents = 0;
+    let duplicateEvents = 0;
+    let matchedRegistrations = 0;
+    const eventIds: string[] = [];
+    for (const event of result.events) {
+      const existing = this.store.getWebhookEvent(teamId, input.source.source, event.event, event.dedupeKey);
+      if (existing) {
+        duplicateEvents += 1;
+        eventIds.push(existing.id);
+        continue;
+      }
+      const payloadPath = await this.writeNormalizedWebhookEventPayload(input.source.source, event, rawRequestPath, input.receivedAt);
+      const registrations = this.store
+        .listRegistrationsForTeam(teamId)
+        .filter((registration) => this.matchesWebhookRegistration(registration, input.source.source, event.event, event.fields ?? null));
+      const wakes = registrations.map((registration) => ({
+        id: `wake-${randomUUID().slice(0, 8)}`,
+        teamId: registration.teamId,
+        registrationId: registration.id,
+        workstreamId: registration.workstreamId,
+        workerKey: registration.workerKey,
+        status: "queued" as const,
+        summary: `webhook ${input.source.source}/${event.event} fired for ${registration.id}`,
         payloadPath,
-        summary: `${input.source}/${input.event}`,
-      }, wakes);
-    } catch (error) {
-      await fs.rm(payloadPath, { force: true }).catch(() => undefined);
-      throw error;
+        firedEvent: event.event,
+        dueAt: input.receivedAt,
+        attempts: 0,
+        nextAttemptAt: null,
+        lastError: null,
+      }));
+      let persisted: { record: WebhookEventRecord; created: boolean };
+      try {
+        persisted = this.store.createWebhookEventWithPendingWakesIfAbsent({
+          id: `evt-${randomUUID().slice(0, 8)}`,
+          teamId,
+          source: input.source.source,
+          event: event.event,
+          dedupeKey: event.dedupeKey,
+          fields: event.fields ?? null,
+          rawRequestPath,
+          payloadPath,
+          summary: event.summary?.trim() || `${input.source.source}/${event.event}`,
+        }, wakes);
+      } catch (error) {
+        await fs.rm(payloadPath, { force: true }).catch(() => undefined);
+        throw error;
+      }
+      if (!persisted.created) {
+        await fs.rm(payloadPath, { force: true }).catch(() => undefined);
+        duplicateEvents += 1;
+        eventIds.push(persisted.record.id);
+        continue;
+      }
+      createdEvents += 1;
+      matchedRegistrations += registrations.length;
+      eventIds.push(persisted.record.id);
     }
 
-    if (!persisted.created) {
-      await fs.rm(payloadPath, { force: true }).catch(() => undefined);
-      return {
-        duplicate: true,
-        matchedRegistrations: 0,
-        eventId: persisted.record.id,
-      };
-    }
-
-    if (registrations.length > 0) {
+    if (matchedRegistrations > 0) {
       this.scheduleRegistrationLoop(0);
     }
     return {
-      duplicate: false,
-      matchedRegistrations: registrations.length,
-      eventId: persisted.record.id,
+      status: 202,
+      body: {
+        ok: true,
+        source: input.source.source,
+        emittedEvents: result.events.length,
+        createdEvents,
+        duplicateEvents,
+        matchedRegistrations,
+        eventIds,
+      },
     };
   }
 
-  private matchesWebhookRegistration(registration: RegistrationRecord, input: NormalizedWebhookIngress): boolean {
+  private matchesWebhookRegistration(
+    registration: RegistrationRecord,
+    source: string,
+    event: string,
+    fields: Record<string, string> | null,
+  ): boolean {
     if (!registration.enabled || registration.trigger.kind !== "webhook") {
       return false;
     }
-    if (registration.trigger.source !== input.source) {
+    if (registration.trigger.source !== source) {
       return false;
     }
-    if (!registration.trigger.events.includes(input.event)) {
+    if (!registration.trigger.events.includes(event)) {
       return false;
     }
     if (!registration.trigger.match) {
       return true;
     }
     for (const [key, expected] of Object.entries(registration.trigger.match)) {
-      if (input.match?.[key] !== expected) {
+      if (fields?.[key] !== expected) {
         return false;
       }
     }
     return true;
   }
 
-  private async writeWebhookPayload(input: NormalizedWebhookIngress): Promise<string> {
+  private async writeRawWebhookRequest(input: RawWebhookIngress): Promise<string> {
     const date = input.receivedAt.slice(0, 10);
     const rootDir = path.resolve(this.config.webhookPayloadStorageDir);
-    const targetDir = path.resolve(rootDir, input.source, date);
+    const targetDir = path.resolve(rootDir, "raw", input.source.source, date);
     const relativeTarget = path.relative(rootDir, targetDir);
     if (relativeTarget.startsWith("..") || path.isAbsolute(relativeTarget)) {
-      throw new Error(`Invalid webhook source path: ${input.source}`);
+      throw new Error(`Invalid webhook source path: ${input.source.source}`);
     }
     await fs.mkdir(targetDir, { recursive: true });
-    const dedupeSlug = input.dedupeKey.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 32) || "event";
+    const filePath = path.join(targetDir, `${Date.now()}-${randomUUID().slice(0, 8)}.json`);
+    const envelope = {
+      source: input.source.source,
+      routePath: input.routePath,
+      method: input.method,
+      url: input.url,
+      receivedAt: input.receivedAt,
+      headers: input.headers,
+      parsedJson: input.parsedJson,
+      rawBody: input.rawBody,
+    };
+    await fs.writeFile(filePath, `${JSON.stringify(envelope, null, 2)}\n`);
+    return filePath;
+  }
+
+  private async writeNormalizedWebhookEventPayload(
+    source: string,
+    event: { event: string; dedupeKey: string; fields?: Record<string, string> | null; payload?: unknown; summary?: string | null },
+    rawRequestPath: string,
+    receivedAt: string,
+  ): Promise<string> {
+    const date = receivedAt.slice(0, 10);
+    const rootDir = path.resolve(this.config.webhookPayloadStorageDir);
+    const targetDir = path.resolve(rootDir, "events", source, date);
+    const relativeTarget = path.relative(rootDir, targetDir);
+    if (relativeTarget.startsWith("..") || path.isAbsolute(relativeTarget)) {
+      throw new Error(`Invalid webhook source path: ${source}`);
+    }
+    await fs.mkdir(targetDir, { recursive: true });
+    const dedupeSlug = event.dedupeKey.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 32) || "event";
     const filePath = path.join(targetDir, `${Date.now()}-${randomUUID().slice(0, 8)}-${dedupeSlug}.json`);
     const envelope = {
-      source: input.source,
-      event: input.event,
-      id: input.dedupeKey,
-      match: input.match,
-      receivedAt: input.receivedAt,
-      payload: input.payload,
-      rawBody: input.rawBody,
+      source,
+      event: event.event,
+      id: event.dedupeKey,
+      fields: event.fields ?? null,
+      summary: event.summary ?? null,
+      rawRequestPath,
+      payload: event.payload ?? null,
     };
     await fs.writeFile(filePath, `${JSON.stringify(envelope, null, 2)}\n`);
     return filePath;
@@ -2293,18 +2437,41 @@ export class SlackCodexWorkersService extends EventEmitter {
           await this.quarantineWakeAndDisableRegistration(wake.id, registration.id, `${wake.summary} (worker missing)`, "worker missing");
           continue;
         }
-        if (this.startingWorkerTurns.has(worker.key) || worker.pendingRequest || worker.activeTurnId || worker.status === "running") {
+        const steerWebhook = registration.trigger.kind === "webhook" && registration.trigger.deliveryMode === "steer";
+        if (this.startingWorkerTurns.has(worker.key) || worker.pendingRequest) {
+          continue;
+        }
+        if (!steerWebhook && (worker.activeTurnId || worker.status === "running")) {
           continue;
         }
         worker = await this.prepareWorkerForSend(worker);
-        if (this.stopping || worker.pendingRequest || worker.activeTurnId || worker.status === "running" || isManuallyBlockedStatus(worker.status)) {
+        if (this.stopping || worker.pendingRequest || isManuallyBlockedStatus(worker.status)) {
+          continue;
+        }
+        if (!steerWebhook && (worker.activeTurnId || worker.status === "running")) {
           continue;
         }
         try {
-          await this.startWorkerTurn(worker, buildWakeTurnInput(registration, wake));
+          const turnInput = buildWakeTurnInput(registration, wake);
+          if (steerWebhook && worker.activeTurnId) {
+            try {
+              await this.codex.steerTurn(worker.appThreadId, worker.activeTurnId, turnInput);
+            } catch (error) {
+              if (isMissingThreadError(error)) {
+                worker = await this.markWorkerRecoveryRequired(worker, "Backing Codex thread is missing. Run /recover to attach a fresh Codex thread to this Slack conversation.");
+              } else if (shouldStartFreshTurnAfterSteerError(error)) {
+                worker = await this.clearWorkerStaleActiveTurn(worker, "Recovered stale active turn while processing a webhook steer.");
+                await this.startWorkerTurn(worker, turnInput);
+              } else {
+                throw error;
+              }
+            }
+          } else {
+            await this.startWorkerTurn(worker, turnInput);
+          }
           this.store.updatePendingWake(wake.id, {
             status: "delivered",
-            summary: `${wake.summary} (delivered)`,
+            summary: `${wake.summary} (${steerWebhook && worker.activeTurnId ? "steered" : "delivered"})`,
             nextAttemptAt: null,
             lastError: null,
           });
@@ -3295,50 +3462,6 @@ export class SlackCodexWorkersService extends EventEmitter {
     return session;
   }
 
-  private ensureWebhookMailboxInitialized(): WebhookMailboxState {
-    const existing = this.store.getWebhookMailboxState();
-    if (existing?.currentSecret) {
-      const now = Date.now();
-      if (existing.previousSecret && existing.previousSecretExpiresAt) {
-        const expiresAt = Date.parse(existing.previousSecretExpiresAt);
-        if (Number.isFinite(expiresAt) && expiresAt <= now) {
-          const updated = {
-            ...existing,
-            previousSecret: null,
-            previousSecretExpiresAt: null,
-            updatedAt: new Date().toISOString(),
-          };
-          this.store.setWebhookMailboxState(updated);
-          return updated;
-        }
-      }
-      if (existing.previousSecret && !existing.previousSecretExpiresAt) {
-        const updated = {
-          ...existing,
-          previousSecretExpiresAt: new Date(now + WEBHOOK_PREVIOUS_SECRET_OVERLAP_MS).toISOString(),
-          updatedAt: new Date().toISOString(),
-        };
-        this.store.setWebhookMailboxState(updated);
-        return updated;
-      }
-      return existing;
-    }
-    const state: WebhookMailboxState = {
-      currentSecret: this.config.webhookSharedSecret ?? generateWebhookSecret(),
-      previousSecret: this.config.webhookPreviousSharedSecret,
-      previousSecretExpiresAt: this.config.webhookPreviousSharedSecret
-        ? new Date(Date.now() + WEBHOOK_PREVIOUS_SECRET_OVERLAP_MS).toISOString()
-        : null,
-      updatedAt: new Date().toISOString(),
-    };
-    this.store.setWebhookMailboxState(state);
-    return state;
-  }
-
-  private requireWebhookMailboxState(): WebhookMailboxState {
-    return this.ensureWebhookMailboxInitialized();
-  }
-
   private resolveAdminWorkstreamFilter(
     teamId: string,
     relativePath?: string | undefined,
@@ -3574,21 +3697,6 @@ function formatCurrentTimeInfo(timeZone: string, now: Date): string {
   ].join("\n");
 }
 
-function formatWebhookMailboxInfo(config: AppConfig, mailbox: WebhookMailboxState): string {
-  const publicUrl = buildWebhookPublicUrl(config);
-  return [
-    `webhook_public_url: ${publicUrl ?? "(not configured)"}`,
-    `webhook_bind: ${config.webhookBindHost}:${config.webhookPort}`,
-    `webhook_path: ${config.webhookPath}`,
-    `webhook_proxy_trust: ${config.webhookTrustLoopbackProxy ? "loopback" : "disabled"}`,
-    `webhook_shared_secret: ${mailbox.currentSecret}`,
-    `webhook_previous_secret_expires_at: ${mailbox.previousSecretExpiresAt ?? "(none)"}`,
-    `auth_header_bearer: Authorization: Bearer ${mailbox.currentSecret}`,
-    `auth_header_alt: x-bridge-webhook-secret: ${mailbox.currentSecret}`,
-    "json_body_shape: {\"source\":\"agentmail\",\"event\":\"email.received\",\"id\":\"optional-id\",\"match\":{\"key\":\"value\"},\"payload\":{...}}",
-  ].join("\n");
-}
-
 function formatCreatedWorkstreamMessage(workstream: WorkstreamRecord): string {
   const appLink = `slack://channel?team=${workstream.teamId}&id=${workstream.channelId}`;
   const browserLink = `https://app.slack.com/client/${workstream.teamId}/${workstream.channelId}`;
@@ -3602,18 +3710,15 @@ function formatCreatedWorkstreamMessage(workstream: WorkstreamRecord): string {
   ].join("\n");
 }
 
-function buildWebhookPublicUrl(config: AppConfig): string | null {
+function buildWebhookIngressBaseUrl(config: AppConfig): string | null {
   if (!config.webhookPublicBaseUrl) return null;
   return `${config.webhookPublicBaseUrl}${config.webhookPath === "/" ? "" : config.webhookPath}`;
 }
 
-function generateWebhookSecret(): string {
-  return randomBytes(24).toString("base64url");
-}
-
 function formatRegistrationLine(registration: RegistrationRecord): string {
   const target = registration.target.kind === "worker" ? "worker:self" : "workstream:self";
-  return `${registration.id} [${registration.enabled ? "enabled" : "disabled"}] ${registration.trigger.kind} -> ${registration.action.kind} (${target})`;
+  const webhookMode = registration.trigger.kind === "webhook" ? ` delivery=${registration.trigger.deliveryMode}` : "";
+  return `${registration.id} [${registration.enabled ? "enabled" : "disabled"}] ${registration.trigger.kind}${webhookMode} -> ${registration.action.kind} (${target})`;
 }
 
 function buildWakeTurnInput(
@@ -3649,6 +3754,7 @@ function buildWakeTurnInput(
       details.push(`fired_event: ${wake.firedEvent}`);
     }
     details.push(`events: ${registration.trigger.events.join(",")}`);
+    details.push(`delivery_mode: ${registration.trigger.deliveryMode}`);
     if (registration.trigger.match) {
       details.push(`match: ${JSON.stringify(registration.trigger.match)}`);
     }

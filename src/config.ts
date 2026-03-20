@@ -40,8 +40,6 @@ const configSchema = z.object({
   webhookBodyMaxBytes: z.number().int().positive().default(256 * 1024),
   webhookBodyReadTimeoutMs: z.number().int().positive().default(30_000),
   webhookPayloadStorageDir: z.string().min(1).default(path.join(defaultStateDir, "webhooks")),
-  webhookSharedSecret: z.string().min(1).nullable().default(null),
-  webhookPreviousSharedSecret: z.string().min(1).nullable().default(null),
   webhookPublicBaseUrl: z.string().min(1).nullable().default(null),
   webhookTrustLoopbackProxy: z.boolean().default(false),
 });
@@ -82,8 +80,6 @@ export function loadConfig(): AppConfig {
     webhookBodyMaxBytes: parseNumber(process.env.WEBHOOK_BODY_MAX_BYTES, 256 * 1024),
     webhookBodyReadTimeoutMs: parseNumber(process.env.WEBHOOK_BODY_READ_TIMEOUT_MS, 30_000),
     webhookPayloadStorageDir: process.env.WEBHOOK_PAYLOAD_STORAGE_DIR ?? path.join(stateDir, "webhooks"),
-    webhookSharedSecret: parseOptionalString(process.env.WEBHOOK_SHARED_SECRET),
-    webhookPreviousSharedSecret: parseOptionalString(process.env.WEBHOOK_PREVIOUS_SHARED_SECRET),
     webhookPublicBaseUrl: normalizeOptionalBaseUrl(process.env.WEBHOOK_PUBLIC_BASE_URL),
     webhookTrustLoopbackProxy: parseBoolean(process.env.WEBHOOK_TRUST_LOOPBACK_PROXY, false),
   };

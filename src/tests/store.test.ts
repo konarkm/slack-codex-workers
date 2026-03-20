@@ -59,19 +59,27 @@ describe("store", () => {
     store.close();
   });
 
-  it("stores webhook mailbox state in metadata", async () => {
+  it("stores webhook source definitions", async () => {
     const { store } = await createStore();
-    store.setWebhookMailboxState({
-      currentSecret: "secret-current",
-      previousSecret: "secret-previous",
-      previousSecretExpiresAt: "2026-03-18T00:00:00.000Z",
+    store.createWebhookSource({
+      id: "src-1",
+      teamId: "T1",
+      source: "linear",
+      routeToken: "route-123",
+      handlerPath: "/tmp/linear/handler.mjs",
+      enabled: true,
+      createdAt: "2026-03-17T00:00:00.000Z",
       updatedAt: "2026-03-17T00:00:00.000Z",
     });
 
-    expect(store.getWebhookMailboxState()).toEqual({
-      currentSecret: "secret-current",
-      previousSecret: "secret-previous",
-      previousSecretExpiresAt: "2026-03-18T00:00:00.000Z",
+    expect(store.getWebhookSource("T1", "linear")).toEqual({
+      id: "src-1",
+      teamId: "T1",
+      source: "linear",
+      routeToken: "route-123",
+      handlerPath: "/tmp/linear/handler.mjs",
+      enabled: true,
+      createdAt: "2026-03-17T00:00:00.000Z",
       updatedAt: "2026-03-17T00:00:00.000Z",
     });
     store.close();
@@ -360,7 +368,8 @@ describe("store", () => {
       source: "github",
       event: "push",
       dedupeKey: "delivery-1",
-      match: { repo: "acme/api" },
+      fields: { repo: "acme/api" },
+      rawRequestPath: "/tmp/raw-1.json",
       payloadPath: "/tmp/payload-1.json",
       summary: "github/push",
     }, [{
@@ -384,7 +393,8 @@ describe("store", () => {
       source: "github",
       event: "push",
       dedupeKey: "delivery-1",
-      match: { repo: "acme/api" },
+      fields: { repo: "acme/api" },
+      rawRequestPath: "/tmp/raw-2.json",
       payloadPath: "/tmp/payload-2.json",
       summary: "github/push",
     }, [{
@@ -408,7 +418,8 @@ describe("store", () => {
       source: "github",
       event: "pull_request",
       dedupeKey: "delivery-1",
-      match: { repo: "acme/api" },
+      fields: { repo: "acme/api" },
+      rawRequestPath: "/tmp/raw-3.json",
       payloadPath: "/tmp/payload-3.json",
       summary: "github/pull_request",
     }, []);
@@ -419,7 +430,8 @@ describe("store", () => {
     expect(second.record).toMatchObject({
       id: "evt-1",
       payloadPath: "/tmp/payload-1.json",
-      match: { repo: "acme/api" },
+      fields: { repo: "acme/api" },
+      rawRequestPath: "/tmp/raw-1.json",
     });
     expect(store.listPendingWakesForScope("T1", "T1:root", "worker-1")).toHaveLength(1);
     store.close();

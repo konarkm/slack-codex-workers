@@ -9,8 +9,11 @@ export const slackCreateWorkstreamToolName = "slack_create_workstream";
 export const slackUploadFilesToolName = "slack_upload_files";
 export const slackGetCurrentTimeToolName = "get_current_time";
 export const slackGetCurrentSlackThreadLinkToolName = "get_current_slack_thread_link";
-export const slackGetWebhookMailboxToolName = "get_webhook_mailbox";
-export const slackRotateWebhookSecretToolName = "rotate_webhook_secret";
+export const slackCreateWebhookSourceToolName = "create_webhook_source";
+export const slackListWebhookSourcesToolName = "list_webhook_sources";
+export const slackGetWebhookSourceToolName = "get_webhook_source";
+export const slackDisableWebhookSourceToolName = "disable_webhook_source";
+export const slackRotateWebhookSourceRouteToolName = "rotate_webhook_source_route";
 export const slackSetNotificationToolName = "set_notification";
 export const slackSetHeartbeatToolName = "set_heartbeat";
 export const slackSetCronToolName = "set_cron";
@@ -128,13 +131,67 @@ export const workerDynamicTools = [
     },
   },
   {
-    name: slackGetWebhookMailboxToolName,
+    name: slackCreateWebhookSourceToolName,
     description:
-      "Get the shared webhook mailbox configuration for this bridge, including the public endpoint when configured, the shared secret, the accepted auth headers, and the JSON body shape expected by webhook ingress.",
+      "Create a new workspace-global raw webhook source definition with a unique public route and a handler file scaffold. Use this when you need the bridge to accept webhook deliveries from some external system and normalize them into a stable internal source/event/fields contract.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
-      properties: {},
+      required: ["source"],
+      properties: {
+        source: { type: "string", minLength: 1, pattern: webhookSourcePattern },
+      },
+    },
+  },
+  {
+    name: slackListWebhookSourcesToolName,
+    description:
+      "List workspace-global webhook source definitions so you can inspect which raw webhook intake routes already exist.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        query: { type: "string", minLength: 1 },
+      },
+    },
+  },
+  {
+    name: slackGetWebhookSourceToolName,
+    description:
+      "Inspect one webhook source definition, including its public URL when configured and the handler file path that owns its normalization contract.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["source"],
+      properties: {
+        source: { type: "string", minLength: 1, pattern: webhookSourcePattern },
+      },
+    },
+  },
+  {
+    name: slackDisableWebhookSourceToolName,
+    description:
+      "Disable a webhook source definition so the bridge stops accepting new deliveries for that source route.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["source"],
+      properties: {
+        source: { type: "string", minLength: 1, pattern: webhookSourcePattern },
+      },
+    },
+  },
+  {
+    name: slackRotateWebhookSourceRouteToolName,
+    description:
+      "Rotate the secret public route for a webhook source definition and return the updated public URL. Use this when the route must change without changing the source name or handler contract.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["source"],
+      properties: {
+        source: { type: "string", minLength: 1, pattern: webhookSourcePattern },
+      },
     },
   },
   {
@@ -184,7 +241,7 @@ export const workerDynamicTools = [
   {
     name: slackSetWebhookToolName,
     description:
-      "Create or update a durable webhook registration against the shared bridge webhook mailbox. If target is omitted it defaults to 'self'. target='self' wakes the current worker; target='workstream' creates new public work in the current workstream. source is the logical producer namespace and must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}. Use get_webhook_mailbox when you need the shared endpoint, auth secret, or payload shape for configuring external systems.",
+      "Create or update a durable webhook registration against a workspace-global webhook source definition. If target is omitted it defaults to 'self'. target='self' sends matching events to the current worker, and deliveryMode chooses whether they queue as separate wake work or steer the active turn. target='workstream' creates new public work in the current workstream and only supports queue-style delivery. source must match an existing webhook source definition.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -198,6 +255,7 @@ export const workerDynamicTools = [
           items: { type: "string", minLength: 1 },
         },
         target: { enum: ["self", "workstream"] },
+        deliveryMode: { enum: ["queue", "steer"] },
         description: { type: "string", minLength: 1 },
         match: {
           type: "object",
@@ -256,7 +314,11 @@ export const workerDynamicTools = [
 
 export const adminDynamicTools = [
   workerDynamicTools.find((entry) => entry.name === slackGetCurrentTimeToolName)!,
-  workerDynamicTools.find((entry) => entry.name === slackGetWebhookMailboxToolName)!,
+  workerDynamicTools.find((entry) => entry.name === slackCreateWebhookSourceToolName)!,
+  workerDynamicTools.find((entry) => entry.name === slackListWebhookSourcesToolName)!,
+  workerDynamicTools.find((entry) => entry.name === slackGetWebhookSourceToolName)!,
+  workerDynamicTools.find((entry) => entry.name === slackDisableWebhookSourceToolName)!,
+  workerDynamicTools.find((entry) => entry.name === slackRotateWebhookSourceRouteToolName)!,
   workerDynamicTools.find((entry) => entry.name === slackCreateWorkstreamToolName)!,
   workerDynamicTools.find((entry) => entry.name === slackUploadFilesToolName)!,
   {
@@ -323,16 +385,6 @@ export const adminDynamicTools = [
       },
     },
   },
-  {
-    name: slackRotateWebhookSecretToolName,
-    description:
-      "Rotate the shared webhook mailbox secret for the entire bridge. This moves the previous current secret into fallback position and returns the updated mailbox bundle. Use this only in the admin DM when rotating external webhook credentials intentionally.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {},
-    },
-  },
 ] as const;
 
 export const dynamicToolCallParamsSchema = z.object({
@@ -373,8 +425,21 @@ export const slackUploadFilesArgsSchema = z.object({
 });
 
 export const slackGetCurrentSlackThreadLinkArgsSchema = z.object({});
-export const slackGetWebhookMailboxArgsSchema = z.object({});
-export const slackRotateWebhookSecretArgsSchema = z.object({});
+export const slackCreateWebhookSourceArgsSchema = z.object({
+  source: z.string().min(1),
+});
+export const slackListWebhookSourcesArgsSchema = z.object({
+  query: z.string().min(1).optional(),
+});
+export const slackGetWebhookSourceArgsSchema = z.object({
+  source: z.string().min(1),
+});
+export const slackDisableWebhookSourceArgsSchema = z.object({
+  source: z.string().min(1),
+});
+export const slackRotateWebhookSourceRouteArgsSchema = z.object({
+  source: z.string().min(1),
+});
 export const slackSetNotificationArgsSchema = z.object({
   enabled: z.boolean(),
 });
@@ -397,6 +462,7 @@ export const slackSetWebhookArgsSchema = z.object({
   source: z.string().min(1),
   events: z.array(z.string().min(1)).min(1),
   target: z.enum(["self", "workstream"]).default("self"),
+  deliveryMode: z.enum(["queue", "steer"]).default("queue"),
   description: z.string().min(1).optional(),
   match: z.record(z.string(), z.string()).optional(),
 });
@@ -444,11 +510,11 @@ export const workerDeveloperInstructions = [
   "Use slack_create_workstream only after the human has explicitly approved creating a new workstream in the current conversation. This is conversational/tool guidance, not a separate permission layer.",
   "Use get_current_time when you need the current local time or configured workspace timezone for time-aware reasoning or scheduling.",
   "Use get_current_slack_thread_link when you need the exact permalink and Slack routing ids for the current public worker thread so you can reference it from another system.",
-  "Use get_webhook_mailbox when you need the bridge's shared webhook endpoint, secret, or accepted payload shape so you can configure external systems end-to-end.",
+  "Use create_webhook_source, list_webhook_sources, get_webhook_source, disable_webhook_source, and rotate_webhook_source_route to manage workspace-global raw webhook intake routes and their handler files. A webhook source has one authoritative source name, one secret route, and one handler contract.",
   "Use set_notification(enabled: true|false) to decide whether the current worker turn should notify the human on completion. The default is no notification unless you opt in.",
   "For direct back-and-forth with the human in this Slack thread, you should usually call set_notification(enabled: true) before finishing your turn unless the human asked you not to notify them.",
   "For autonomous heartbeat, cron, or webhook wake work, usually leave notification off unless there is a material update, blocker, risk, or decision that warrants pinging the human.",
-  "Use set_heartbeat, set_cron, set_webhook, disable_registration, list_registrations, get_registration, and list_wake_deliveries to manage durable wakeup registrations and inspect wake execution history for the current worker/workstream when you need ongoing automation.",
+  "Use set_heartbeat, set_cron, set_webhook, disable_registration, list_registrations, get_registration, and list_wake_deliveries to manage durable wakeup registrations and inspect wake execution history for the current worker/workstream when you need ongoing automation. For set_webhook(target=self), use deliveryMode='queue' when every event should become separate work and deliveryMode='steer' when matching events should steer the active turn immediately.",
   "Use slack_upload_files when you need to share one or more existing local files into the current Slack thread. Only upload files that materially help the user.",
   "If you create a child worker, it is fire-and-forget. Do not wait on the child unless the human explicitly asks you to.",
   "Keep progress clear and concise because the client streams your interleaved assistant messages into the Slack thread.",
@@ -461,7 +527,7 @@ export const adminDeveloperInstructions = [
   "When the user is planning, evaluating options, discussing architecture, or setting up a long-horizon workflow, do not over-compress. In those planning conversations, explain tradeoffs, assumptions, and recommended paths clearly enough to support good decisions.",
   "Use slack_create_workstream only after the human has explicitly approved creating a new workstream in the conversation.",
   "Use get_current_time when you need the current local time or configured workspace timezone.",
-  "Use get_webhook_mailbox to inspect the current shared webhook mailbox endpoint and secret, and use rotate_webhook_secret when the human intentionally wants to rotate that organization-wide secret.",
+  "Use create_webhook_source, list_webhook_sources, get_webhook_source, disable_webhook_source, and rotate_webhook_source_route to manage workspace-global raw webhook intake routes and their handler files.",
   "Prefer admin-specific tools before shell exploration for operational tasks in the admin DM.",
   "For registration inspection and cleanup, use list_registrations_admin, get_registration_admin, disable_registration_admin, and list_wake_deliveries_admin first. These tools accept explicit workstream or registration filters instead of using current worker-thread scope.",
   "Use archive_workstream_admin when the human wants to retire a child workstream from the admin DM. This is the admin path for archiving a workstream, not a worker-thread operation.",

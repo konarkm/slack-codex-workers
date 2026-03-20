@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { AppConfig } from "../config.js";
 import { Store } from "../db/store.js";
 import { validateCronSchedule } from "./cron.js";
-import { normalizeWebhookSource } from "../webhooks/server.js";
+import { normalizeWebhookSource } from "../webhooks/shared.js";
 import type {
   PendingWakeRecord,
   RegistrationRecord,
@@ -93,6 +93,7 @@ export class RegistrationManager {
       source: string;
       events: string[];
       target: "self" | "workstream";
+      deliveryMode?: "queue" | "steer";
       description?: string | null;
       match?: Record<string, string> | null;
     },
@@ -102,12 +103,16 @@ export class RegistrationManager {
     if (!source) {
       throw new Error("Webhook source must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}.");
     }
+    if (input.target === "workstream" && input.deliveryMode === "steer") {
+      throw new Error("Webhook deliveryMode=steer is only valid for target=self.");
+    }
     const target = this.resolveTarget(ctx, input.target);
     const action = input.target === "self" ? { kind: "wake_self" as const } : { kind: "spawn" as const };
     const trigger: WebhookRegistrationTrigger = {
       kind: "webhook",
       source,
       events: input.events,
+      deliveryMode: input.deliveryMode === "steer" ? "steer" : "queue",
       match: input.match ?? null,
     };
     const record = this.store.upsertRegistration({
