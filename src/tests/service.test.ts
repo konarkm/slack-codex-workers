@@ -2976,6 +2976,121 @@ describe("service lifecycle decisions", () => {
     store.close();
   });
 
+  it("marks recovery-required when webhook steer hits a missing backing thread", async () => {
+    const { service, codex, store } = await createService();
+    service.runtimeStarted = true;
+    service.scheduleRegistrationLoop = vi.fn();
+    createWorker(service, { workstreamId: "T1:root", activeTurnId: "turn-active", status: "running" });
+    const webhookSource = await createWebhookSource(service, { source: "linear" });
+    codex.steerTurn.mockRejectedValue(new Error("no thread found"));
+
+    store.upsertRegistration({
+      id: "reg-webhook-steer-missing",
+      teamId: "T1",
+      workstreamId: "T1:root",
+      workerKey: "T1:C1:1.000",
+      ownerUserId: "U1",
+      rootOwnerUserId: "U1",
+      description: "Track issue state",
+      enabled: true,
+      target: {
+        kind: "worker",
+        workstreamId: "T1:root",
+        workerKey: "T1:C1:1.000",
+      },
+      action: { kind: "wake_self" },
+      trigger: {
+        kind: "webhook",
+        source: "linear",
+        events: ["issue.updated"],
+        deliveryMode: "steer",
+        match: { issue_id: "LIN-123" },
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    await service.ingestWebhookEvent(makeRawWebhookIngress(webhookSource, {
+      parsedJson: {
+        event: "issue.updated",
+        dedupeKey: "evt-linear-3",
+        fields: { issue_id: "LIN-123" },
+        payload: { status: "todo" },
+      },
+    }));
+
+    await service.deliverQueuedWakes();
+
+    expect(store.getWorkerByKey("T1:C1:1.000")).toMatchObject({
+      status: "recovery_required",
+      lastError: expect.stringContaining("Backing Codex thread is missing"),
+    });
+    expect(codex.startTurnWithResumeFallback).not.toHaveBeenCalled();
+    store.close();
+  });
+
+  it("starts a fresh turn when webhook steer finds a stale active turn", async () => {
+    const { service, codex, store } = await createService();
+    service.runtimeStarted = true;
+    service.scheduleRegistrationLoop = vi.fn();
+    createWorker(service, { workstreamId: "T1:root", activeTurnId: "turn-stale", status: "running" });
+    const webhookSource = await createWebhookSource(service, { source: "linear" });
+    codex.steerTurn.mockRejectedValue(new Error("no active turn to steer"));
+    codex.reconcileThreadForSend.mockResolvedValue("idle");
+    codex.startTurnWithResumeFallback.mockResolvedValue("turn-recovered");
+
+    store.upsertRegistration({
+      id: "reg-webhook-steer-stale",
+      teamId: "T1",
+      workstreamId: "T1:root",
+      workerKey: "T1:C1:1.000",
+      ownerUserId: "U1",
+      rootOwnerUserId: "U1",
+      description: "Track issue state",
+      enabled: true,
+      target: {
+        kind: "worker",
+        workstreamId: "T1:root",
+        workerKey: "T1:C1:1.000",
+      },
+      action: { kind: "wake_self" },
+      trigger: {
+        kind: "webhook",
+        source: "linear",
+        events: ["issue.updated"],
+        deliveryMode: "steer",
+        match: { issue_id: "LIN-123" },
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    await service.ingestWebhookEvent(makeRawWebhookIngress(webhookSource, {
+      parsedJson: {
+        event: "issue.updated",
+        dedupeKey: "evt-linear-4",
+        fields: { issue_id: "LIN-123" },
+        payload: { status: "todo" },
+      },
+    }));
+
+    await service.deliverQueuedWakes();
+
+    expect(codex.startTurnWithResumeFallback).toHaveBeenCalledWith(
+      "thread-1",
+      expect.objectContaining({
+        text: expect.stringContaining("fired_event: issue.updated"),
+      }),
+      expect.any(Object),
+      expect.any(Object),
+    );
+    expect(store.getWorkerByKey("T1:C1:1.000")).toMatchObject({
+      activeTurnId: "turn-recovered",
+      status: "running",
+    });
+    store.close();
+  });
+
   it("does not fan out webhook wakes when source, event, or match fields do not align", async () => {
     const { service, store } = await createService();
     service.runtimeStarted = true;

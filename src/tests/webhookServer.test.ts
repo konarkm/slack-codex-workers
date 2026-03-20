@@ -87,6 +87,21 @@ describe("webhook ingress server", () => {
     expect(handler).not.toHaveBeenCalled();
   });
 
+  it("returns not_found for disabled sources", async () => {
+    const handler = vi.fn();
+    const server = new WebhookIngressServer(makeConfig(), () => makeSource({ enabled: false }), handler);
+    activeServers.push(server);
+    await server.start();
+
+    const response = await fetch(`http://127.0.0.1:${server.getListeningPort()}/webhooks/route-secret`, {
+      method: "POST",
+      body: "hello",
+    });
+
+    expect(response.status).toBe(404);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
   it("enforces the webhook body limit before calling the handler", async () => {
     const handler = vi.fn();
     const server = new WebhookIngressServer(makeConfig(), () => makeSource(), handler);
@@ -182,5 +197,26 @@ describe("webhook ingress server", () => {
     });
 
     expect(response.status).toBe(429);
+  });
+
+  it("returns shutting_down before invoking the handler when ingress is closed", async () => {
+    const handler = vi.fn();
+    const server = new WebhookIngressServer(
+      makeConfig({ webhookBodyMaxBytes: 1024 }),
+      () => makeSource(),
+      handler,
+      () => false,
+    );
+    activeServers.push(server);
+    await server.start();
+
+    const response = await fetch(`http://127.0.0.1:${server.getListeningPort()}/webhooks/route-secret`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+
+    expect(response.status).toBe(503);
+    expect(handler).not.toHaveBeenCalled();
   });
 });
