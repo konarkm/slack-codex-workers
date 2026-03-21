@@ -161,6 +161,8 @@ describe("dynamic tools", () => {
     const workerTool = workerDynamicTools.find((entry) => entry.name === slackSetNotificationToolName);
     const adminNames = adminDynamicTools.map((entry) => entry.name);
     expect(workerTool?.description).toContain("current worker turn should notify the human");
+    expect(workerTool?.description).toContain("defaults to true unless you explicitly opt out");
+    expect(workerTool?.description).toContain("enabled=false means keep the final reply visible in the Slack thread without the mention");
     expect(adminNames).not.toContain(slackSetNotificationToolName);
   });
 
@@ -176,8 +178,9 @@ describe("dynamic tools", () => {
     expect(workerDeveloperInstructions).toContain("shared evolving context, not a fresh report each turn");
     expect(workerDeveloperInstructions).toContain("lead with the delta or direct answer first");
     expect(workerDeveloperInstructions).toContain("Use set_notification(enabled: true|false)");
-    expect(workerDeveloperInstructions).toContain("needs to reply, take action, make a decision");
-    expect(workerDeveloperInstructions).toContain("still chugging along fine");
+    expect(workerDeveloperInstructions).toContain("default is notification on unless you explicitly opt out");
+    expect(workerDeveloperInstructions).toContain("needs to notice, review, respond, decide, or act");
+    expect(workerDeveloperInstructions).toContain("still progressing independently");
     expect(workerDeveloperInstructions).toContain("read the current workstream lineage context in root-to-leaf order");
     expect(workerDeveloperInstructions).toContain("for each level from root through the current workstream");
     expect(workerDeveloperInstructions).toContain("If the task later moves into a deeper nested workstream subtree");

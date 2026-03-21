@@ -211,7 +211,7 @@ export const workerDynamicTools = [
   {
     name: slackSetNotificationToolName,
     description:
-      "Control whether the current worker turn should notify the human when it completes. enabled=true means mention the root owner on the final reply for this turn when they need to reply, take action, or notice something now. enabled=false means keep the final reply visible in the Slack thread without the mention. This is turn-scoped and defaults to false unless you opt in.",
+      "Control whether the current worker turn should notify the human when it completes by mentioning them in the final Slack thread reply for that turn. enabled=true means mention the root owner. enabled=false means keep the final reply visible in the Slack thread without the mention. This is turn-scoped and defaults to true unless you explicitly opt out.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -534,9 +534,10 @@ export const workerDeveloperInstructions = [
   "Use get_current_slack_thread_link when you need the exact permalink and Slack routing ids for the current public worker thread so you can reference it from another system.",
   "Use create_webhook_source, list_webhook_sources, get_webhook_source, list_webhook_registrations, disable_webhook_source, and rotate_webhook_source_route to manage workspace-global raw webhook intake routes and their handler files. A webhook source has one authoritative source name, one secret route, and one handler contract.",
   "Before changing a shared webhook handler contract, use list_webhook_registrations for that source and preserve existing event names and normalized match fields unless you are intentionally updating dependent registrations too.",
-  "Use set_notification(enabled: true|false) to decide whether the current worker turn should notify the human on completion. The default is no notification unless you opt in.",
-  "Call set_notification(enabled: true) before finishing your turn when the human needs to reply, take action, make a decision, or otherwise notice this outcome now. If they do not need to do anything yet, usually leave notification off.",
-  "For autonomous heartbeat, cron, or webhook wake work, usually leave notification off when you are still chugging along fine and the human does not need to do anything yet. Turn notification on when they need to notice a blocker, risk, decision, handoff, or other action-relevant update.",
+  "Use set_notification(enabled: true|false) to decide whether the current worker turn should notify the human on completion by @ mentioning them in the final Slack thread reply for that turn. The default is notification on unless you explicitly opt out.",
+  "Leave notifications on for final turn outputs whenever the human needs to notice, review, respond, decide, or act on the outcome in any way.",
+  "Call set_notification(enabled: false) only when you are still progressing autonomously and there is genuinely nothing the human needs to notice or do yet.",
+  "For heartbeat, cron, or webhook-driven work, lean toward set_notification(enabled: false) when the run is still progressing independently and the human does not need to be aware yet. Leave notification on when the run surfaced a blocker, risk, decision, handoff, or other outcome the human now needs to know, review, or act on.",
   "Use set_heartbeat, set_cron, set_webhook, disable_registration, list_registrations, get_registration, and list_wake_deliveries to manage durable wakeup registrations and inspect wake execution history for the current worker/workstream when you need ongoing automation. For set_webhook(target=self), use deliveryMode='queue' when every event should become separate work and deliveryMode='steer' when matching events should steer the active turn immediately.",
   "Use slack_upload_files when you need to share one or more existing local files into the current Slack thread. Only upload files that materially help the user.",
   "If you create a child worker, it is fire-and-forget. Do not wait on the child unless the human explicitly asks you to.",

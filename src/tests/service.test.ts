@@ -482,6 +482,36 @@ describe("service lifecycle decisions", () => {
     expect(slack.postThreadReply).toHaveBeenCalled();
   });
 
+  it("keeps recovery from inheriting stale turn-start state or buffered assistant text", async () => {
+    const { service, codex, store } = await createService();
+    const worker = createWorker(service, {
+      activeTurnId: null,
+      status: "idle",
+    });
+    const pendingTurn = deferred<string>();
+    codex.startTurnWithResumeFallback.mockImplementation(async () => {
+      await pendingTurn.promise;
+      return "turn-old";
+    });
+    codex.reconcileThreadForSend.mockResolvedValue("running");
+    codex.createWorkerThread.mockResolvedValue({ threadId: "thread-2" });
+
+    const startPromise = service.startWorkerTurn(worker, { text: "hello", imagePaths: [] });
+    (service as any).renderState.set(`worker:${worker.key}`, {
+      pendingAssistant: { itemId: "item-old", text: "old partial" },
+    });
+
+    await service.handleThreadCommand(worker, "recover", []);
+    pendingTurn.resolve("ok");
+    await expect(startPromise).resolves.toBe("turn-old");
+
+    const updated = store.getWorkerByKey(worker.key);
+    expect(updated?.appThreadId).toBe("thread-2");
+    expect(updated?.activeTurnId).toBeNull();
+    expect(updated?.status).toBe("idle");
+    expect((service as any).renderState.get(`worker:${worker.key}`)).toBeUndefined();
+  });
+
   it("does not crash startup reconciliation when Slack cannot reply to a worker root message", async () => {
     const { service, slack, codex, store } = await createService();
     const worker = createWorker(service, {
@@ -498,6 +528,8 @@ describe("service lifecycle decisions", () => {
     const updated = store.getWorkerByKey(worker.key);
     expect(updated?.status).toBe("idle");
     expect(updated?.activeTurnId).toBeNull();
+    expect(updated?.turnNotificationTurnId).toBeNull();
+    expect(updated?.turnNotificationEnabled).toBe(false);
     expect(updated?.lastError).toContain("Recovered stale active turn after runtime startup.");
   });
 
@@ -517,6 +549,8 @@ describe("service lifecycle decisions", () => {
     const updated = store.getWorkerByKey("T1:C1:join-root");
     expect(updated?.status).toBe("idle");
     expect(updated?.activeTurnId).toBeNull();
+    expect(updated?.turnNotificationTurnId).toBeNull();
+    expect(updated?.turnNotificationEnabled).toBe(false);
     expect(updated?.lastError).toContain("Recovered stale active turn after runtime startup.");
     expect(service.runtimeStarted).toBe(true);
   });
@@ -1442,30 +1476,7 @@ describe("service lifecycle decisions", () => {
     store.close();
   });
 
-  it("posts visible final worker replies without mentioning the owner by default", async () => {
-    const { service, slack, store } = await createService();
-    createWorker(service, {
-      status: "running",
-      activeTurnId: "turn-1",
-      turnNotificationTurnId: "turn-1",
-      turnNotificationEnabled: false,
-    });
-
-    await service.onWorkerCompleted("T1:C1:1.000", "San Francisco is 58 F and clear.", "completed");
-
-    expect(slack.postThreadReply).toHaveBeenLastCalledWith(
-      "C1",
-      "1.000",
-      "San Francisco is 58 F and clear.",
-      { username: "Gear", iconEmoji: "gear" },
-    );
-    const updated = store.getWorkerByKey("T1:C1:1.000");
-    expect(updated?.turnNotificationTurnId).toBeNull();
-    expect(updated?.turnNotificationEnabled).toBe(false);
-    store.close();
-  });
-
-  it("mentions the owner on final worker replies only when the turn opts in", async () => {
+  it("mentions the owner on final worker replies by default", async () => {
     const { service, slack, store } = await createService();
     createWorker(service, {
       status: "running",
@@ -1480,6 +1491,29 @@ describe("service lifecycle decisions", () => {
       "C1",
       "1.000",
       "<@U1> San Francisco is 58 F and clear.",
+      { username: "Gear", iconEmoji: "gear" },
+    );
+    const updated = store.getWorkerByKey("T1:C1:1.000");
+    expect(updated?.turnNotificationTurnId).toBeNull();
+    expect(updated?.turnNotificationEnabled).toBe(false);
+    store.close();
+  });
+
+  it("keeps final worker replies visible without mentioning the owner when the turn opts out", async () => {
+    const { service, slack, store } = await createService();
+    createWorker(service, {
+      status: "running",
+      activeTurnId: "turn-1",
+      turnNotificationTurnId: "turn-1",
+      turnNotificationEnabled: false,
+    });
+
+    await service.onWorkerCompleted("T1:C1:1.000", "San Francisco is 58 F and clear.", "completed");
+
+    expect(slack.postThreadReply).toHaveBeenLastCalledWith(
+      "C1",
+      "1.000",
+      "San Francisco is 58 F and clear.",
       { username: "Gear", iconEmoji: "gear" },
     );
     store.close();
@@ -1625,13 +1659,44 @@ describe("service lifecycle decisions", () => {
     store.close();
   });
 
-  it("resets notification preference to silent by default when a new worker turn starts", async () => {
+  it("preserves an early set_notification opt-out during the narrow turn-start window", async () => {
+    const { service, codex, store } = await createService();
+    const worker = createWorker(service, {
+      status: "idle",
+      activeTurnId: null,
+      turnNotificationTurnId: null,
+      turnNotificationEnabled: false,
+    });
+    const turnStart = deferred<string>();
+    codex.startTurnWithResumeFallback.mockImplementation(async () => {
+      await turnStart.promise;
+      return "turn-starting";
+    });
+
+    const startPromise = service.startWorkerTurn(worker, { text: "check in", imagePaths: [] });
+    const callPromise = service.handleSetNotificationTool(
+      { enabled: false },
+      { threadId: "thread-1", turnId: "turn-starting", callId: "call-starting-false" },
+    );
+    turnStart.resolve("ok");
+    await expect(callPromise).resolves.toBe("Notifications disabled for this turn.");
+    await expect(startPromise).resolves.toBe("turn-starting");
+
+    expect(store.getWorkerByKey("T1:C1:1.000")).toMatchObject({
+      activeTurnId: "turn-starting",
+      turnNotificationTurnId: "turn-starting",
+      turnNotificationEnabled: false,
+    });
+    store.close();
+  });
+
+  it("resets notification preference to notify by default when a new worker turn starts", async () => {
     const { service, codex, store } = await createService();
     const worker = createWorker(service, {
       status: "idle",
       activeTurnId: null,
       turnNotificationTurnId: "old-turn",
-      turnNotificationEnabled: true,
+      turnNotificationEnabled: false,
     });
     codex.startTurnWithResumeFallback.mockResolvedValue("turn-2");
 
@@ -1641,7 +1706,7 @@ describe("service lifecycle decisions", () => {
       activeTurnId: "turn-2",
       status: "running",
       turnNotificationTurnId: "turn-2",
-      turnNotificationEnabled: false,
+      turnNotificationEnabled: true,
     });
     store.close();
   });
@@ -3064,7 +3129,13 @@ describe("service lifecycle decisions", () => {
     const { service, codex, slack, store } = await createService();
     service.runtimeStarted = true;
     service.scheduleRegistrationLoop = vi.fn();
-    createWorker(service, { workstreamId: "T1:root", activeTurnId: "turn-active", status: "running" });
+    createWorker(service, {
+      workstreamId: "T1:root",
+      activeTurnId: "turn-active",
+      status: "running",
+      turnNotificationTurnId: "turn-active",
+      turnNotificationEnabled: true,
+    });
     const webhookSource = await createWebhookSource(service, { source: "linear" });
 
     store.upsertRegistration({
@@ -3119,6 +3190,11 @@ describe("service lifecycle decisions", () => {
     expect(codex.startTurnWithResumeFallback).not.toHaveBeenCalled();
     expect(store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000")[0]).toMatchObject({
       status: "delivered",
+    });
+    expect(store.getWorkerByKey("T1:C1:1.000")).toMatchObject({
+      activeTurnId: "turn-active",
+      turnNotificationTurnId: "turn-active",
+      turnNotificationEnabled: true,
     });
     store.close();
   });
@@ -3233,6 +3309,8 @@ describe("service lifecycle decisions", () => {
 
     expect(store.getWorkerByKey("T1:C1:1.000")).toMatchObject({
       status: "recovery_required",
+      turnNotificationTurnId: null,
+      turnNotificationEnabled: false,
       lastError: expect.stringContaining("Backing Codex thread is missing"),
     });
     expect(store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000")[0]).toMatchObject({
@@ -3305,6 +3383,8 @@ describe("service lifecycle decisions", () => {
     expect(store.getWorkerByKey("T1:C1:1.000")).toMatchObject({
       activeTurnId: "turn-recovered",
       status: "running",
+      turnNotificationTurnId: "turn-recovered",
+      turnNotificationEnabled: true,
     });
     store.close();
   });

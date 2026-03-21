@@ -925,6 +925,7 @@ export class SlackCodexWorkersService extends EventEmitter {
   private async startWorkerTurn(worker: WorkerRecord, input: TurnInput): Promise<string> {
     const existing = this.startingWorkerTurns.get(worker.key);
     if (existing) return existing;
+    const startingAppThreadId = worker.appThreadId;
 
     const turnPromise = (async () => {
       let turnId: string;
@@ -962,11 +963,18 @@ export class SlackCodexWorkersService extends EventEmitter {
       } finally {
         this.startingWorkerTurns.delete(worker.key);
       }
+      const currentWorker = this.requireWorker(worker.key);
+      if (currentWorker.appThreadId !== startingAppThreadId) {
+        return turnId;
+      }
+      const preserveCurrentTurnNotification = currentWorker.turnNotificationTurnId === turnId;
       this.store.updateWorkerState(worker.key, {
         activeTurnId: turnId,
         status: "running",
         turnNotificationTurnId: turnId,
-        turnNotificationEnabled: false,
+        turnNotificationEnabled: preserveCurrentTurnNotification
+          ? currentWorker.turnNotificationEnabled
+          : true,
         lastError: null,
         pendingRequest: null,
       });
@@ -2932,6 +2940,8 @@ export class SlackCodexWorkersService extends EventEmitter {
 
   private async recoverWorker(worker: WorkerRecord): Promise<WorkerRecord> {
     this.clearBlockedTurnPoll(this.getWorkerPollKey(worker.key));
+    this.startingWorkerTurns.delete(worker.key);
+    this.renderState.delete(`worker:${worker.key}`);
     const created = await this.codex.createWorkerThread(worker.settings);
     const recovered = this.store.upsertWorker({
       ...worker,
@@ -3008,6 +3018,8 @@ export class SlackCodexWorkersService extends EventEmitter {
       currentAgentSlackTs: null,
       currentAgentItemId: null,
       currentWorklogSlackTs: null,
+      turnNotificationTurnId: null,
+      turnNotificationEnabled: false,
       pendingRequest: null,
       lastError: reason,
     });
@@ -3024,6 +3036,8 @@ export class SlackCodexWorkersService extends EventEmitter {
       currentAgentSlackTs: null,
       currentAgentItemId: null,
       currentWorklogSlackTs: null,
+      turnNotificationTurnId: null,
+      turnNotificationEnabled: false,
       pendingRequest: null,
       lastError: reason,
     });

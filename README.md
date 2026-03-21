@@ -11,7 +11,7 @@ Slack-first bridge for running many Codex app-server workers behind one Slack bo
 - Interleaved Codex progress gets rendered back into the Slack thread as:
   - streamed assistant messages
   - a mutable worklog message for tool/command/MCP activity
-- The final completion message always mentions the root human owner.
+- The final completion message mentions the root human owner by default, unless the worker explicitly opts out for that turn.
 - Admin DMs provide a control surface for defaults and bridge operations.
 - Each spawned worker writes one durable local request item and, at most once, one durable terminal response item inside its workstream.
 
@@ -219,7 +219,7 @@ For a supervised production build:
 - `slack_create_workstream` is available to workers and the admin DM. It is intended to be used after explicit user approval in the conversation, not behind a separate permission layer.
 - `create_webhook_source`, `list_webhook_sources`, `get_webhook_source`, `disable_webhook_source`, and `rotate_webhook_source_route` manage workspace-global raw webhook source definitions. Each source has one source name, one secret route, and one handler file.
 - `list_webhook_registrations` lists all registrations in the workspace that currently depend on one webhook source so agents can preserve existing event names, normalized match fields, and delivery behavior before changing a shared handler contract.
-- `set_notification(enabled: true|false)` is worker-only, turn-scoped, and opt-in; final worker replies stay visible by default but only mention the root owner when the worker explicitly enables notification for a turn where the human needs to reply, take action, or notice something now.
+- `set_notification(enabled: true|false)` is worker-only and turn-scoped. Final worker replies mention the root owner by default; workers should call `set_notification(enabled: false)` only when they are still progressing autonomously and there is nothing the human needs to notice or do yet. Heartbeat/cron/webhook-driven work should lean toward opting out only while it is still progressing independently without user-relevant outcomes.
 - `set_heartbeat` only works in a public worker thread and always targets the current worker with `wake_self`.
 - `set_cron` defaults to `target='self'`.
 - `set_webhook` defaults to `target='self'` and `deliveryMode='queue'`.

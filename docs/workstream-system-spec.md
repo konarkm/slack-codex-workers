@@ -493,17 +493,18 @@ It applies to the current turn only.
 
 It does not become sticky across workers or workstreams.
 
-The current worker-turn default should be opt-in:
+The current worker-turn default should mention by default:
 
-- if the worker does not call `set_notification`, the final assistant reply still posts visibly into the Slack thread but does not mention the user
+- if the worker does not call `set_notification`, the final assistant reply posts visibly into the Slack thread and mentions the root owner for that turn
 - if the worker calls `set_notification(enabled: true)`, the final assistant reply mentions the root owner for that turn
 - if the worker calls `set_notification(enabled: false)`, the final assistant reply remains visible without the mention
 - if the worker calls the tool multiple times in one turn, the latest value wins
 
 The intended policy is action-oriented:
 
-- notify when the human needs to reply, take action, make a decision, or otherwise notice the outcome now
-- leave notification off when the worker is still progressing autonomously and the human does not need to do anything yet
+- leave notification on whenever the human needs to notice, review, respond, decide, or act on the outcome in any way
+- call `set_notification(enabled: false)` only when the worker is still progressing autonomously and the human does not need to notice or do anything yet
+- for heartbeat, cron, or webhook-driven work, lean toward `enabled: false` when the run is still progressing independently and the human does not need to be aware yet
 
 This explicit turn-scoped notification state should persist for the lifetime of the turn, including bridge restarts that reconnect to the same active turn.
 
