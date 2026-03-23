@@ -83,6 +83,37 @@ describe("dynamic tools", () => {
     });
   });
 
+  it("parses workstream creation args with an explicit Slack channel name", () => {
+    expect(slackCreateWorkstreamArgsSchema.parse({
+      slug: "prospecting",
+      channelName: "web-agency-prospecting",
+      parent: "endeavors/web-agency",
+      description: "Prospecting lane",
+    })).toEqual({
+      slug: "prospecting",
+      channelName: "web-agency-prospecting",
+      parent: "endeavors/web-agency",
+      description: "Prospecting lane",
+    });
+  });
+
+  it("accepts uppercase workstream and channel names in the tool schema", () => {
+    expect(slackCreateWorkstreamArgsSchema.parse({
+      slug: "Prospecting",
+      channelName: "Web-Agency-Prospecting",
+    })).toEqual({
+      slug: "Prospecting",
+      channelName: "Web-Agency-Prospecting",
+    });
+  });
+
+  it("rejects invalid explicit workstream channel names in the tool schema", () => {
+    expect(() => slackCreateWorkstreamArgsSchema.parse({
+      slug: "prospecting",
+      channelName: "Bad Name",
+    })).toThrow();
+  });
+
   it("defaults cron target to self", () => {
     expect(slackSetCronArgsSchema.parse({
       schedule: "0 * * * *",

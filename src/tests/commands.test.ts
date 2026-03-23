@@ -59,6 +59,7 @@ describe("commands", () => {
     expect(helpText("dm")).toContain(".recover");
     expect(helpText("dm")).toContain(".stop");
     expect(helpText("dm")).toContain(".workstream-create");
+    expect(helpText("dm")).toContain("[channel=<name>]");
     expect(helpText("dm")).toContain(".workstream-archive");
     expect(helpText("dm")).toContain("slash commands may open Slack's built-in command UI first");
     expect(helpText("dm")).toContain("missing or blocked");
@@ -70,6 +71,7 @@ describe("commands", () => {
     expect(helpText("thread")).toContain(".recover");
     expect(helpText("thread")).toContain(".stop");
     expect(helpText("thread")).toContain(".workstream-create");
+    expect(helpText("thread")).toContain("[channel=<name>]");
     expect(helpText("thread")).not.toContain(".workstream-archive");
     expect(helpText("thread")).not.toContain(".restart");
     expect(helpText("thread")).not.toContain(".new-thread");

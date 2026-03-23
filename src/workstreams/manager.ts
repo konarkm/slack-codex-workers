@@ -73,12 +73,16 @@ export class WorkstreamManager {
 
   async createWorkstream(
     teamId: string,
-    input: { slug: string; parentRelativePath?: string | null; description?: string | null },
+    input: { slug: string; channelName?: string | null; parentRelativePath?: string | null; description?: string | null },
     createChannel: () => Promise<ChannelRecord>,
   ): Promise<WorkstreamRecord> {
     const slug = input.slug.trim().toLowerCase();
     if (!SLUG_REGEX.test(slug)) {
-      throw new Error("Invalid workstream slug. Use lowercase letters, numbers, hyphen, or underscore.");
+      throw new Error("Invalid workstream slug. Use only letters, numbers, hyphen, or underscore; names are normalized to lowercase.");
+    }
+    const channelName = (input.channelName ?? input.slug).trim().toLowerCase();
+    if (!SLUG_REGEX.test(channelName)) {
+      throw new Error("Invalid Slack channel name. Use only letters, numbers, hyphen, or underscore; names are normalized to lowercase.");
     }
 
     const parent = input.parentRelativePath
@@ -103,7 +107,7 @@ export class WorkstreamManager {
       await this.ensureChildWorkstreamLayout(relativePath, {
         slug,
         parentRelativePath: parent.relativePath,
-        channelName: slug,
+        channelName,
         description: input.description ?? null,
       });
       localCreated = true;

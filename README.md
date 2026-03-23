@@ -73,6 +73,7 @@ Implemented in this repo:
   - `.compact` / `/compact`
   - `.stop` / `/stop`
   - `.recover` / `/recover`
+  - `.workstream-create <slug> [parent=<path>] [channel=<name>] [description...]` / `/workstream-create <slug> [parent=<path>] [channel=<name>] [description...]`
 - admin DM commands:
   - `.help` / `/help`
   - `.status` / `/status`
@@ -86,7 +87,7 @@ Implemented in this repo:
   - `.restart <codex|bridge|both>` / `/restart <codex|bridge|both>`
   - `.restart-now` / `/restart-now`
   - `.restart-cancel` / `/restart-cancel`
-  - `.workstream-create <slug> [parent=<path>] [description...]` / `/workstream-create <slug> [parent=<path>] [description...]`
+  - `.workstream-create <slug> [parent=<path>] [channel=<name>] [description...]` / `/workstream-create <slug> [parent=<path>] [channel=<name>] [description...]`
 - image and file attachment ingestion
 
 Not implemented yet:
@@ -234,7 +235,7 @@ For a supervised production build:
 - `/status` and `/health` are available in worker threads and admin DMs. Thread commands report thread-specific state; DM commands report bridge-wide state.
 - Dot-command aliases such as `.status`, `.health`, `.restart`, and `.workstream-create` are supported everywhere the slash commands are supported. In the Slack client, dot commands are the most reliable form because some slash commands collide with Slack's built-in command UI. If you still prefer slash commands, a leading space also works because the bridge trims message text before parsing.
 - Thread `/model` and `/effort` set thread-local overrides. DM `/model` and `/effort` set the global defaults used by any thread that does not have an override.
-- `/workstream-create` is available in worker threads and admin DMs for explicit bridge-owned creation.
+- `/workstream-create` is available in worker threads and admin DMs for explicit bridge-owned creation. `slug` defines the canonical workstream path segment. `channel=<name>` optionally sets the explicit Slack channel name; if omitted it defaults to `slug`. Both may only use letters, numbers, hyphen, or underscore, and the runtime normalizes them to lowercase.
 - `/workstream-archive` is available in the admin DM to archive a child workstream, disable its registrations, quarantine pending wakes, and remove it from live routing while keeping the local scaffold on disk.
 - `/restart <codex|bridge|both>` queues a restart request and waits for the runtime to become idle.
 - `/restart-now` forces the currently queued restart immediately.

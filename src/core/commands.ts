@@ -68,7 +68,7 @@ export function helpText(scope: "dm" | "thread"): string {
     lines.push(".new-thread - attach this admin DM to a fresh Codex thread immediately");
     lines.push(".stop - request interruption of the active DM admin turn");
     lines.push(".recover - recover this DM only when the backing Codex thread is missing or blocked");
-    lines.push(".workstream-create <slug> [parent=<path>] [description...] - create a new workstream channel and scaffold");
+    lines.push(".workstream-create <slug> [parent=<path>] [channel=<name>] [description...] - create a new workstream channel and scaffold; names may only use letters, numbers, hyphen, or underscore and are normalized to lowercase");
     lines.push(".workstream-archive <path> - archive a child workstream, disable its automation, and remove it from live routing");
     return lines.join("\n");
   }
@@ -80,7 +80,7 @@ export function helpText(scope: "dm" | "thread"): string {
   lines.push(".compact - compact this worker thread when idle");
   lines.push(".stop - request interruption of the active worker turn");
   lines.push(".recover - recover this thread only when the backing Codex thread is missing or blocked");
-  lines.push(".workstream-create <slug> [parent=<path>] [description...] - create a new workstream with explicit user approval");
+  lines.push(".workstream-create <slug> [parent=<path>] [channel=<name>] [description...] - create a new workstream with explicit user approval; names may only use letters, numbers, hyphen, or underscore and are normalized to lowercase");
   return lines.join("\n");
 }
 

@@ -1809,7 +1809,7 @@ export class SlackCodexWorkersService extends EventEmitter {
   }
 
   private async handleCreateWorkstreamTool(
-    args: { slug: string; parent?: string | undefined; description?: string | undefined },
+    args: { slug: string; channelName?: string | undefined; parent?: string | undefined; description?: string | undefined },
     ctx: DynamicToolHandlerContext,
   ): Promise<string> {
     const worker = this.store.getWorkerByAppThreadId(ctx.threadId);
@@ -1820,6 +1820,7 @@ export class SlackCodexWorkersService extends EventEmitter {
           ? (this.store.getWorkstreamById(worker.workstreamId)?.relativePath ?? null)
           : null,
         slug: args.slug,
+        channelName: args.channelName,
         parentRelativePath: args.parent,
         description: args.description,
         initiatedFrom: `worker:${worker.key}`,
@@ -1832,6 +1833,7 @@ export class SlackCodexWorkersService extends EventEmitter {
         teamId: session.teamId,
         defaultParentRelativePath: null,
         slug: args.slug,
+        channelName: args.channelName,
         parentRelativePath: args.parent,
         description: args.description,
         initiatedFrom: `dm:${session.userId}`,
@@ -2673,13 +2675,14 @@ export class SlackCodexWorkersService extends EventEmitter {
   private async createWorkstreamFromThreadArgs(worker: WorkerRecord, args: string[]): Promise<string> {
     const parsed = parseWorkstreamCreateArgs(args);
     if (!parsed) {
-      return "Usage: .workstream-create <slug> [parent=<path>] [description...] (or /workstream-create ...)";
+      return "Usage: .workstream-create <slug> [parent=<path>] [channel=<name>] [description...] (or /workstream-create ...)";
     }
     const currentWorkstream = worker.workstreamId ? this.store.getWorkstreamById(worker.workstreamId) : null;
     return this.createWorkstreamForContext({
       teamId: worker.teamId,
       defaultParentRelativePath: currentWorkstream?.relativePath ?? null,
       slug: parsed.slug,
+      channelName: parsed.channelName,
       parentRelativePath: parsed.parentRelativePath,
       description: parsed.description,
       initiatedFrom: `worker:${worker.key}`,
@@ -2689,12 +2692,13 @@ export class SlackCodexWorkersService extends EventEmitter {
   private async createWorkstreamFromDmArgs(session: DmSessionRecord, args: string[]): Promise<string> {
     const parsed = parseWorkstreamCreateArgs(args);
     if (!parsed) {
-      return "Usage: .workstream-create <slug> [parent=<path>] [description...] (or /workstream-create ...)";
+      return "Usage: .workstream-create <slug> [parent=<path>] [channel=<name>] [description...] (or /workstream-create ...)";
     }
     return this.createWorkstreamForContext({
       teamId: session.teamId,
       defaultParentRelativePath: null,
       slug: parsed.slug,
+      channelName: parsed.channelName,
       parentRelativePath: parsed.parentRelativePath,
       description: parsed.description,
       initiatedFrom: `dm:${session.userId}`,
@@ -2714,12 +2718,14 @@ export class SlackCodexWorkersService extends EventEmitter {
     teamId: string;
     defaultParentRelativePath: string | null;
     slug: string;
+    channelName?: string | null;
     parentRelativePath?: string | null;
     description?: string | null;
     initiatedFrom: string;
     excludeAdminChannelId?: string | null;
   }): Promise<string> {
-    const existingChannel = await this.slack.findPublicChannelByName(input.teamId, input.slug);
+    const effectiveChannelName = (input.channelName ?? input.slug).trim().toLowerCase();
+    const existingChannel = await this.slack.findPublicChannelByName(input.teamId, effectiveChannelName);
     if (existingChannel) {
       return `Slack channel #${existingChannel.name} already exists. Workstream creation refuses to auto-link existing channels in this version.`;
     }
@@ -2728,10 +2734,11 @@ export class SlackCodexWorkersService extends EventEmitter {
         input.teamId,
         {
           slug: input.slug,
+          channelName: effectiveChannelName,
           parentRelativePath: input.parentRelativePath ?? input.defaultParentRelativePath,
           description: input.description ?? null,
         },
-        async () => this.slack.createPublicChannel(input.teamId, input.slug),
+        async () => this.slack.createPublicChannel(input.teamId, effectiveChannelName),
       );
       const message = formatCreatedWorkstreamMessage(workstream);
       await this.notifyAdminControlSurface(
@@ -3906,9 +3913,10 @@ function describeEffectiveSetting(threadValue: string | null, defaultValue: stri
   return "(using default: unset)";
 }
 
-function parseWorkstreamCreateArgs(args: string[]): { slug: string; parentRelativePath: string | null; description: string | null } | null {
+function parseWorkstreamCreateArgs(args: string[]): { slug: string; channelName: string | null; parentRelativePath: string | null; description: string | null } | null {
   const [slug, ...rest] = args;
   if (!slug) return null;
+  let channelName: string | null = null;
   let parentRelativePath: string | null = null;
   const descriptionParts: string[] = [];
   for (const token of rest) {
@@ -3916,10 +3924,19 @@ function parseWorkstreamCreateArgs(args: string[]): { slug: string; parentRelati
       parentRelativePath = token.slice("parent=".length).trim() || null;
       continue;
     }
+    if (descriptionParts.length === 0 && token.startsWith("channel=")) {
+      const parsedChannelName = token.slice("channel=".length).trim();
+      if (!parsedChannelName) {
+        return null;
+      }
+      channelName = parsedChannelName;
+      continue;
+    }
     descriptionParts.push(token);
   }
   return {
     slug,
+    channelName,
     parentRelativePath,
     description: descriptionParts.length > 0 ? descriptionParts.join(" ") : null,
   };

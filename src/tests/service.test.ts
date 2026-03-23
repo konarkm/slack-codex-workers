@@ -1935,6 +1935,64 @@ describe("service lifecycle decisions", () => {
     store.close();
   });
 
+  it("creates a workstream from the admin DM command with an explicit Slack channel name", async () => {
+    const { dir, service, slack, store } = await createService();
+    const session = createDmSession(service);
+
+    const result = await service.handleDmCommand(
+      session,
+      "workstream-create",
+      ["prospecting", "parent=root", "channel=web-agency-prospecting", "Handles", "prospecting"],
+    );
+
+    expect(result.response).toContain("Created workstream prospecting");
+    expect(slack.createPublicChannel).toHaveBeenCalledWith("T1", "web-agency-prospecting");
+    expect(store.getWorkstreamByRelativePath("T1", "prospecting")).toMatchObject({
+      relativePath: "prospecting",
+      channelName: "web-agency-prospecting",
+      archivedAt: null,
+    });
+    await expect(fs.readFile(path.join(dir, "prospecting", "WORKSTREAM.md"), "utf8")).resolves.toContain("Slack surface: #web-agency-prospecting");
+    store.close();
+  });
+
+  it("treats channel= literally once description text has started", async () => {
+    const { dir, service, slack, store } = await createService();
+    const session = createDmSession(service);
+
+    const result = await service.handleDmCommand(
+      session,
+      "workstream-create",
+      ["ops", "parent=root", "This", "mentions", "channel=foo", "literally"],
+    );
+
+    expect(result.response).toContain("Created workstream ops");
+    expect(slack.createPublicChannel).toHaveBeenCalledWith("T1", "ops");
+    await expect(fs.readFile(path.join(dir, "ops", "WORKSTREAM.md"), "utf8")).resolves.toContain("Slack surface: #ops");
+    expect(store.getWorkstreamByRelativePath("T1", "ops")).toMatchObject({
+      channelName: "ops",
+      description: "This mentions channel=foo literally",
+    });
+    store.close();
+  });
+
+  it("rejects an empty explicit channel name in the command path", async () => {
+    const { dir, service, slack, store } = await createService();
+    const session = createDmSession(service);
+
+    const result = await service.handleDmCommand(
+      session,
+      "workstream-create",
+      ["ops", "parent=root", "channel="],
+    );
+
+    expect(result.response).toContain("Usage: .workstream-create <slug> [parent=<path>] [channel=<name>] [description...]");
+    expect(slack.createPublicChannel).not.toHaveBeenCalled();
+    expect(store.getWorkstreamByRelativePath("T1", "ops")).toBeNull();
+    await expect(fs.access(path.join(dir, "ops"))).rejects.toThrow();
+    store.close();
+  });
+
   it("creates a workstream from the worker bridge tool", async () => {
     const { service, slack, store } = await createService();
     createDmSession(service);
@@ -1951,6 +2009,98 @@ describe("service lifecycle decisions", () => {
     expect(store.getWorkstreamByRelativePath("T1", "research")).toMatchObject({ relativePath: "research" });
     expect(slack.postTopLevelMessage).toHaveBeenCalledWith("D1", expect.stringContaining("Created workstream research."));
     expect(slack.postTopLevelMessage).toHaveBeenCalledWith("D1", expect.stringContaining("Join Channel"));
+    store.close();
+  });
+
+  it("rejects an invalid explicit Slack channel name from the worker bridge tool", async () => {
+    const { dir, service, slack, store } = await createService();
+    createDmSession(service);
+    createWorker(service, { workstreamId: "T1:root" });
+
+    const result = await service.handleCreateWorkstreamTool(
+      { slug: "research", channelName: "Bad Name" },
+      { threadId: "thread-1", turnId: "turn-1", callId: "call-1" },
+    );
+
+    expect(result).toContain("Workstream creation failed: Invalid Slack channel name. Use only letters, numbers, hyphen, or underscore; names are normalized to lowercase.");
+    expect(slack.createPublicChannel).not.toHaveBeenCalled();
+    expect(store.getWorkstreamByRelativePath("T1", "research")).toBeNull();
+    await expect(fs.access(path.join(dir, "research"))).rejects.toThrow();
+    store.close();
+  });
+
+  it("refuses explicit-channel creation when that Slack channel already exists", async () => {
+    const { dir, service, slack, store } = await createService();
+    createDmSession(service);
+    createWorker(service, { workstreamId: "T1:root" });
+    slack.findPublicChannelByName.mockResolvedValue({
+      teamId: "T1",
+      channelId: "C-existing",
+      name: "web-agency-prospecting",
+      isPrivate: false,
+      isMember: true,
+      updatedAt: new Date().toISOString(),
+    });
+
+    const result = await service.handleCreateWorkstreamTool(
+      { slug: "prospecting", channelName: "web-agency-prospecting" },
+      { threadId: "thread-1", turnId: "turn-1", callId: "call-1" },
+    );
+
+    expect(result).toContain("Slack channel #web-agency-prospecting already exists.");
+    expect(slack.createPublicChannel).not.toHaveBeenCalled();
+    expect(store.getWorkstreamByRelativePath("T1", "prospecting")).toBeNull();
+    await expect(fs.access(path.join(dir, "prospecting"))).rejects.toThrow();
+    store.close();
+  });
+
+  it("creates a nested workstream with an explicit Slack channel name that differs from the canonical path", async () => {
+    const { dir, service, slack, store } = await createService();
+    createDmSession(service);
+    store.upsertWorkstream({
+      id: "T1:endeavors",
+      teamId: "T1",
+      parentId: "T1:root",
+      slug: "endeavors",
+      relativePath: "endeavors",
+      channelId: "C-endeavors",
+      channelName: "endeavors",
+      description: null,
+      archivedAt: null,
+    });
+    store.upsertWorkstream({
+      id: "T1:endeavors/web-agency",
+      teamId: "T1",
+      parentId: "T1:endeavors",
+      slug: "web-agency",
+      relativePath: "endeavors/web-agency",
+      channelId: "C-web-agency",
+      channelName: "web-agency",
+      description: null,
+      archivedAt: null,
+    });
+    createWorker(service, { workstreamId: "T1:endeavors/web-agency" });
+
+    const result = await service.handleCreateWorkstreamTool(
+      {
+        slug: "prospecting",
+        channelName: "web-agency-prospecting",
+        description: "Prospecting lane",
+      },
+      { threadId: "thread-1", turnId: "turn-1", callId: "call-1" },
+    );
+
+    expect(result).toContain("Created workstream endeavors/web-agency/prospecting.");
+    expect(slack.createPublicChannel).toHaveBeenCalledWith("T1", "web-agency-prospecting");
+    expect(store.getWorkstreamByRelativePath("T1", "endeavors/web-agency/prospecting")).toMatchObject({
+      slug: "prospecting",
+      relativePath: "endeavors/web-agency/prospecting",
+      channelName: "web-agency-prospecting",
+      archivedAt: null,
+    });
+    await expect(
+      fs.readFile(path.join(dir, "endeavors", "web-agency", "prospecting", "WORKSTREAM.md"), "utf8"),
+    ).resolves.toContain("Slack surface: #web-agency-prospecting");
     store.close();
   });
 

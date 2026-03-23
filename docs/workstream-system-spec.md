@@ -304,12 +304,13 @@ This is conversational/tool guidance, not a separate permission subsystem.
 Workstream creation should take minimal inputs:
 
 - `slug`
+- `channelName` optional
 - `parent` optional
 - `description` optional
 
 Directory path is derived from parent.
 
-Slack channel name is derived from slug.
+`slug` and `channelName` should only use letters, numbers, hyphen, or underscore. The runtime normalizes them to lowercase. Slack channel name defaults to slug when `channelName` is omitted.
 
 ### Flow
 

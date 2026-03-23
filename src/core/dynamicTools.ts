@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 const webhookSourcePattern = "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$";
+const workstreamNamePattern = "^[A-Za-z0-9][A-Za-z0-9-_]{0,79}$";
 
 export const slackListChannelsToolName = "slack_list_channels";
 export const slackListWorkstreamsToolName = "list_workstreams";
@@ -73,13 +74,14 @@ export const workerDynamicTools = [
   {
     name: slackCreateWorkstreamToolName,
     description:
-      "Create a new Slack workstream home and local scaffold after the user has explicitly approved it in the conversation. Use this when the user agrees a new nested workstream should exist. If parent is omitted in a worker thread, the current workstream is used; if omitted in the admin DM, root is used.",
+      "Create a new Slack workstream home and local scaffold after the user has explicitly approved it in the conversation. Use this when the user agrees a new nested workstream should exist. slug defines the canonical workstream path segment. channelName optionally sets the explicit Slack channel name; if omitted it defaults to slug. Both may only use letters, numbers, hyphen, or underscore, and the runtime normalizes them to lowercase before creation. If parent is omitted in a worker thread, the current workstream is used; if omitted in the admin DM, root is used.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       required: ["slug"],
       properties: {
-        slug: { type: "string", minLength: 1 },
+        slug: { type: "string", minLength: 1, pattern: workstreamNamePattern },
+        channelName: { type: "string", minLength: 1, pattern: workstreamNamePattern },
         parent: { type: "string", minLength: 1 },
         description: { type: "string", minLength: 1 },
       },
@@ -426,7 +428,8 @@ export const slackSpawnWorkerArgsSchema = z.object({
 }).strict();
 
 export const slackCreateWorkstreamArgsSchema = z.object({
-  slug: z.string().min(1),
+  slug: z.string().min(1).regex(new RegExp(workstreamNamePattern)),
+  channelName: z.string().min(1).regex(new RegExp(workstreamNamePattern)).optional(),
   parent: z.string().min(1).optional(),
   description: z.string().min(1).optional(),
 });
