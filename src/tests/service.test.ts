@@ -230,7 +230,7 @@ function createWorker(service: any, overrides: Partial<WorkerRecord> = {}): Work
     currentAgentSlackTs: null,
     currentAgentItemId: null,
     currentWorklogSlackTs: null,
-    settings: { model: "gpt-5.4", effort: "high" },
+    settings: { model: "gpt-5.4", effort: "high", fastMode: null },
     identity: { username: "Gear", iconEmoji: "gear" },
     parentWorkerKey: null,
     requestItemId: null,
@@ -256,7 +256,7 @@ function createDmSession(service: any, overrides: Partial<DmSessionRecord> = {})
     currentAgentSlackTs: null,
     currentAgentItemId: null,
     currentWorklogSlackTs: null,
-    settings: { model: "gpt-5.4", effort: "high" },
+    settings: { model: "gpt-5.4", effort: "high", fastMode: null },
     lastError: null,
     lastInboundMessageTs: null,
     pendingRequest: null,
@@ -473,12 +473,18 @@ describe("service lifecycle decisions", () => {
     const worker = createWorker(service);
     codex.reconcileThreadForSend.mockResolvedValue("missing");
     codex.createWorkerThread.mockResolvedValue({ threadId: "thread-2" });
+    store.setTeamDefaults("T1", { model: "gpt-5.4", effort: "medium", fastMode: true });
 
     await service.handleThreadCommand(worker, "recover", []);
 
     const updated = store.getWorkerByKey(worker.key);
     expect(updated?.appThreadId).toBe("thread-2");
     expect(updated?.status).toBe("idle");
+    expect(codex.createWorkerThread).toHaveBeenCalledWith({
+      model: "gpt-5.4",
+      effort: "high",
+      fastMode: true,
+    });
     expect(slack.postThreadReply).toHaveBeenCalled();
   });
 
@@ -610,6 +616,7 @@ describe("service lifecycle decisions", () => {
 
   it("spawns into the current workstream when workstream is omitted", async () => {
     const { service, slack, codex, store } = await createService();
+    store.setTeamDefaults("T1", { model: "gpt-5.4", effort: "medium", fastMode: true });
     store.upsertWorkstream({
       id: "T1:customers/ef",
       teamId: "T1",
@@ -635,7 +642,7 @@ describe("service lifecycle decisions", () => {
       currentAgentSlackTs: null,
       currentAgentItemId: null,
       currentWorklogSlackTs: null,
-      settings: { model: "gpt-5.4", effort: "high" },
+      settings: { model: "gpt-5.4", effort: "high", fastMode: null },
       identity: { username: "Gear", iconEmoji: "gear" },
       parentWorkerKey: null,
       requestItemId: null,
@@ -661,6 +668,11 @@ describe("service lifecycle decisions", () => {
       "Follow up\n\nDo it here",
       expect.objectContaining({ username: expect.any(String) }),
     );
+    expect(codex.createWorkerThread).toHaveBeenCalledWith({
+      model: "gpt-5.4",
+      effort: "high",
+      fastMode: true,
+    });
     expect(store.getWorkerByAppThreadId("thread-child-current")).toMatchObject({
       channelId: "C-ef",
       workstreamId: "T1:customers/ef",
@@ -1365,14 +1377,83 @@ describe("service lifecycle decisions", () => {
     const { service, codex, store } = await createService();
     const session = createDmSession(service, {
       appThreadId: "dm-thread-old",
-      settings: { model: null, effort: null },
+      settings: { model: null, effort: null, fastMode: null },
     });
-    store.setTeamDefaults("T1", { model: "gpt-5.5", effort: "medium" });
+    store.setTeamDefaults("T1", { model: "gpt-5.5", effort: "medium", fastMode: false });
     codex.createAdminThread.mockResolvedValue({ threadId: "dm-thread-new", threadName: null });
 
     await service.handleDmCommand(session, "new-thread", []);
 
-    expect(codex.createAdminThread).toHaveBeenCalledWith({ model: "gpt-5.5", effort: "medium" });
+    expect(codex.createAdminThread).toHaveBeenCalledWith({ model: "gpt-5.5", effort: "medium", fastMode: false });
+    store.close();
+  });
+
+  it("new-thread forwards fast-mode team defaults when the DM has no override", async () => {
+    const { service, codex, store } = await createService();
+    const session = createDmSession(service, {
+      appThreadId: "dm-thread-old",
+      settings: { model: null, effort: null, fastMode: null },
+    });
+    store.setTeamDefaults("T1", { model: "gpt-5.4", effort: "medium", fastMode: true });
+    codex.createAdminThread.mockResolvedValue({ threadId: "dm-thread-new", threadName: null });
+
+    await service.handleDmCommand(session, "new-thread", []);
+
+    expect(codex.createAdminThread).toHaveBeenCalledWith({ model: "gpt-5.4", effort: "medium", fastMode: true });
+    store.close();
+  });
+
+  it("handles fast-mode commands across DM defaults and thread overrides", async () => {
+    const { service, slack, store } = await createService();
+    const session = createDmSession(service);
+    const worker = createWorker(service);
+
+    expect(await service.handleDmCommand(session, "fast", ["status"])).toMatchObject({
+      response: expect.stringContaining("Global default fast mode: off"),
+    });
+
+    const dmSet = await service.handleDmCommand(session, "fast", ["on"]);
+    expect(dmSet.response).toContain("Default fast mode set: on");
+    expect(store.getTeamDefaults("T1")).toMatchObject({ fastMode: true });
+    expect((await service.handleDmCommand(session, "status", [])).response).toContain("global_default_fast_mode: on");
+
+    await service.handleThreadCommand(worker, "fast", ["status"]);
+    expect(slack.postThreadReply.mock.calls.at(-1)?.[2]).toContain("Global default fast mode: on");
+
+    await service.handleThreadCommand(worker, "fast", ["on"]);
+    expect(store.getWorkerByKey(worker.key)?.settings.fastMode).toBe(true);
+    expect(slack.postThreadReply.mock.calls.at(-1)?.[2]).toContain("Thread fast mode set: on");
+
+    await service.handleThreadCommand(worker, "fast", ["off"]);
+    expect(store.getWorkerByKey(worker.key)?.settings.fastMode).toBe(false);
+    expect(slack.postThreadReply.mock.calls.at(-1)?.[2]).toContain("Thread fast mode set: off");
+    store.close();
+  });
+
+  it("rejects fast-mode enablement outside gpt-5.4 and auto-disables it on model changes", async () => {
+    const { service, slack, store } = await createService();
+    const session = createDmSession(service);
+    const worker = createWorker(service, { settings: { model: null, effort: "high", fastMode: null } });
+
+    store.setTeamDefaults("T1", { model: "gpt-5.5", effort: "medium", fastMode: false });
+    expect(await service.handleDmCommand(session, "fast", ["on"])).toMatchObject({
+      response: expect.stringContaining("Fast mode is only available with gpt-5.4"),
+    });
+
+    await service.handleThreadCommand(worker, "fast", ["on"]);
+    expect(slack.postThreadReply.mock.calls.at(-1)?.[2]).toContain("Current effective model: gpt-5.5");
+
+    store.setTeamDefaults("T1", { model: "gpt-5.4", effort: "medium", fastMode: true });
+    await service.handleThreadCommand(worker, "model", ["gpt-5.5"]);
+    expect(store.getWorkerByKey(worker.key)?.settings).toMatchObject({
+      model: "gpt-5.5",
+      fastMode: false,
+    });
+    expect(slack.postThreadReply.mock.calls.at(-1)?.[2]).toContain("Thread fast mode disabled");
+
+    const modelResult = await service.handleDmCommand(session, "model", ["gpt-5.5"]);
+    expect(modelResult.response).toContain("Default fast mode disabled");
+    expect(store.getTeamDefaults("T1")).toMatchObject({ model: "gpt-5.5", fastMode: false });
     store.close();
   });
 
@@ -1761,8 +1842,9 @@ describe("service lifecycle decisions", () => {
       status: "blocked_running_turn",
       lastError: "waiting on prior turn",
       lastInboundMessageTs: "9.000",
+      settings: { model: "gpt-5.4", effort: "high", fastMode: true },
     });
-    store.setTeamDefaults("T1", { model: "gpt-5.5", effort: "medium" });
+    store.setTeamDefaults("T1", { model: "gpt-5.5", effort: "medium", fastMode: false });
     store.setPendingRestart({
       target: "both",
       teamId: "T1",
@@ -1776,7 +1858,10 @@ describe("service lifecycle decisions", () => {
     await service.handleThreadCommand(worker, "health", []);
 
     expect(slack.postThreadReply.mock.calls[0]?.[2]).toContain("effective_model: gpt-5.4 (thread override)");
+    expect(slack.postThreadReply.mock.calls[0]?.[2]).toContain("effective_fast_mode: on (thread override)");
+    expect(slack.postThreadReply.mock.calls[0]?.[2]).toContain("thread_fast_override: on");
     expect(slack.postThreadReply.mock.calls[0]?.[2]).toContain("global_default_model: gpt-5.5");
+    expect(slack.postThreadReply.mock.calls[0]?.[2]).toContain("global_default_fast_mode: off");
     expect(slack.postThreadReply.mock.calls[1]?.[2]).toContain("database_path:");
     expect(slack.postThreadReply.mock.calls[1]?.[2]).toContain("codex_thread_state: idle");
     expect(slack.postThreadReply.mock.calls[1]?.[2]).toContain("webhook_bind: 127.0.0.1:");
@@ -2272,7 +2357,7 @@ describe("service lifecycle decisions", () => {
       requestItemPath: null,
       ownerUserId: "U1",
       rootOwnerUserId: "U1",
-      settings: { model: null, effort: null },
+      settings: { model: null, effort: null, fastMode: null },
       identity: null,
       parentWorkerKey: null,
       source: { sourceKind: "manual", sourceSummary: "pending shell" },
@@ -2296,7 +2381,7 @@ describe("service lifecycle decisions", () => {
       requestItemPath: null,
       ownerUserId: "U1",
       rootOwnerUserId: "U1",
-      settings: { model: null, effort: null },
+      settings: { model: null, effort: null, fastMode: null },
       identity: null,
       parentWorkerKey: null,
       source: { sourceKind: "manual", sourceSummary: "failed shell" },
@@ -2978,6 +3063,7 @@ describe("service lifecycle decisions", () => {
   it("queues and delivers heartbeat wakes into an idle worker", async () => {
     const { service, codex, slack, store } = await createService();
     createWorker(service, { workstreamId: "T1:root" });
+    store.setTeamDefaults("T1", { model: "gpt-5.4", effort: "medium", fastMode: true });
     codex.reconcileThreadForSend.mockResolvedValue("idle");
     codex.startTurnWithResumeFallback.mockResolvedValue("turn-heartbeat");
 
@@ -3012,7 +3098,7 @@ describe("service lifecycle decisions", () => {
       expect.objectContaining({
         text: expect.stringContaining("[system wake event]"),
       }),
-      expect.any(Object),
+      { model: "gpt-5.4", effort: "high", fastMode: true },
       expect.any(Object),
     );
     expect(slack.postThreadReply).toHaveBeenCalledWith(
@@ -3076,6 +3162,7 @@ describe("service lifecycle decisions", () => {
   it("queues and delivers cron wakes into an idle worker", async () => {
     const { service, codex, store } = await createService();
     createWorker(service, { workstreamId: "T1:root" });
+    store.setTeamDefaults("T1", { model: "gpt-5.4", effort: "medium", fastMode: true });
     codex.reconcileThreadForSend.mockResolvedValue("idle");
     codex.startTurnWithResumeFallback.mockResolvedValue("turn-cron");
 
@@ -3108,7 +3195,7 @@ describe("service lifecycle decisions", () => {
       expect.objectContaining({
         text: expect.stringContaining("trigger: cron"),
       }),
-      expect.any(Object),
+      { model: "gpt-5.4", effort: "high", fastMode: true },
       expect.any(Object),
     );
     store.close();
@@ -3475,6 +3562,7 @@ describe("service lifecycle decisions", () => {
     service.runtimeStarted = true;
     service.scheduleRegistrationLoop = vi.fn();
     createWorker(service, { workstreamId: "T1:root", activeTurnId: "turn-stale", status: "running" });
+    store.setTeamDefaults("T1", { model: "gpt-5.4", effort: "medium", fastMode: true });
     const webhookSource = await createWebhookSource(service, { source: "linear" });
     codex.steerTurn.mockRejectedValue(new Error("no active turn to steer"));
     codex.reconcileThreadForSend.mockResolvedValue("idle");
@@ -3522,7 +3610,7 @@ describe("service lifecycle decisions", () => {
       expect.objectContaining({
         text: expect.stringContaining("fired_event: issue.updated"),
       }),
-      expect.any(Object),
+      { model: "gpt-5.4", effort: "high", fastMode: true },
       expect.any(Object),
     );
     expect(slack.postThreadReply).toHaveBeenCalledWith(
@@ -3594,6 +3682,7 @@ describe("service lifecycle decisions", () => {
     service.runtimeStarted = true;
     service.scheduleRegistrationLoop = vi.fn();
     createWorker(service, { workstreamId: "T1:root" });
+    store.setTeamDefaults("T1", { model: "gpt-5.4", effort: "medium", fastMode: true });
     const webhookSource = await createWebhookSource(service, { source: "stripe", routeToken: "route-stripe" });
     codex.createWorkerThread.mockResolvedValue({ threadId: "thread-webhook-spawn" });
     codex.startTurnWithResumeFallback.mockResolvedValue("turn-webhook-spawn");
@@ -3651,7 +3740,7 @@ describe("service lifecycle decisions", () => {
       expect.objectContaining({
         text: expect.stringContaining("fired_event: invoice.failed"),
       }),
-      expect.any(Object),
+      { model: "gpt-5.4", effort: "medium", fastMode: true },
       expect.any(Object),
     );
     store.close();

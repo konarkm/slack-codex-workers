@@ -16,6 +16,11 @@ describe("commands", () => {
       args: [],
       raw: ".status",
     });
+    expect(parseSlashCommand(".fast on")).toEqual({
+      name: "fast",
+      args: ["on"],
+      raw: ".fast on",
+    });
     expect(parseSlashCommand(".new-thread")).toEqual({
       name: "new-thread",
       args: [],
@@ -58,6 +63,7 @@ describe("commands", () => {
     expect(helpText("dm")).toContain(".new-thread");
     expect(helpText("dm")).toContain(".recover");
     expect(helpText("dm")).toContain(".stop");
+    expect(helpText("dm")).toContain(".fast [on|off|status]");
     expect(helpText("dm")).toContain(".workstream-create");
     expect(helpText("dm")).toContain("[channel=<name>]");
     expect(helpText("dm")).toContain(".workstream-archive");
@@ -70,6 +76,7 @@ describe("commands", () => {
     expect(helpText("thread")).toContain(".health");
     expect(helpText("thread")).toContain(".recover");
     expect(helpText("thread")).toContain(".stop");
+    expect(helpText("thread")).toContain(".fast [on|off|status]");
     expect(helpText("thread")).toContain(".workstream-create");
     expect(helpText("thread")).toContain("[channel=<name>]");
     expect(helpText("thread")).not.toContain(".workstream-archive");

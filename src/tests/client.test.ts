@@ -335,6 +335,72 @@ describe("codex client dynamic tool routing", () => {
     });
   });
 
+  it("forwards fast-mode service tier on thread create, fork, and turn start", async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce({ thread: { id: "thread-new", name: null } })
+      .mockResolvedValueOnce({ thread: { id: "thread-admin", name: null } })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ thread: { id: "thread-forked", name: null } })
+      .mockResolvedValueOnce({ turn: { id: "turn-1" } })
+      .mockResolvedValueOnce({ turn: { id: "turn-2" } });
+    const client = Object.create(CodexClient.prototype) as any;
+    client.rpc = { request };
+    client.activeTurns = new Map();
+
+    await client.createWorkerThread({ model: "gpt-5.4", effort: "high", fastMode: true });
+    await client.createAdminThread({ model: "gpt-5.4", effort: "medium", fastMode: true });
+    await client.forkWorkerThread("thread-parent", { model: "gpt-5.4", effort: "medium", fastMode: false });
+    await client.startTurn(
+      "thread-new",
+      { text: "hi", imagePaths: [] },
+      { model: "gpt-5.4", effort: "low", fastMode: false },
+      {
+        onTurnStarted: vi.fn(),
+        onAgentDelta: vi.fn(),
+        onAgentMessage: vi.fn(),
+        onWorklogItem: vi.fn(),
+        onCompleted: vi.fn(),
+      },
+    );
+    await client.startTurn(
+      "thread-new",
+      { text: "go fast", imagePaths: [] },
+      { model: "gpt-5.4", effort: "low", fastMode: true },
+      {
+        onTurnStarted: vi.fn(),
+        onAgentDelta: vi.fn(),
+        onAgentMessage: vi.fn(),
+        onWorklogItem: vi.fn(),
+        onCompleted: vi.fn(),
+      },
+    );
+
+    expect(request.mock.calls[0]).toEqual([
+      "thread/start",
+      expect.objectContaining({ model: "gpt-5.4", serviceTier: "fast" }),
+    ]);
+    expect(request.mock.calls[1]).toEqual([
+      "thread/start",
+      expect.objectContaining({ model: "gpt-5.4", serviceTier: "fast" }),
+    ]);
+    expect(request.mock.calls[2]).toEqual([
+      "thread/resume",
+      { threadId: "thread-parent", persistExtendedHistory: true },
+    ]);
+    expect(request.mock.calls[3]).toEqual([
+      "thread/fork",
+      expect.objectContaining({ threadId: "thread-parent", serviceTier: null }),
+    ]);
+    expect(request.mock.calls[4]).toEqual([
+      "turn/start",
+      expect.objectContaining({ threadId: "thread-new", serviceTier: null }),
+    ]);
+    expect(request.mock.calls[5]).toEqual([
+      "turn/start",
+      expect.objectContaining({ threadId: "thread-new", serviceTier: "fast" }),
+    ]);
+  });
+
   it("maps successful contextCompaction notifications to started/completed compaction events", async () => {
     const compactionHandler = vi.fn().mockResolvedValue(undefined);
     const client = Object.create(CodexClient.prototype) as any;

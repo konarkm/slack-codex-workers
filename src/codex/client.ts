@@ -194,6 +194,7 @@ export class CodexClient {
   async createWorkerThread(settings: RuntimeSettings): Promise<{ threadId: string; threadName: string | null }> {
     const raw = await this.rpc.request("thread/start", {
       model: settings.model ?? undefined,
+      serviceTier: getServiceTier(settings),
       approvalPolicy: "never",
       sandbox: "danger-full-access",
       persistExtendedHistory: true,
@@ -207,6 +208,7 @@ export class CodexClient {
   async createAdminThread(settings: RuntimeSettings): Promise<{ threadId: string; threadName: string | null }> {
     const raw = await this.rpc.request("thread/start", {
       model: settings.model ?? undefined,
+      serviceTier: getServiceTier(settings),
       approvalPolicy: "never",
       sandbox: "danger-full-access",
       persistExtendedHistory: true,
@@ -222,6 +224,7 @@ export class CodexClient {
     const raw = await this.rpc.request("thread/fork", {
       threadId: parentThreadId,
       model: settings.model ?? undefined,
+      serviceTier: getServiceTier(settings),
       persistExtendedHistory: true,
     });
     const parsed = threadStartSchema.parse(raw);
@@ -236,6 +239,7 @@ export class CodexClient {
       sandboxPolicy: { type: "dangerFullAccess" },
       model: settings.model ?? undefined,
       effort: settings.effort ?? undefined,
+      serviceTier: getServiceTier(settings),
     });
     const parsed = turnStartSchema.parse(raw);
     this.activeTurns.set(parsed.turn.id, {
@@ -685,6 +689,10 @@ export class CodexClient {
 
     await this.rpc.respond(id, { contentItems: [{ type: "inputText", text: `Unsupported dynamic tool: ${parsed.data.tool}` }], success: false });
   }
+}
+
+function getServiceTier(settings: RuntimeSettings): "fast" | null {
+  return settings.fastMode ? "fast" : null;
 }
 
 function buildTurnInput(input: TurnInput): Array<{ type: string; [key: string]: unknown }> {

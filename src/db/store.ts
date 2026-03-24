@@ -32,16 +32,17 @@ function nowIso(): string {
 
 function parseSettings(value: string | null | undefined): RuntimeSettings {
   if (!value) {
-    return { model: null, effort: null };
+    return { model: null, effort: null, fastMode: null };
   }
   try {
     const parsed = JSON.parse(value) as Partial<RuntimeSettings>;
     return {
       model: typeof parsed.model === "string" ? parsed.model : null,
       effort: typeof parsed.effort === "string" ? parsed.effort as RuntimeSettings["effort"] : null,
+      fastMode: typeof parsed.fastMode === "boolean" ? parsed.fastMode : null,
     };
   } catch {
-    return { model: null, effort: null };
+    return { model: null, effort: null, fastMode: null };
   }
 }
 
@@ -174,6 +175,13 @@ function parseStringMap(value: string | null | undefined): Record<string, string
   } catch {
     return null;
   }
+}
+
+function normalizeTeamDefaults(defaults: TeamDefaults): TeamDefaults {
+  if (defaults.model !== "gpt-5.4" && defaults.fastMode) {
+    return { ...defaults, fastMode: false };
+  }
+  return defaults;
 }
 
 export class Store {
@@ -666,16 +674,29 @@ export class Store {
   getTeamDefaults(teamId: string): TeamDefaults {
     const row = this.db.prepare("SELECT value FROM metadata WHERE key = ?").get(`defaults:${teamId}`) as { value?: string } | undefined;
     if (!row?.value) {
-      return { ...DEFAULT_RUNTIME_SETTINGS };
+      return normalizeTeamDefaults({
+        model: DEFAULT_RUNTIME_SETTINGS.model,
+        effort: DEFAULT_RUNTIME_SETTINGS.effort,
+        fastMode: DEFAULT_RUNTIME_SETTINGS.fastMode ?? false,
+      });
     }
     try {
       const parsed = JSON.parse(row.value) as Partial<TeamDefaults>;
-      return {
+      const defaults = normalizeTeamDefaults({
         model: typeof parsed.model === "string" ? parsed.model : DEFAULT_RUNTIME_SETTINGS.model,
         effort: typeof parsed.effort === "string" ? parsed.effort as TeamDefaults["effort"] : DEFAULT_RUNTIME_SETTINGS.effort,
-      };
+        fastMode: typeof parsed.fastMode === "boolean" ? parsed.fastMode : (DEFAULT_RUNTIME_SETTINGS.fastMode ?? false),
+      });
+      if (defaults.fastMode !== parsed.fastMode) {
+        this.setTeamDefaults(teamId, defaults);
+      }
+      return defaults;
     } catch {
-      return { ...DEFAULT_RUNTIME_SETTINGS };
+      return normalizeTeamDefaults({
+        model: DEFAULT_RUNTIME_SETTINGS.model,
+        effort: DEFAULT_RUNTIME_SETTINGS.effort,
+        fastMode: DEFAULT_RUNTIME_SETTINGS.fastMode ?? false,
+      });
     }
   }
 

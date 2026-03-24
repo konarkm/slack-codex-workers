@@ -87,6 +87,7 @@ const BLOCKED_RUNNING_TURN_POLL_WINDOW_MS = 30_000;
 const REGISTRATION_POLL_INTERVAL_MS = 5_000;
 const WAKE_RETRY_MAX_ATTEMPTS = 3;
 const COMPACTION_STALE_TIMEOUT_MS = 10 * 60 * 1000;
+const FAST_MODE_MODEL = "gpt-5.4";
 const webhookShutdownErrorCode = "WEBHOOK_SHUTDOWN";
 const STATUS_REACTIONS = {
   seen: "eyes",
@@ -466,7 +467,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       turnInput,
       rootOwnerUserId: context.userId,
       ownerUserId: context.userId,
-      runtimeSettings: { model: null, effort: null },
+      runtimeSettings: { model: null, effort: null, fastMode: null },
       source: {
         sourceKind: "slack-channel-root",
         sourceSummary: `${context.username} started a new request in #${context.channelName ?? context.channelId}`,
@@ -574,7 +575,7 @@ export class SlackCodexWorkersService extends EventEmitter {
         currentAgentSlackTs: null,
         currentAgentItemId: null,
         currentWorklogSlackTs: null,
-        settings: { model: null, effort: null },
+        settings: { model: null, effort: null, fastMode: null },
         lastError: null,
         lastInboundMessageTs: null,
         pendingRequest: null,
@@ -813,15 +814,16 @@ export class SlackCodexWorkersService extends EventEmitter {
     });
     this.assertNotStopping();
 
+    const resolvedRuntimeSettings = resolveRuntimeSettings(input.runtimeSettings, this.store.getTeamDefaults(input.workstream.teamId));
     let threadId: string;
     try {
       if (shell.appThreadId) {
         threadId = shell.appThreadId;
       } else if (input.mode === "fork" && input.parentWorkerKey) {
         const parent = this.requireWorker(input.parentWorkerKey);
-        threadId = (await this.codex.forkWorkerThread(parent.appThreadId, input.runtimeSettings)).threadId;
+        threadId = (await this.codex.forkWorkerThread(parent.appThreadId, resolvedRuntimeSettings)).threadId;
       } else {
-        threadId = (await this.codex.createWorkerThread(input.runtimeSettings)).threadId;
+        threadId = (await this.codex.createWorkerThread(resolvedRuntimeSettings)).threadId;
       }
     } catch (error) {
       if (input.surfaceFailuresInThread) {
@@ -1337,9 +1339,21 @@ export class SlackCodexWorkersService extends EventEmitter {
           `Global default model: ${defaults.model ?? "(unset)"}`,
         ].join("\n");
       } else {
-        worker.settings.model = args.join(" ");
+        const nextModel = args.join(" ");
+        const nextSettings: RuntimeSettings = { ...worker.settings, model: nextModel };
+        let fastDisabled = false;
+        if (!supportsFastMode(nextModel) && (nextSettings.fastMode ?? defaults.fastMode)) {
+          nextSettings.fastMode = false;
+          fastDisabled = true;
+        }
+        worker.settings = nextSettings;
         this.store.updateWorkerState(worker.key, { settings: worker.settings });
-        response = `Thread model set: ${worker.settings.model}`;
+        response = fastDisabled
+          ? [
+              `Thread model set: ${worker.settings.model}`,
+              `Thread fast mode disabled: fast mode is only available with ${FAST_MODE_MODEL}.`,
+            ].join("\n")
+          : `Thread model set: ${worker.settings.model}`;
       }
     } else if (name === "effort") {
       const defaults = this.store.getTeamDefaults(worker.teamId);
@@ -1359,6 +1373,26 @@ export class SlackCodexWorkersService extends EventEmitter {
           this.store.updateWorkerState(worker.key, { settings: worker.settings });
           response = `Thread effort set: ${effort}`;
         }
+      }
+    } else if (name === "fast") {
+      const defaults = this.store.getTeamDefaults(worker.teamId);
+      const effective = resolveRuntimeSettings(worker.settings, defaults);
+      const action = (args[0] ?? "status").trim().toLowerCase();
+      if (args.length > 1 || !["on", "off", "status"].includes(action)) {
+        response = "Usage: .fast <on|off|status> (or /fast ...)";
+      } else if (action === "status") {
+        response = [
+          `Effective fast mode: ${describeEffectiveFastMode(worker.settings.fastMode, defaults.fastMode, effective.model)}`,
+          `Thread fast override: ${describeFastModeOverride(worker.settings.fastMode)}`,
+          `Global default fast mode: ${formatFastMode(defaults.fastMode)}`,
+          `Fast mode is only available with ${FAST_MODE_MODEL}.`,
+        ].join("\n");
+      } else if (action === "on" && !supportsFastMode(effective.model)) {
+        response = `Fast mode is only available with ${FAST_MODE_MODEL}. Current effective model: ${effective.model ?? "(unset)"}`;
+      } else {
+        worker.settings.fastMode = action === "on";
+        this.store.updateWorkerState(worker.key, { settings: worker.settings });
+        response = `Thread fast mode set: ${formatFastMode(worker.settings.fastMode)}`;
       }
     } else if (name === "compact") {
       if (worker.activeTurnId || worker.pendingRequest) {
@@ -1430,8 +1464,13 @@ export class SlackCodexWorkersService extends EventEmitter {
     if (name === "model") {
       if (args.length === 0) return { response: `Global default model: ${defaults.model ?? "(unset)"}` };
       defaults.model = args.join(" ");
+      let response = `Default model set: ${defaults.model}`;
+      if (!supportsFastMode(defaults.model) && defaults.fastMode) {
+        defaults.fastMode = false;
+        response += `\nDefault fast mode disabled: fast mode is only available with ${FAST_MODE_MODEL}.`;
+      }
       this.store.setTeamDefaults(session.teamId, defaults);
-      return { response: `Default model set: ${defaults.model}` };
+      return { response };
     }
     if (name === "effort") {
       if (args.length === 0) {
@@ -1442,6 +1481,28 @@ export class SlackCodexWorkersService extends EventEmitter {
       defaults.effort = effort;
       this.store.setTeamDefaults(session.teamId, defaults);
       return { response: `Default effort set: ${effort}` };
+    }
+    if (name === "fast") {
+      const action = (args[0] ?? "status").trim().toLowerCase();
+      if (args.length > 1 || !["on", "off", "status"].includes(action)) {
+        return { response: "Usage: .fast <on|off|status> (or /fast ...)" };
+      }
+      if (action === "status") {
+        return {
+          response: [
+            `Global default fast mode: ${formatFastMode(defaults.fastMode)}`,
+            `Fast mode is only available with ${FAST_MODE_MODEL}.`,
+          ].join("\n"),
+        };
+      }
+      if (action === "on" && !supportsFastMode(defaults.model)) {
+        return {
+          response: `Fast mode is only available with ${FAST_MODE_MODEL}. Current global default model: ${defaults.model ?? "(unset)"}`,
+        };
+      }
+      defaults.fastMode = action === "on";
+      this.store.setTeamDefaults(session.teamId, defaults);
+      return { response: `Default fast mode set: ${formatFastMode(defaults.fastMode)}` };
     }
     if (name === "compact") {
       if (!currentSession?.appThreadId) return { response: "No DM admin thread to compact." };
@@ -1563,10 +1624,13 @@ export class SlackCodexWorkersService extends EventEmitter {
       `active_turn: ${current.activeTurnId ?? "(none)"}`,
       `effective_model: ${describeEffectiveSetting(current.settings.model, defaults.model)}`,
       `effective_effort: ${describeEffectiveSetting(current.settings.effort, defaults.effort)}`,
+      `effective_fast_mode: ${describeEffectiveFastMode(current.settings.fastMode, defaults.fastMode, resolveRuntimeSettings(current.settings, defaults).model)}`,
       `thread_model_override: ${current.settings.model ?? "(none)"}`,
       `thread_effort_override: ${current.settings.effort ?? "(none)"}`,
+      `thread_fast_override: ${describeFastModeOverride(current.settings.fastMode)}`,
       `global_default_model: ${defaults.model ?? "(unset)"}`,
       `global_default_effort: ${defaults.effort ?? "(unset)"}`,
+      `global_default_fast_mode: ${formatFastMode(defaults.fastMode)}`,
       `workspace_timezone: ${this.config.workspaceTimezone}`,
       `pending_request: ${current.pendingRequest ? current.pendingRequest.kind : "(none)"}`,
       `last_inbound_ts: ${current.lastInboundMessageTs ?? "(none)"}`,
@@ -1602,6 +1666,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       `dm_active_turn: ${current.activeTurnId ?? "(none)"}`,
       `global_default_model: ${defaults.model ?? "(unset)"}`,
       `global_default_effort: ${defaults.effort ?? "(unset)"}`,
+      `global_default_fast_mode: ${formatFastMode(defaults.fastMode)}`,
       `workspace_timezone: ${this.config.workspaceTimezone}`,
       `workers_active: ${this.store.listWorkersWithActiveTurns().length}`,
       `workers_blocked_or_recovery_required: ${blockedWorkers}`,
@@ -2576,7 +2641,7 @@ export class SlackCodexWorkersService extends EventEmitter {
             turnInput: buildWakeTurnInput(registration, wake),
             rootOwnerUserId: registration.rootOwnerUserId,
             ownerUserId: registration.ownerUserId,
-            runtimeSettings: { model: null, effort: null },
+            runtimeSettings: { model: null, effort: null, fastMode: null },
             source: {
               sourceKind: `${registration.trigger.kind}-registration`,
               sourceSummary: wake.summary,
@@ -2949,7 +3014,7 @@ export class SlackCodexWorkersService extends EventEmitter {
     this.clearBlockedTurnPoll(this.getWorkerPollKey(worker.key));
     this.startingWorkerTurns.delete(worker.key);
     this.renderState.delete(`worker:${worker.key}`);
-    const created = await this.codex.createWorkerThread(worker.settings);
+    const created = await this.codex.createWorkerThread(resolveRuntimeSettings(worker.settings, this.store.getTeamDefaults(worker.teamId)));
     const recovered = this.store.upsertWorker({
       ...worker,
       appThreadId: created.threadId,
@@ -3315,7 +3380,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       currentAgentSlackTs: null,
       currentAgentItemId: null,
       currentWorklogSlackTs: null,
-      settings: { model: null, effort: null },
+      settings: { model: null, effort: null, fastMode: null },
       lastError: null,
       lastInboundMessageTs: null,
       pendingRequest: null,
@@ -3953,10 +4018,38 @@ function normalizeWorkstreamReference(input: string): string | null {
 
 function resolveRuntimeSettings(
   threadSettings: RuntimeSettings,
-  defaults: RuntimeSettings,
+  defaults: { model: string | null; effort: RuntimeSettings["effort"]; fastMode: boolean },
 ): RuntimeSettings {
+  const model = threadSettings.model ?? defaults.model;
+  const requestedFastMode = threadSettings.fastMode ?? defaults.fastMode;
   return {
-    model: threadSettings.model ?? defaults.model,
+    model,
     effort: threadSettings.effort ?? defaults.effort,
+    fastMode: supportsFastMode(model) ? requestedFastMode : false,
   };
+}
+
+function supportsFastMode(model: string | null): boolean {
+  return model === FAST_MODE_MODEL;
+}
+
+function formatFastMode(value: boolean): string {
+  return value ? "on" : "off";
+}
+
+function describeFastModeOverride(value: boolean | null): string {
+  if (value === null) return "(none)";
+  return formatFastMode(value);
+}
+
+function describeEffectiveFastMode(
+  threadOverride: boolean | null,
+  defaultFastMode: boolean,
+  effectiveModel: string | null,
+): string {
+  if (!supportsFastMode(effectiveModel)) {
+    return `off (${effectiveModel ?? "(unset)"} does not support fast mode)`;
+  }
+  const effectiveFastMode = threadOverride ?? defaultFastMode;
+  return `${formatFastMode(effectiveFastMode)} (${threadOverride === null ? "global default" : "thread override"})`;
 }

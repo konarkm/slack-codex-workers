@@ -25,6 +25,7 @@ export type ReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh";
 export interface RuntimeSettings {
   model: string | null;
   effort: ReasoningEffort | null;
+  fastMode: boolean | null;
 }
 
 export interface WorkerIdentity {
@@ -284,6 +285,7 @@ export interface DmSessionRecord {
 export interface TeamDefaults {
   model: string | null;
   effort: ReasoningEffort | null;
+  fastMode: boolean;
 }
 
 export type RestartTarget = "codex" | "bridge" | "both";

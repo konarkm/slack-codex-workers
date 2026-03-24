@@ -191,5 +191,6 @@ export const DEFAULT_MODEL = "gpt-5.4";
 export const DEFAULT_RUNTIME_SETTINGS: RuntimeSettings = {
   model: DEFAULT_MODEL,
   effort: "medium",
+  fastMode: false,
 };
 export const EXIT_CODE_RESTART = 42;
