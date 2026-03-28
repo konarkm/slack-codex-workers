@@ -189,8 +189,8 @@ Current product direction:
 
 - worker turns use explicit turn-scoped notification control through `set_notification(enabled: true|false)`
 - worker final replies stay visible in Slack even when notification is off; the notification control only gates whether the final reply mentions the user
-- worker turns default to no notification unless they opt in for that turn
-- scheduled cron/webhook/heartbeat work should therefore avoid notifying by default unless the worker explicitly decides to notify
+- worker turns default to notification on unless they explicitly opt out for that turn
+- scheduled cron/webhook/heartbeat work should lean toward opting out only while the run is still progressing independently without user-relevant outcomes
 
 Still open:
 
