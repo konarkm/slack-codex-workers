@@ -59,8 +59,9 @@ describe("dynamic tools", () => {
 
   it("describes spawned child work as visibly including the delegated body", () => {
     const tool = workerDynamicTools.find((entry) => entry.name === "slack_spawn_worker");
+    expect(tool?.description).toContain("child-mode title tag");
     expect(tool?.description).toContain("full initialUserMessage body");
-    expect(tool?.description).toContain("stays visible in Slack");
+    expect(tool?.description).toContain("prepends standard child context");
   });
 
   it("rejects legacy channel-targeted spawn args", () => {

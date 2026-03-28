@@ -1838,14 +1838,20 @@ export class SlackCodexWorkersService extends EventEmitter {
     }
 
     const childIdentity = assignWorkerIdentity(this.store.listWorkers());
+    const taggedTitle = buildSpawnWorkerTitle(args.title, args.mode);
+    const childBody = buildSpawnWorkerBody(
+      args.initialUserMessage,
+      args.mode,
+      formatWorkstreamAddress(parentWorkstream) + `/${parent.key}`,
+    );
     try {
       await this.spawnWorkerIntoWorkstream({
         workstream: targetWorkstream,
         channelId: targetWorkstream.channelId,
-        title: args.title,
-        visibleRootText: buildSpawnWorkerRootText(args.title, args.initialUserMessage),
-        itemBody: args.initialUserMessage,
-        turnInput: { text: args.initialUserMessage, imagePaths: [] },
+        title: taggedTitle,
+        visibleRootText: buildSpawnWorkerRootText(taggedTitle, childBody),
+        itemBody: childBody,
+        turnInput: { text: childBody, imagePaths: [] },
         rootOwnerUserId: parent.rootOwnerUserId,
         ownerUserId: parent.ownerUserId,
         runtimeSettings: parent.settings,
@@ -3956,6 +3962,25 @@ function buildScheduledSpawnTitle(registration: RegistrationRecord): string {
     return `Scheduled work: ${registration.description.trim()}`;
   }
   return `Scheduled work (${registration.trigger.kind})`;
+}
+
+function buildSpawnWorkerTitle(title: string, mode: "fresh" | "fork"): string {
+  const normalizedTitle = title.trim();
+  const tag = mode === "fork" ? "[fork child]" : "[fresh child]";
+  return normalizedTitle ? `${tag} ${normalizedTitle}` : tag;
+}
+
+function buildSpawnWorkerBody(initialUserMessage: string, mode: "fresh" | "fork", source: string): string {
+  const normalizedBody = initialUserMessage.trim();
+  const context = mode === "fork" ? "forked" : "fresh";
+  const banner = [
+    "Spawned child worker",
+    `context: ${context}`,
+    `source: ${source}`,
+  ].join("\n");
+  // If post-compaction re-readability becomes a real need, evaluate a dedicated
+  // read-only worker-context tool. Do not add that tool without explicit approval.
+  return normalizedBody ? `${banner}\n\n${normalizedBody}` : banner;
 }
 
 function buildSpawnWorkerRootText(title: string, initialUserMessage: string): string {

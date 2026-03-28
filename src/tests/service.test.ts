@@ -665,18 +665,66 @@ describe("service lifecycle decisions", () => {
     expect(result).toContain("workstream customers/ef");
     expect(slack.postTopLevelMessage).toHaveBeenCalledWith(
       "C-ef",
-      "Follow up\n\nDo it here",
+      "[fresh child] Follow up\n\nSpawned child worker\ncontext: fresh\nsource: customers/ef/T1:C-ef:2.000\n\nDo it here",
       expect.objectContaining({ username: expect.any(String) }),
+    );
+    expect(codex.startTurnWithResumeFallback).toHaveBeenCalledWith(
+      "thread-child-current",
+      {
+        text: "Spawned child worker\ncontext: fresh\nsource: customers/ef/T1:C-ef:2.000\n\nDo it here",
+        imagePaths: [],
+      },
+      { model: "gpt-5.4", effort: "high", fastMode: true },
+      expect.any(Object),
     );
     expect(codex.createWorkerThread).toHaveBeenCalledWith({
       model: "gpt-5.4",
       effort: "high",
       fastMode: true,
     });
-    expect(store.getWorkerByAppThreadId("thread-child-current")).toMatchObject({
+    const child = store.getWorkerByAppThreadId("thread-child-current");
+    expect(child).toMatchObject({
       channelId: "C-ef",
       workstreamId: "T1:customers/ef",
+      parentWorkerKey: "T1:C-ef:2.000",
     });
+    const requestItem = await fs.readFile(child!.requestItemPath!, "utf8");
+    expect(requestItem).toContain("# [fresh child] Follow up");
+    expect(requestItem).toContain("Spawned child worker\ncontext: fresh\nsource: customers/ef/T1:C-ef:2.000\n\nDo it here");
+    store.close();
+  });
+
+  it("tags forked child spawns and injects forked context", async () => {
+    const { service, slack, codex, store } = await createService();
+    createWorker(service);
+    codex.forkWorkerThread.mockResolvedValue({ threadId: "thread-child-fork" });
+    codex.startTurnWithResumeFallback.mockResolvedValue("turn-child-fork");
+
+    const result = await service.handleSpawnWorkerTool(
+      { workstream: "root", title: "Follow up", initialUserMessage: "Use the inherited context", mode: "fork" },
+      { threadId: "thread-1", turnId: "turn-1", callId: "call-fork" },
+    );
+
+    expect(result).toContain("workstream root");
+    expect(slack.postTopLevelMessage).toHaveBeenCalledWith(
+      "C1",
+      "[fork child] Follow up\n\nSpawned child worker\ncontext: forked\nsource: root/T1:C1:1.000\n\nUse the inherited context",
+      expect.objectContaining({ username: expect.any(String) }),
+    );
+    expect(codex.forkWorkerThread).toHaveBeenCalledWith("thread-1", {
+      model: "gpt-5.4",
+      effort: "high",
+      fastMode: false,
+    });
+    expect(codex.startTurnWithResumeFallback).toHaveBeenCalledWith(
+      "thread-child-fork",
+      {
+        text: "Spawned child worker\ncontext: forked\nsource: root/T1:C1:1.000\n\nUse the inherited context",
+        imagePaths: [],
+      },
+      { model: "gpt-5.4", effort: "high", fastMode: false },
+      expect.any(Object),
+    );
     store.close();
   });
 
