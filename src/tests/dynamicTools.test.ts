@@ -210,19 +210,23 @@ describe("dynamic tools", () => {
     expect(workerTool?.description).toContain("action='get' returns the current thread notification status");
     expect(workerTool?.description).toContain("New threads default to notification on");
     expect(workerTool?.description).toContain("enabled=false means keep final replies visible in the Slack thread without the mention");
-    expect(workerTool?.inputSchema).toMatchObject({
+    expect(workerTool?.inputSchema).toEqual({
       oneOf: [
-        expect.objectContaining({
+        {
+          type: "object",
+          additionalProperties: false,
           required: ["action"],
           properties: { action: { const: "get" } },
-        }),
-        expect.objectContaining({
+        },
+        {
+          type: "object",
+          additionalProperties: false,
           required: ["action", "enabled"],
           properties: {
             action: { const: "set" },
             enabled: { type: "boolean" },
           },
-        }),
+        },
       ],
     });
     expect(adminNames).not.toContain(slackSetNotificationToolName);

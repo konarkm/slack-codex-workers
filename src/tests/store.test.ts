@@ -255,6 +255,130 @@ describe("store", () => {
     store.close();
   });
 
+  it("repairs legacy active opt-outs once when the thread notification column already exists", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "slack-codex-workers-store-legacy-repair-"));
+    tempDirs.push(dir);
+    const databasePath = path.join(dir, "legacy-repair.db");
+    const legacyDb = new Database(databasePath);
+    legacyDb.exec(`
+      CREATE TABLE workers (
+        key TEXT PRIMARY KEY,
+        team_id TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
+        root_ts TEXT NOT NULL,
+        workstream_id TEXT,
+        app_thread_id TEXT NOT NULL,
+        active_turn_id TEXT,
+        owner_user_id TEXT NOT NULL,
+        root_owner_user_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        current_agent_slack_ts TEXT,
+        current_agent_item_id TEXT,
+        current_worklog_slack_ts TEXT,
+        settings_json TEXT NOT NULL,
+        identity_json TEXT,
+        parent_worker_key TEXT,
+        request_item_id TEXT,
+        request_item_path TEXT,
+        terminal_response_item_id TEXT,
+        thread_notification_enabled INTEGER NOT NULL DEFAULT 1,
+        turn_notification_turn_id TEXT,
+        turn_notification_enabled INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        last_inbound_message_ts TEXT,
+        pending_request_json TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(team_id, channel_id, root_ts)
+      );
+    `);
+    const insert = legacyDb.prepare(`
+      INSERT INTO workers (
+        key, team_id, channel_id, root_ts, workstream_id, app_thread_id, active_turn_id, owner_user_id, root_owner_user_id,
+        status, current_agent_slack_ts, current_agent_item_id, current_worklog_slack_ts, settings_json, identity_json,
+        parent_worker_key, request_item_id, request_item_path, terminal_response_item_id, thread_notification_enabled,
+        turn_notification_turn_id, turn_notification_enabled, last_error, last_inbound_message_ts, pending_request_json,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    insert.run(
+      "worker-repair",
+      "T1",
+      "C1",
+      "1.000",
+      null,
+      "thread-1",
+      "turn-1",
+      "U1",
+      "U1",
+      "running",
+      null,
+      null,
+      null,
+      JSON.stringify({ model: "gpt-5.4", effort: "high", fastMode: false }),
+      null,
+      null,
+      null,
+      null,
+      null,
+      1,
+      "turn-1",
+      0,
+      null,
+      null,
+      null,
+      "2026-03-28T00:00:00.000Z",
+      "2026-03-28T00:00:00.000Z",
+    );
+    insert.run(
+      "worker-mismatch",
+      "T1",
+      "C1",
+      "2.000",
+      null,
+      "thread-2",
+      "turn-live",
+      "U1",
+      "U1",
+      "running",
+      null,
+      null,
+      null,
+      JSON.stringify({ model: "gpt-5.4", effort: "high", fastMode: false }),
+      null,
+      null,
+      null,
+      null,
+      null,
+      1,
+      "turn-stale",
+      0,
+      null,
+      null,
+      null,
+      "2026-03-28T00:00:00.000Z",
+      "2026-03-28T00:00:00.000Z",
+    );
+    legacyDb.close();
+
+    const store = new Store(databasePath);
+    expect(store.getWorkerByKey("worker-repair")?.threadNotificationEnabled).toBe(false);
+    expect(store.getWorkerByKey("worker-mismatch")?.threadNotificationEnabled).toBe(true);
+    store.close();
+
+    const migratedDb = new Database(databasePath);
+    const repairMarker = migratedDb
+      .prepare("SELECT value FROM metadata WHERE key = ?")
+      .get("workers:thread_notification_legacy_turn_repair_v1") as { value?: string } | undefined;
+    expect(repairMarker?.value).toBe("true");
+    migratedDb.prepare("UPDATE workers SET thread_notification_enabled = 1 WHERE key = ?").run("worker-repair");
+    migratedDb.close();
+
+    const reopenedStore = new Store(databasePath);
+    expect(reopenedStore.getWorkerByKey("worker-repair")?.threadNotificationEnabled).toBe(true);
+    reopenedStore.close();
+  });
+
   it("stores team fast-mode defaults", async () => {
     const { store } = await createStore();
     expect(store.getTeamDefaults("T1")).toMatchObject({

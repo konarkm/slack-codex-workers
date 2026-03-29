@@ -525,6 +525,7 @@ describe("service lifecycle decisions", () => {
       rootTs: "2.000",
       activeTurnId: "turn-stale",
       status: "running",
+      threadNotificationEnabled: false,
     });
     codex.reconcileThreadForSend.mockResolvedValue("idle");
     slack.postThreadReply.mockRejectedValueOnce(new Error("cannot_reply_to_message"));
@@ -534,7 +535,7 @@ describe("service lifecycle decisions", () => {
     const updated = store.getWorkerByKey(worker.key);
     expect(updated?.status).toBe("idle");
     expect(updated?.activeTurnId).toBeNull();
-    expect(updated?.threadNotificationEnabled).toBe(true);
+    expect(updated?.threadNotificationEnabled).toBe(false);
     expect(updated?.lastError).toContain("Recovered stale active turn after runtime startup.");
   });
 
@@ -545,6 +546,7 @@ describe("service lifecycle decisions", () => {
       rootTs: "2.000",
       activeTurnId: "turn-stale",
       status: "running",
+      threadNotificationEnabled: false,
     });
     codex.reconcileThreadForSend.mockResolvedValue("idle");
     slack.postThreadReply.mockRejectedValueOnce(new Error("cannot_reply_to_message"));
@@ -554,7 +556,7 @@ describe("service lifecycle decisions", () => {
     const updated = store.getWorkerByKey("T1:C1:join-root");
     expect(updated?.status).toBe("idle");
     expect(updated?.activeTurnId).toBeNull();
-    expect(updated?.threadNotificationEnabled).toBe(true);
+    expect(updated?.threadNotificationEnabled).toBe(false);
     expect(updated?.lastError).toContain("Recovered stale active turn after runtime startup.");
     expect(service.runtimeStarted).toBe(true);
   });
@@ -3565,7 +3567,12 @@ describe("service lifecycle decisions", () => {
     const { service, codex, store } = await createService();
     service.runtimeStarted = true;
     service.scheduleRegistrationLoop = vi.fn();
-    createWorker(service, { workstreamId: "T1:root", activeTurnId: "turn-active", status: "running" });
+    createWorker(service, {
+      workstreamId: "T1:root",
+      activeTurnId: "turn-active",
+      status: "running",
+      threadNotificationEnabled: false,
+    });
     const webhookSource = await createWebhookSource(service, { source: "linear" });
     codex.steerTurn.mockRejectedValue(new Error("no thread found"));
 
@@ -3608,7 +3615,7 @@ describe("service lifecycle decisions", () => {
 
     expect(store.getWorkerByKey("T1:C1:1.000")).toMatchObject({
       status: "recovery_required",
-      threadNotificationEnabled: true,
+      threadNotificationEnabled: false,
       lastError: expect.stringContaining("Backing Codex thread is missing"),
     });
     expect(store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000")[0]).toMatchObject({
