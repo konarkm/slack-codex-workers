@@ -406,7 +406,10 @@ export class Store {
     this.ensureColumn("workers", "request_item_id", "TEXT");
     this.ensureColumn("workers", "request_item_path", "TEXT");
     this.ensureColumn("workers", "terminal_response_item_id", "TEXT");
-    this.ensureColumn("workers", "thread_notification_enabled", "INTEGER NOT NULL DEFAULT 1");
+    const addedThreadNotificationColumn = this.ensureColumn("workers", "thread_notification_enabled", "INTEGER NOT NULL DEFAULT 1");
+    if (addedThreadNotificationColumn) {
+      this.backfillThreadNotificationStateFromLegacyTurnFields();
+    }
     this.ensureColumn("workstreams", "archived_at", "TEXT");
     this.ensureColumn("registrations", "owner_user_id", "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn("registrations", "root_owner_user_id", "TEXT NOT NULL DEFAULT ''");
@@ -466,12 +469,30 @@ export class Store {
     `);
   }
 
-  private ensureColumn(table: string, column: string, definition: string): void {
+  private ensureColumn(table: string, column: string, definition: string): boolean {
     const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name?: string }>;
     const hasColumn = columns.some((entry) => entry.name === column);
     if (!hasColumn) {
       this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+      return true;
     }
+    return false;
+  }
+
+  private backfillThreadNotificationStateFromLegacyTurnFields(): void {
+    const columns = this.db.prepare("PRAGMA table_info(workers)").all() as Array<{ name?: string }>;
+    const hasActiveTurnId = columns.some((entry) => entry.name === "active_turn_id");
+    const hasLegacyTurnNotificationTurnId = columns.some((entry) => entry.name === "turn_notification_turn_id");
+    const hasLegacyTurnNotificationEnabled = columns.some((entry) => entry.name === "turn_notification_enabled");
+    if (!hasActiveTurnId || !hasLegacyTurnNotificationTurnId || !hasLegacyTurnNotificationEnabled) {
+      return;
+    }
+    this.db.exec(`
+      UPDATE workers
+      SET thread_notification_enabled = turn_notification_enabled
+      WHERE active_turn_id IS NOT NULL
+        AND turn_notification_turn_id = active_turn_id
+    `);
   }
 
   getWorker(teamId: string, channelId: string, rootTs: string): WorkerRecord | null {

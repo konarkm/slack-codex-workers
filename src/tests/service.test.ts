@@ -469,7 +469,7 @@ describe("service lifecycle decisions", () => {
 
   it("allows recover when live reconciliation shows the backing thread is missing", async () => {
     const { service, slack, codex, store } = await createService();
-    const worker = createWorker(service);
+    const worker = createWorker(service, { threadNotificationEnabled: false });
     codex.reconcileThreadForSend.mockResolvedValue("missing");
     codex.createWorkerThread.mockResolvedValue({ threadId: "thread-2" });
     store.setTeamDefaults("T1", { model: "gpt-5.4", effort: "medium", fastMode: true });
@@ -479,6 +479,7 @@ describe("service lifecycle decisions", () => {
     const updated = store.getWorkerByKey(worker.key);
     expect(updated?.appThreadId).toBe("thread-2");
     expect(updated?.status).toBe("idle");
+    expect(updated?.threadNotificationEnabled).toBe(false);
     expect(codex.createWorkerThread).toHaveBeenCalledWith({
       model: "gpt-5.4",
       effort: "high",
