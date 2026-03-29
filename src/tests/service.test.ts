@@ -3298,6 +3298,9 @@ describe("service lifecycle decisions", () => {
       expect.anything(),
     );
     expect(store.listWorkers()).toHaveLength(2);
+    expect(store.getWorkerByAppThreadId("thread-2")).toMatchObject({
+      threadNotificationEnabled: true,
+    });
     expect(store.listPendingWakesForScope("T1", "T1:root", null)[0]).toMatchObject({ status: "delivered" });
     store.close();
   });
@@ -3791,6 +3794,9 @@ describe("service lifecycle decisions", () => {
       expect.anything(),
     );
     expect(store.listWorkers()).toHaveLength(2);
+    expect(store.getWorkerByAppThreadId("thread-webhook-spawn")).toMatchObject({
+      threadNotificationEnabled: true,
+    });
     expect(store.listPendingWakesForScope("T1", "T1:root", null)[0]).toMatchObject({ status: "delivered" });
     expect(codex.startTurnWithResumeFallback).toHaveBeenCalledWith(
       "thread-webhook-spawn",

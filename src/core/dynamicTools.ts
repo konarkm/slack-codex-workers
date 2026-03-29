@@ -215,23 +215,22 @@ export const workerDynamicTools = [
     description:
       "Inspect or control whether this worker thread should notify the human by mentioning them in final Slack thread replies. action='get' returns the current thread notification status. action='set' updates it. enabled=true means mention the root owner in final replies. enabled=false means keep final replies visible in the Slack thread without the mention. New threads default to notification on until explicitly changed.",
     inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      required: ["action"],
-      properties: {
-        action: { enum: ["get", "set"] },
-        enabled: { type: "boolean" },
-      },
-      allOf: [
+      oneOf: [
         {
-          if: {
-            properties: {
-              action: { const: "set" },
-            },
-            required: ["action"],
+          type: "object",
+          additionalProperties: false,
+          required: ["action"],
+          properties: {
+            action: { const: "get" },
           },
-          then: {
-            required: ["enabled"],
+        },
+        {
+          type: "object",
+          additionalProperties: false,
+          required: ["action", "enabled"],
+          properties: {
+            action: { const: "set" },
+            enabled: { type: "boolean" },
           },
         },
       ],

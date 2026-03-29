@@ -194,6 +194,13 @@ describe("dynamic tools", () => {
       action: "set",
       enabled: true,
     });
+    expect(() => slackSetNotificationArgsSchema.parse({
+      action: "set",
+    })).toThrow();
+    expect(() => slackSetNotificationArgsSchema.parse({
+      action: "get",
+      enabled: false,
+    })).toThrow();
   });
 
   it("exposes notification control only on the worker surface", () => {
@@ -203,6 +210,21 @@ describe("dynamic tools", () => {
     expect(workerTool?.description).toContain("action='get' returns the current thread notification status");
     expect(workerTool?.description).toContain("New threads default to notification on");
     expect(workerTool?.description).toContain("enabled=false means keep final replies visible in the Slack thread without the mention");
+    expect(workerTool?.inputSchema).toMatchObject({
+      oneOf: [
+        expect.objectContaining({
+          required: ["action"],
+          properties: { action: { const: "get" } },
+        }),
+        expect.objectContaining({
+          required: ["action", "enabled"],
+          properties: {
+            action: { const: "set" },
+            enabled: { type: "boolean" },
+          },
+        }),
+      ],
+    });
     expect(adminNames).not.toContain(slackSetNotificationToolName);
   });
 
