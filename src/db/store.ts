@@ -406,8 +406,10 @@ export class Store {
     this.ensureColumn("workers", "request_item_id", "TEXT");
     this.ensureColumn("workers", "request_item_path", "TEXT");
     this.ensureColumn("workers", "terminal_response_item_id", "TEXT");
-    this.ensureColumn("workers", "thread_notification_enabled", "INTEGER NOT NULL DEFAULT 1");
-    this.repairThreadNotificationStateFromLegacyTurnFields();
+    const addedThreadNotificationColumn = this.ensureColumn("workers", "thread_notification_enabled", "INTEGER NOT NULL DEFAULT 1");
+    if (addedThreadNotificationColumn) {
+      this.migrateThreadNotificationStateFromLegacyTurnFields();
+    }
     this.ensureColumn("workstreams", "archived_at", "TEXT");
     this.ensureColumn("registrations", "owner_user_id", "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn("registrations", "root_owner_user_id", "TEXT NOT NULL DEFAULT ''");
@@ -477,17 +479,12 @@ export class Store {
     return false;
   }
 
-  private repairThreadNotificationStateFromLegacyTurnFields(): void {
-    const repairKey = "workers:thread_notification_legacy_turn_repair_v1";
-    if (this.readJsonMetadata<boolean>(repairKey) === true) {
-      return;
-    }
+  private migrateThreadNotificationStateFromLegacyTurnFields(): void {
     const columns = this.db.prepare("PRAGMA table_info(workers)").all() as Array<{ name?: string }>;
     const hasActiveTurnId = columns.some((entry) => entry.name === "active_turn_id");
     const hasLegacyTurnNotificationTurnId = columns.some((entry) => entry.name === "turn_notification_turn_id");
     const hasLegacyTurnNotificationEnabled = columns.some((entry) => entry.name === "turn_notification_enabled");
     if (!hasActiveTurnId || !hasLegacyTurnNotificationTurnId || !hasLegacyTurnNotificationEnabled) {
-      this.writeJsonMetadata(repairKey, true);
       return;
     }
     this.db.exec(`
@@ -498,7 +495,6 @@ export class Store {
         AND turn_notification_turn_id = active_turn_id
         AND turn_notification_enabled = 0
     `);
-    this.writeJsonMetadata(repairKey, true);
   }
 
   getWorker(teamId: string, channelId: string, rootTs: string): WorkerRecord | null {

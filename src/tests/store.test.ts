@@ -255,10 +255,10 @@ describe("store", () => {
     store.close();
   });
 
-  it("repairs legacy active opt-outs once when the thread notification column already exists", async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "slack-codex-workers-store-legacy-repair-"));
+  it("preserves explicit thread notification values when the column already exists", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "slack-codex-workers-store-legacy-existing-"));
     tempDirs.push(dir);
-    const databasePath = path.join(dir, "legacy-repair.db");
+    const databasePath = path.join(dir, "legacy-existing.db");
     const legacyDb = new Database(databasePath);
     legacyDb.exec(`
       CREATE TABLE workers (
@@ -302,7 +302,7 @@ describe("store", () => {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     insert.run(
-      "worker-repair",
+      "worker-explicit-on",
       "T1",
       "C1",
       "1.000",
@@ -359,24 +359,42 @@ describe("store", () => {
       "2026-03-28T00:00:00.000Z",
       "2026-03-28T00:00:00.000Z",
     );
+    insert.run(
+      "worker-explicit-off",
+      "T1",
+      "C1",
+      "3.000",
+      null,
+      "thread-3",
+      "turn-3",
+      "U1",
+      "U1",
+      "running",
+      null,
+      null,
+      null,
+      JSON.stringify({ model: "gpt-5.4", effort: "high", fastMode: false }),
+      null,
+      null,
+      null,
+      null,
+      null,
+      0,
+      "turn-3",
+      1,
+      null,
+      null,
+      null,
+      "2026-03-28T00:00:00.000Z",
+      "2026-03-28T00:00:00.000Z",
+    );
     legacyDb.close();
 
     const store = new Store(databasePath);
-    expect(store.getWorkerByKey("worker-repair")?.threadNotificationEnabled).toBe(false);
+    expect(store.getWorkerByKey("worker-explicit-on")?.threadNotificationEnabled).toBe(true);
     expect(store.getWorkerByKey("worker-mismatch")?.threadNotificationEnabled).toBe(true);
+    expect(store.getWorkerByKey("worker-explicit-off")?.threadNotificationEnabled).toBe(false);
     store.close();
-
-    const migratedDb = new Database(databasePath);
-    const repairMarker = migratedDb
-      .prepare("SELECT value FROM metadata WHERE key = ?")
-      .get("workers:thread_notification_legacy_turn_repair_v1") as { value?: string } | undefined;
-    expect(repairMarker?.value).toBe("true");
-    migratedDb.prepare("UPDATE workers SET thread_notification_enabled = 1 WHERE key = ?").run("worker-repair");
-    migratedDb.close();
-
-    const reopenedStore = new Store(databasePath);
-    expect(reopenedStore.getWorkerByKey("worker-repair")?.threadNotificationEnabled).toBe(true);
-    reopenedStore.close();
   });
 
   it("stores team fast-mode defaults", async () => {
