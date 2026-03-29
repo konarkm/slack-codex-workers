@@ -236,8 +236,7 @@ function createWorker(service: any, overrides: Partial<WorkerRecord> = {}): Work
     requestItemId: null,
     requestItemPath: null,
     terminalResponseItemId: null,
-    turnNotificationTurnId: null,
-    turnNotificationEnabled: false,
+    threadNotificationEnabled: true,
     lastError: null,
     lastInboundMessageTs: null,
     pendingRequest: null,
@@ -534,8 +533,7 @@ describe("service lifecycle decisions", () => {
     const updated = store.getWorkerByKey(worker.key);
     expect(updated?.status).toBe("idle");
     expect(updated?.activeTurnId).toBeNull();
-    expect(updated?.turnNotificationTurnId).toBeNull();
-    expect(updated?.turnNotificationEnabled).toBe(false);
+    expect(updated?.threadNotificationEnabled).toBe(true);
     expect(updated?.lastError).toContain("Recovered stale active turn after runtime startup.");
   });
 
@@ -555,8 +553,7 @@ describe("service lifecycle decisions", () => {
     const updated = store.getWorkerByKey("T1:C1:join-root");
     expect(updated?.status).toBe("idle");
     expect(updated?.activeTurnId).toBeNull();
-    expect(updated?.turnNotificationTurnId).toBeNull();
-    expect(updated?.turnNotificationEnabled).toBe(false);
+    expect(updated?.threadNotificationEnabled).toBe(true);
     expect(updated?.lastError).toContain("Recovered stale active turn after runtime startup.");
     expect(service.runtimeStarted).toBe(true);
   });
@@ -648,8 +645,7 @@ describe("service lifecycle decisions", () => {
       requestItemId: null,
       requestItemPath: null,
       terminalResponseItemId: null,
-      turnNotificationTurnId: null,
-      turnNotificationEnabled: false,
+      threadNotificationEnabled: false,
       lastError: null,
       lastInboundMessageTs: null,
       pendingRequest: null,
@@ -687,6 +683,7 @@ describe("service lifecycle decisions", () => {
       channelId: "C-ef",
       workstreamId: "T1:customers/ef",
       parentWorkerKey: "T1:C-ef:2.000",
+      threadNotificationEnabled: true,
     });
     const requestItem = await fs.readFile(child!.requestItemPath!, "utf8");
     expect(requestItem).toContain("# [fresh child] Follow up");
@@ -696,7 +693,7 @@ describe("service lifecycle decisions", () => {
 
   it("tags forked child spawns and injects forked context", async () => {
     const { service, slack, codex, store } = await createService();
-    createWorker(service);
+    createWorker(service, { threadNotificationEnabled: false });
     codex.forkWorkerThread.mockResolvedValue({ threadId: "thread-child-fork" });
     codex.startTurnWithResumeFallback.mockResolvedValue("turn-child-fork");
 
@@ -725,6 +722,10 @@ describe("service lifecycle decisions", () => {
       { model: "gpt-5.4", effort: "high", fastMode: false },
       expect.any(Object),
     );
+    expect(store.getWorkerByAppThreadId("thread-child-fork")).toMatchObject({
+      parentWorkerKey: "T1:C1:1.000",
+      threadNotificationEnabled: false,
+    });
     store.close();
   });
 
@@ -1597,7 +1598,7 @@ describe("service lifecycle decisions", () => {
     expect(slack.postThreadReply.mock.calls).toEqual([
       ["C1", "1.000", "Checking weather now.", { username: "Gear", iconEmoji: "gear" }],
       ["C1", "1.000", ":white_check_mark: Web Search", { username: "Gear", iconEmoji: "gear" }],
-      ["C1", "1.000", "San Francisco is 58 F and clear.", { username: "Gear", iconEmoji: "gear" }],
+      ["C1", "1.000", "<@U1> San Francisco is 58 F and clear.", { username: "Gear", iconEmoji: "gear" }],
     ]);
     expect(slack.updateMessage).not.toHaveBeenCalled();
     const updated = store.getWorkerByKey("T1:C1:1.000");
@@ -1610,8 +1611,6 @@ describe("service lifecycle decisions", () => {
     createWorker(service, {
       status: "running",
       activeTurnId: "turn-1",
-      turnNotificationTurnId: "turn-1",
-      turnNotificationEnabled: true,
     });
 
     await service.onWorkerCompleted("T1:C1:1.000", "San Francisco is 58 F and clear.", "completed");
@@ -1623,8 +1622,7 @@ describe("service lifecycle decisions", () => {
       { username: "Gear", iconEmoji: "gear" },
     );
     const updated = store.getWorkerByKey("T1:C1:1.000");
-    expect(updated?.turnNotificationTurnId).toBeNull();
-    expect(updated?.turnNotificationEnabled).toBe(false);
+    expect(updated?.threadNotificationEnabled).toBe(true);
     store.close();
   });
 
@@ -1633,8 +1631,7 @@ describe("service lifecycle decisions", () => {
     createWorker(service, {
       status: "running",
       activeTurnId: "turn-1",
-      turnNotificationTurnId: "turn-1",
-      turnNotificationEnabled: false,
+      threadNotificationEnabled: false,
     });
 
     await service.onWorkerCompleted("T1:C1:1.000", "San Francisco is 58 F and clear.", "completed");
@@ -1653,8 +1650,7 @@ describe("service lifecycle decisions", () => {
     createWorker(service, {
       status: "running",
       activeTurnId: "turn-1",
-      turnNotificationTurnId: "turn-1",
-      turnNotificationEnabled: false,
+      threadNotificationEnabled: false,
     });
 
     await service.onWorkerCompleted("T1:C1:1.000", "", "failed", "boom");
@@ -1669,8 +1665,7 @@ describe("service lifecycle decisions", () => {
     createWorker(service, {
       status: "running",
       activeTurnId: "turn-2",
-      turnNotificationTurnId: "turn-2",
-      turnNotificationEnabled: true,
+      threadNotificationEnabled: true,
     });
 
     await service.onWorkerCompleted("T1:C1:1.000", "", "failed", "boom");
@@ -1683,31 +1678,38 @@ describe("service lifecycle decisions", () => {
     store.close();
   });
 
-  it("stores turn-scoped notification preference through the worker tool handler", async () => {
+  it("reads and updates thread-scoped notification preference through the worker tool handler", async () => {
     const { service, store } = await createService();
     createWorker(service, {
       status: "running",
       activeTurnId: "turn-1",
-      turnNotificationTurnId: "turn-1",
-      turnNotificationEnabled: false,
+      threadNotificationEnabled: false,
     });
 
     await expect(service.handleSetNotificationTool(
-      { enabled: true },
+      { action: "get" },
+      { threadId: "thread-1", turnId: "turn-1", callId: "call-get-disabled" },
+    )).resolves.toBe("Thread notifications are disabled.");
+
+    await expect(service.handleSetNotificationTool(
+      { action: "set", enabled: true },
       { threadId: "thread-1", turnId: "turn-1", callId: "call-1" },
-    )).resolves.toBe("Notifications enabled for this turn.");
+    )).resolves.toBe("Thread notifications enabled.");
     expect(store.getWorkerByKey("T1:C1:1.000")).toMatchObject({
-      turnNotificationTurnId: "turn-1",
-      turnNotificationEnabled: true,
+      threadNotificationEnabled: true,
     });
 
     await expect(service.handleSetNotificationTool(
-      { enabled: false },
+      { action: "get" },
+      { threadId: "thread-1", turnId: "turn-1", callId: "call-get-enabled" },
+    )).resolves.toBe("Thread notifications are enabled.");
+
+    await expect(service.handleSetNotificationTool(
+      { action: "set", enabled: false },
       { threadId: "thread-1", turnId: "turn-1", callId: "call-2" },
-    )).resolves.toBe("Notifications disabled for this turn.");
+    )).resolves.toBe("Thread notifications disabled.");
     expect(store.getWorkerByKey("T1:C1:1.000")).toMatchObject({
-      turnNotificationTurnId: "turn-1",
-      turnNotificationEnabled: false,
+      threadNotificationEnabled: false,
     });
     store.close();
   });
@@ -1748,17 +1750,33 @@ describe("service lifecycle decisions", () => {
     createWorker(service, {
       status: "running",
       activeTurnId: "turn-2",
-      turnNotificationTurnId: "turn-2",
-      turnNotificationEnabled: false,
+      threadNotificationEnabled: false,
     });
 
     await expect(service.handleSetNotificationTool(
-      { enabled: true },
+      { action: "set", enabled: true },
       { threadId: "thread-1", turnId: "turn-1", callId: "call-stale" },
     )).rejects.toThrow("Notification control requires the current active worker turn.");
     expect(store.getWorkerByKey("T1:C1:1.000")).toMatchObject({
-      turnNotificationTurnId: "turn-2",
-      turnNotificationEnabled: false,
+      threadNotificationEnabled: false,
+    });
+    store.close();
+  });
+
+  it("returns notification status without requiring the current active turn", async () => {
+    const { service, store } = await createService();
+    createWorker(service, {
+      status: "running",
+      activeTurnId: "turn-2",
+      threadNotificationEnabled: false,
+    });
+
+    await expect(service.handleSetNotificationTool(
+      { action: "get" },
+      { threadId: "thread-1", turnId: "turn-1", callId: "call-stale-get" },
+    )).resolves.toBe("Thread notifications are disabled.");
+    expect(store.getWorkerByKey("T1:C1:1.000")).toMatchObject({
+      threadNotificationEnabled: false,
     });
     store.close();
   });
@@ -1768,22 +1786,20 @@ describe("service lifecycle decisions", () => {
     createWorker(service, {
       status: "idle",
       activeTurnId: null,
-      turnNotificationTurnId: null,
-      turnNotificationEnabled: false,
+      threadNotificationEnabled: true,
     });
     const pendingTurn = deferred<string>();
     service.startingWorkerTurns.set("T1:C1:1.000", pendingTurn.promise);
 
     const callPromise = service.handleSetNotificationTool(
-      { enabled: true },
+      { action: "set", enabled: false },
       { threadId: "thread-1", turnId: "turn-starting", callId: "call-starting" },
     );
     pendingTurn.resolve("turn-starting");
 
-    await expect(callPromise).resolves.toBe("Notifications enabled for this turn.");
+    await expect(callPromise).resolves.toBe("Thread notifications disabled.");
     expect(store.getWorkerByKey("T1:C1:1.000")).toMatchObject({
-      turnNotificationTurnId: "turn-starting",
-      turnNotificationEnabled: true,
+      threadNotificationEnabled: false,
     });
     store.close();
   });
@@ -1793,8 +1809,7 @@ describe("service lifecycle decisions", () => {
     const worker = createWorker(service, {
       status: "idle",
       activeTurnId: null,
-      turnNotificationTurnId: null,
-      turnNotificationEnabled: false,
+      threadNotificationEnabled: true,
     });
     const turnStart = deferred<string>();
     codex.startTurnWithResumeFallback.mockImplementation(async () => {
@@ -1804,28 +1819,27 @@ describe("service lifecycle decisions", () => {
 
     const startPromise = service.startWorkerTurn(worker, { text: "check in", imagePaths: [] });
     const callPromise = service.handleSetNotificationTool(
-      { enabled: false },
+      { action: "set", enabled: false },
       { threadId: "thread-1", turnId: "turn-starting", callId: "call-starting-false" },
     );
     turnStart.resolve("ok");
-    await expect(callPromise).resolves.toBe("Notifications disabled for this turn.");
+    await expect(callPromise).resolves.toBe("Thread notifications disabled.");
     await expect(startPromise).resolves.toBe("turn-starting");
 
     expect(store.getWorkerByKey("T1:C1:1.000")).toMatchObject({
       activeTurnId: "turn-starting",
-      turnNotificationTurnId: "turn-starting",
-      turnNotificationEnabled: false,
+      status: "running",
+      threadNotificationEnabled: false,
     });
     store.close();
   });
 
-  it("resets notification preference to notify by default when a new worker turn starts", async () => {
+  it("preserves thread notification preference when a new worker turn starts", async () => {
     const { service, codex, store } = await createService();
     const worker = createWorker(service, {
       status: "idle",
       activeTurnId: null,
-      turnNotificationTurnId: "old-turn",
-      turnNotificationEnabled: false,
+      threadNotificationEnabled: false,
     });
     codex.startTurnWithResumeFallback.mockResolvedValue("turn-2");
 
@@ -1834,8 +1848,7 @@ describe("service lifecycle decisions", () => {
     expect(store.getWorkerByKey("T1:C1:1.000")).toMatchObject({
       activeTurnId: "turn-2",
       status: "running",
-      turnNotificationTurnId: "turn-2",
-      turnNotificationEnabled: true,
+      threadNotificationEnabled: false,
     });
     store.close();
   });
@@ -1856,7 +1869,7 @@ describe("service lifecycle decisions", () => {
     expect(slack.postThreadReply).toHaveBeenLastCalledWith(
       "C1",
       "1.000",
-      "Checking weather now.",
+      "<@U1> Checking weather now.",
       expect.objectContaining({ username: expect.any(String), iconEmoji: expect.any(String) }),
     );
     store.close();
@@ -3418,8 +3431,6 @@ describe("service lifecycle decisions", () => {
       workstreamId: "T1:root",
       activeTurnId: "turn-active",
       status: "running",
-      turnNotificationTurnId: "turn-active",
-      turnNotificationEnabled: true,
     });
     const webhookSource = await createWebhookSource(service, { source: "linear" });
 
@@ -3478,8 +3489,7 @@ describe("service lifecycle decisions", () => {
     });
     expect(store.getWorkerByKey("T1:C1:1.000")).toMatchObject({
       activeTurnId: "turn-active",
-      turnNotificationTurnId: "turn-active",
-      turnNotificationEnabled: true,
+      threadNotificationEnabled: true,
     });
     store.close();
   });
@@ -3594,8 +3604,7 @@ describe("service lifecycle decisions", () => {
 
     expect(store.getWorkerByKey("T1:C1:1.000")).toMatchObject({
       status: "recovery_required",
-      turnNotificationTurnId: null,
-      turnNotificationEnabled: false,
+      threadNotificationEnabled: true,
       lastError: expect.stringContaining("Backing Codex thread is missing"),
     });
     expect(store.listPendingWakesForScope("T1", "T1:root", "T1:C1:1.000")[0]).toMatchObject({
@@ -3669,8 +3678,7 @@ describe("service lifecycle decisions", () => {
     expect(store.getWorkerByKey("T1:C1:1.000")).toMatchObject({
       activeTurnId: "turn-recovered",
       status: "running",
-      turnNotificationTurnId: "turn-recovered",
-      turnNotificationEnabled: true,
+      threadNotificationEnabled: true,
     });
     store.close();
   });

@@ -168,7 +168,7 @@ describe("codex client dynamic tool routing", () => {
 
   it("routes set_notification through the dynamic tool handler", async () => {
     const respond = vi.fn().mockResolvedValue(undefined);
-    const setNotification = vi.fn().mockResolvedValue("Notifications enabled for this turn.");
+    const setNotification = vi.fn().mockResolvedValue("Thread notifications enabled.");
     const client = Object.create(CodexClient.prototype) as any;
     client.rpc = { respond };
     client.dynamicToolHandlers = { setNotification };
@@ -178,10 +178,11 @@ describe("codex client dynamic tool routing", () => {
       turnId: "turn-3b",
       callId: "call-3b",
       tool: "set_notification",
-      arguments: { enabled: true },
+      arguments: { action: "set", enabled: true },
     });
 
     expect(setNotification).toHaveBeenCalledWith({
+      action: "set",
       enabled: true,
     }, {
       threadId: "thread-3b",
@@ -189,7 +190,7 @@ describe("codex client dynamic tool routing", () => {
       callId: "call-3b",
     });
     expect(respond).toHaveBeenCalledWith("req-3b", {
-      contentItems: [{ type: "inputText", text: "Notifications enabled for this turn." }],
+      contentItems: [{ type: "inputText", text: "Thread notifications enabled." }],
       success: true,
     });
   });

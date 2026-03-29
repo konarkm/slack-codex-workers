@@ -183,8 +183,15 @@ describe("dynamic tools", () => {
 
   it("parses set_notification arguments", () => {
     expect(slackSetNotificationArgsSchema.parse({
+      action: "get",
+    })).toEqual({
+      action: "get",
+    });
+    expect(slackSetNotificationArgsSchema.parse({
+      action: "set",
       enabled: true,
     })).toEqual({
+      action: "set",
       enabled: true,
     });
   });
@@ -192,9 +199,10 @@ describe("dynamic tools", () => {
   it("exposes notification control only on the worker surface", () => {
     const workerTool = workerDynamicTools.find((entry) => entry.name === slackSetNotificationToolName);
     const adminNames = adminDynamicTools.map((entry) => entry.name);
-    expect(workerTool?.description).toContain("current worker turn should notify the human");
-    expect(workerTool?.description).toContain("defaults to true unless you explicitly opt out");
-    expect(workerTool?.description).toContain("enabled=false means keep the final reply visible in the Slack thread without the mention");
+    expect(workerTool?.description).toContain("Inspect or control whether this worker thread should notify the human");
+    expect(workerTool?.description).toContain("action='get' returns the current thread notification status");
+    expect(workerTool?.description).toContain("New threads default to notification on");
+    expect(workerTool?.description).toContain("enabled=false means keep final replies visible in the Slack thread without the mention");
     expect(adminNames).not.toContain(slackSetNotificationToolName);
   });
 
@@ -209,8 +217,9 @@ describe("dynamic tools", () => {
     expect(workerDeveloperInstructions).toContain("planning, evaluating options, discussing architecture");
     expect(workerDeveloperInstructions).toContain("shared evolving context, not a fresh report each turn");
     expect(workerDeveloperInstructions).toContain("lead with the delta or direct answer first");
-    expect(workerDeveloperInstructions).toContain("Use set_notification(enabled: true|false)");
-    expect(workerDeveloperInstructions).toContain("default is notification on unless you explicitly opt out");
+    expect(workerDeveloperInstructions).toContain("Use set_notification(action:'get')");
+    expect(workerDeveloperInstructions).toContain("set_notification(action:'set', enabled:true|false)");
+    expect(workerDeveloperInstructions).toContain("New threads default to notification on");
     expect(workerDeveloperInstructions).toContain("needs to notice, review, respond, decide, or act");
     expect(workerDeveloperInstructions).toContain("still progressing independently");
     expect(workerDeveloperInstructions).toContain("read the current workstream lineage context in root-to-leaf order");

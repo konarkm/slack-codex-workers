@@ -213,14 +213,28 @@ export const workerDynamicTools = [
   {
     name: slackSetNotificationToolName,
     description:
-      "Control whether the current worker turn should notify the human when it completes by mentioning them in the final Slack thread reply for that turn. enabled=true means mention the root owner. enabled=false means keep the final reply visible in the Slack thread without the mention. This is turn-scoped and defaults to true unless you explicitly opt out.",
+      "Inspect or control whether this worker thread should notify the human by mentioning them in final Slack thread replies. action='get' returns the current thread notification status. action='set' updates it. enabled=true means mention the root owner in final replies. enabled=false means keep final replies visible in the Slack thread without the mention. New threads default to notification on until explicitly changed.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
-      required: ["enabled"],
+      required: ["action"],
       properties: {
+        action: { enum: ["get", "set"] },
         enabled: { type: "boolean" },
       },
+      allOf: [
+        {
+          if: {
+            properties: {
+              action: { const: "set" },
+            },
+            required: ["action"],
+          },
+          then: {
+            required: ["enabled"],
+          },
+        },
+      ],
     },
   },
   {
@@ -461,9 +475,15 @@ export const slackDisableWebhookSourceArgsSchema = z.object({
 export const slackRotateWebhookSourceRouteArgsSchema = z.object({
   source: z.string().min(1),
 });
-export const slackSetNotificationArgsSchema = z.object({
-  enabled: z.boolean(),
-});
+export const slackSetNotificationArgsSchema = z.discriminatedUnion("action", [
+  z.object({
+    action: z.literal("get"),
+  }).strict(),
+  z.object({
+    action: z.literal("set"),
+    enabled: z.boolean(),
+  }).strict(),
+]);
 
 export const slackSetHeartbeatArgsSchema = z.object({
   registrationId: z.string().min(1).optional(),
@@ -537,10 +557,10 @@ export const workerDeveloperInstructions = [
   "Use get_current_slack_thread_link when you need the exact permalink and Slack routing ids for the current public worker thread so you can reference it from another system.",
   "Use create_webhook_source, list_webhook_sources, get_webhook_source, list_webhook_registrations, disable_webhook_source, and rotate_webhook_source_route to manage workspace-global raw webhook intake routes and their handler files. A webhook source has one authoritative source name, one secret route, and one handler contract.",
   "Before changing a shared webhook handler contract, use list_webhook_registrations for that source and preserve existing event names and normalized match fields unless you are intentionally updating dependent registrations too.",
-  "Use set_notification(enabled: true|false) to decide whether the current worker turn should notify the human on completion by @ mentioning them in the final Slack thread reply for that turn. The default is notification on unless you explicitly opt out.",
+  "Use set_notification(action:'get') to inspect whether this worker thread will notify the human by @ mentioning them in final Slack replies. Use set_notification(action:'set', enabled:true|false) to change that thread-level setting. New threads default to notification on until explicitly changed.",
   "Leave notifications on for final turn outputs whenever the human needs to notice, review, respond, decide, or act on the outcome in any way.",
-  "Call set_notification(enabled: false) only when you are still progressing autonomously and there is genuinely nothing the human needs to notice or do yet.",
-  "For heartbeat, cron, or webhook-driven work, lean toward set_notification(enabled: false) when the run is still progressing independently and the human does not need to be aware yet. Leave notification on when the run surfaced a blocker, risk, decision, handoff, or other outcome the human now needs to know, review, or act on.",
+  "Call set_notification(action:'set', enabled:false) only when you are still progressing autonomously and there is genuinely nothing the human needs to notice or do yet.",
+  "For heartbeat, cron, or webhook-driven work, lean toward set_notification(action:'set', enabled:false) when the run is still progressing independently and the human does not need to be aware yet. Leave notification on when the run surfaced a blocker, risk, decision, handoff, or other outcome the human now needs to know, review, or act on.",
   "Use set_heartbeat, set_cron, set_webhook, disable_registration, list_registrations, get_registration, and list_wake_deliveries to manage durable wakeup registrations and inspect wake execution history for the current worker/workstream when you need ongoing automation. For set_webhook(target=self), use deliveryMode='queue' when every event should become separate work and deliveryMode='steer' when matching events should steer the active turn immediately.",
   "Use slack_upload_files when you need to share one or more existing local files into the current Slack thread. Only upload files that materially help the user.",
   "If you create a child worker, it is fire-and-forget. Do not wait on the child unless the human explicitly asks you to.",

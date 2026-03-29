@@ -868,8 +868,9 @@ export class SlackCodexWorkersService extends EventEmitter {
       requestItemId: shell.requestItemId,
       requestItemPath: shell.requestItemPath,
       terminalResponseItemId: null,
-      turnNotificationTurnId: null,
-      turnNotificationEnabled: false,
+      threadNotificationEnabled: input.mode === "fork" && input.parentWorkerKey
+        ? this.requireWorker(input.parentWorkerKey).threadNotificationEnabled
+        : true,
       lastError: null,
       lastInboundMessageTs: rootTs,
       pendingRequest: null,
@@ -957,8 +958,6 @@ export class SlackCodexWorkersService extends EventEmitter {
       } catch (error) {
         this.store.updateWorkerState(worker.key, {
           status: "idle",
-          turnNotificationTurnId: null,
-          turnNotificationEnabled: false,
           lastError: null,
         });
         throw error;
@@ -969,14 +968,9 @@ export class SlackCodexWorkersService extends EventEmitter {
       if (currentWorker.appThreadId !== startingAppThreadId) {
         return turnId;
       }
-      const preserveCurrentTurnNotification = currentWorker.turnNotificationTurnId === turnId;
       this.store.updateWorkerState(worker.key, {
         activeTurnId: turnId,
         status: "running",
-        turnNotificationTurnId: turnId,
-        turnNotificationEnabled: preserveCurrentTurnNotification
-          ? currentWorker.turnNotificationEnabled
-          : true,
         lastError: null,
         pendingRequest: null,
       });
@@ -1159,8 +1153,6 @@ export class SlackCodexWorkersService extends EventEmitter {
       currentAgentItemId: null,
       currentWorklogSlackTs: null,
       terminalResponseItemId: worker.terminalResponseItemId,
-      turnNotificationTurnId: null,
-      turnNotificationEnabled: false,
       pendingRequest: null,
       lastError: status === "interrupted" ? null : error ?? (status === "completed" ? null : `Turn ${status}`),
     });
@@ -1289,11 +1281,7 @@ export class SlackCodexWorkersService extends EventEmitter {
   }
 
   private shouldNotifyWorkerTurn(worker: WorkerRecord): boolean {
-    return Boolean(
-      worker.activeTurnId
-      && worker.turnNotificationTurnId === worker.activeTurnId
-      && worker.turnNotificationEnabled,
-    );
+    return worker.threadNotificationEnabled;
   }
 
   private async flushPendingDmAssistant(teamId: string, userId: string, final: boolean): Promise<void> {
@@ -1622,6 +1610,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       `status: ${current.status}`,
       `app_thread: ${current.appThreadId}`,
       `active_turn: ${current.activeTurnId ?? "(none)"}`,
+      `thread_notifications: ${current.threadNotificationEnabled ? "on" : "off"}`,
       `effective_model: ${describeEffectiveSetting(current.settings.model, defaults.model)}`,
       `effective_effort: ${describeEffectiveSetting(current.settings.effort, defaults.effort)}`,
       `effective_fast_mode: ${describeEffectiveFastMode(current.settings.fastMode, defaults.fastMode, resolveRuntimeSettings(current.settings, defaults).model)}`,
@@ -2026,12 +2015,17 @@ export class SlackCodexWorkersService extends EventEmitter {
   }
 
   private async handleSetNotificationTool(
-    args: { enabled: boolean },
+    args: { action: "get" } | { action: "set"; enabled: boolean },
     ctx: DynamicToolHandlerContext,
   ): Promise<string> {
     const worker = this.store.getWorkerByAppThreadId(ctx.threadId);
     if (!worker) {
       throw new Error("Notification control requires a worker thread context.");
+    }
+    if (args.action === "get") {
+      return worker.threadNotificationEnabled
+        ? "Thread notifications are enabled."
+        : "Thread notifications are disabled.";
     }
     let isCurrentTurn = worker.activeTurnId === ctx.turnId;
     if (!isCurrentTurn) {
@@ -2045,12 +2039,11 @@ export class SlackCodexWorkersService extends EventEmitter {
       throw new Error("Notification control requires the current active worker turn.");
     }
     this.store.updateWorkerState(worker.key, {
-      turnNotificationTurnId: ctx.turnId,
-      turnNotificationEnabled: args.enabled,
+      threadNotificationEnabled: args.enabled,
     });
     return args.enabled
-      ? "Notifications enabled for this turn."
-      : "Notifications disabled for this turn.";
+      ? "Thread notifications enabled."
+      : "Thread notifications disabled.";
   }
 
   private async handleSetHeartbeatTool(
@@ -3096,8 +3089,6 @@ export class SlackCodexWorkersService extends EventEmitter {
       currentAgentSlackTs: null,
       currentAgentItemId: null,
       currentWorklogSlackTs: null,
-      turnNotificationTurnId: null,
-      turnNotificationEnabled: false,
       pendingRequest: null,
       lastError: reason,
     });
@@ -3114,8 +3105,6 @@ export class SlackCodexWorkersService extends EventEmitter {
       currentAgentSlackTs: null,
       currentAgentItemId: null,
       currentWorklogSlackTs: null,
-      turnNotificationTurnId: null,
-      turnNotificationEnabled: false,
       pendingRequest: null,
       lastError: reason,
     });

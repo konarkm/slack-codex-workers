@@ -107,8 +107,7 @@ describe("store", () => {
       requestItemId: null,
       requestItemPath: null,
       terminalResponseItemId: null,
-      turnNotificationTurnId: "turn-1",
-      turnNotificationEnabled: true,
+      threadNotificationEnabled: true,
       lastError: "oops",
       lastInboundMessageTs: "4.000",
       pendingRequest: {
@@ -130,8 +129,7 @@ describe("store", () => {
       currentAgentSlackTs: null,
       currentAgentItemId: null,
       currentWorklogSlackTs: null,
-      turnNotificationTurnId: null,
-      turnNotificationEnabled: false,
+      threadNotificationEnabled: false,
       lastError: null,
       pendingRequest: null,
     });
@@ -141,8 +139,7 @@ describe("store", () => {
     expect(worker?.currentAgentSlackTs).toBeNull();
     expect(worker?.currentAgentItemId).toBeNull();
     expect(worker?.currentWorklogSlackTs).toBeNull();
-    expect(worker?.turnNotificationTurnId).toBeNull();
-    expect(worker?.turnNotificationEnabled).toBe(false);
+    expect(worker?.threadNotificationEnabled).toBe(false);
     expect(worker?.lastError).toBeNull();
     expect(worker?.pendingRequest).toBeNull();
     expect(worker?.settings.fastMode).toBe(true);
