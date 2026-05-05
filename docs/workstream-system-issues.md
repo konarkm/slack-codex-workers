@@ -6,21 +6,11 @@ This file tracks open questions, unresolved details, and explicitly superseded a
 
 It is intentionally separate from the main spec so the main spec can remain clean and implementation-oriented without inventing precision that the thread history did not actually lock down.
 
-## Source Materials for Implementers
+## Design Context
 
-Primary source-of-truth discussion history:
+These notes track decisions and unresolved details from the workstream-system redesign. They are intentionally public-facing summaries rather than links to private design transcripts or local development artifacts.
 
-- `/Users/konark/.codex/sessions/2026/03/16/rollout-2026-03-16T13-33-37-019cf85a-ab2d-7170-8710-d4d5ef3e71ca.jsonl`
-- `/Users/konark/.codex/sessions/2026/03/12/rollout-2026-03-12T17-25-02-019ce495-1810-7e72-ac71-30562e88c4f2.jsonl`
-
-Useful local repos/docs for reconciliation and implementation:
-
-- `/Users/konark/code/test/slack-codex-workers`
-- `/Users/konark/code/test/codex`
-- `/Users/konark/code/test/openclaw`
-- `/Users/konark/code/test/imessage-codex-bridge`
-
-Use the JSONL files above when resolving whether a question is truly open versus already settled in the thread.
+Use the README for current setup and runtime behavior. Use the main workstream-system spec for architecture and invariants. Use this file only for open questions, superseded assumptions, and areas that need careful future reconciliation.
 
 ## Superseded Assumptions
 
@@ -41,11 +31,11 @@ Superseded by:
 - new inbound -> new worker thread by default
 - continuity recovered agentically through workstream context and prior Codex thread history
 
-### 3. The earlier March 12 Slack bridge plan as the current redesign source of truth
+### 3. The earlier March 12 Slack bridge plan as the current design baseline
 
 The March 12 plan is historical context only.
 
-The March 16 redesign thread is the active source of truth where the two conflict.
+The later workstream-oriented design summarized in the main spec is the current baseline where the two conflict.
 
 ### 4. `no_op` as the conceptual model for silent completions
 

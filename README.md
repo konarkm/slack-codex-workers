@@ -104,6 +104,10 @@ Not implemented yet:
 - local `codex` binary on `PATH`, or `CODEX_BIN` set explicitly
 - Slack app configured for Socket Mode
 
+## Trust Model
+
+This bridge is designed for a trusted local machine and workspace. Codex worker and admin threads currently run from `WORKSPACE_ROOT` with non-interactive approval and full local filesystem access, not a filesystem sandbox limited to that directory. Only connect it to Slack workspaces and admin users you trust, and treat local files, webhook handlers, and uploaded artifacts as accessible to the running workers.
+
 Required Slack bot scopes for the default bootstrap and workstream-creation path:
 
 - `app_mentions:read`
@@ -159,8 +163,10 @@ Key variables:
 
 ## Run
 
+This project is currently run from source and is not packaged for npm distribution.
+
 ```bash
-npm install
+npm ci
 ./scripts/launch.sh
 ```
 

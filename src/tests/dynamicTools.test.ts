@@ -237,7 +237,7 @@ describe("dynamic tools", () => {
 
   it("tells workers not to echo Slack speaker prefixes back to the human", () => {
     expect(workerDeveloperInstructions).toContain("Do not echo the speaker prefix back in your own replies.");
-    expect(workerDeveloperInstructions).toContain("'Konark:'");
+    expect(workerDeveloperInstructions).toContain("'operator:'");
   });
 
   it("tells workers to be concise by default but fuller during planning", () => {

@@ -2,12 +2,12 @@
 
 ## Status
 
-This document captures the current target architecture for the `slack-codex-workers` redesign.
+This document captures the workstream-oriented architecture for `slack-codex-workers`.
 
 It is based on:
 
-- the March 16 redesign thread as the primary source of truth
-- the earlier March 12 thread only as historical/current-system context
+- the March 16 redesign as the primary design baseline
+- the earlier March 12 Slack-thread bridge plan as historical/current-system context
 - explicit later decisions overriding earlier assumptions where they conflict
 
 This spec is intentionally strict about the difference between:
@@ -16,31 +16,17 @@ This spec is intentionally strict about the difference between:
 - target architecture
 - unresolved TBDs
 
-## Source Materials for Implementers
+## Design History
 
-Primary source-of-truth discussion history:
+The architecture evolved from an initial Slack-thread bridge into a workstream-oriented system. Earlier design notes and implementation checkpoints explored:
 
-- `/Users/konark/.codex/sessions/2026/03/16/rollout-2026-03-16T13-33-37-019cf85a-ab2d-7170-8710-d4d5ef3e71ca.jsonl`
-- `/Users/konark/.codex/sessions/2026/03/12/rollout-2026-03-12T17-25-02-019ce495-1810-7e72-ac71-30562e88c4f2.jsonl`
+- a Slack-first control plane
+- public Slack threads as visible worker/task surfaces
+- filesystem-backed workstream context
+- bridge-owned durable routing, scheduling, webhook, and recovery state
+- a thin bridge that avoids becoming a semantic project-management layer
 
-Local repos and docs that may be useful during implementation:
-
-- Current bridge repo: `/Users/konark/code/test/slack-codex-workers`
-- Current Codex repo: `/Users/konark/code/test/codex`
-- OpenClaw reference repo: `/Users/konark/code/test/openclaw`
-- iMessage bridge reference repo: `/Users/konark/code/test/imessage-codex-bridge`
-
-Reference documents worth consulting when needed:
-
-- This spec: `/Users/konark/code/test/slack-codex-workers/docs/workstream-system-spec.md`
-- Open issues / TBDs: `/Users/konark/code/test/slack-codex-workers/docs/workstream-system-issues.md`
-- Current `slack-codex-workers` README: `/Users/konark/code/test/slack-codex-workers/README.md`
-- Codex app-server README: `/Users/konark/code/test/codex/codex-rs/app-server/README.md`
-
-Implementation guidance:
-
-- Treat the JSONL thread history above as the non-lossy source for detailed reasoning, revisions, and user intent.
-- Treat the current repo state as implementation substrate, not as the final source of truth where it conflicts with the redesign decisions in those JSONL files.
+Use the README for current setup and operating behavior. Use this spec for architectural intent, invariants, and roadmap context.
 
 ## Purpose
 
@@ -60,7 +46,7 @@ The following earlier ideas are explicitly superseded and should not leak back i
 
 - `triage-handler` as a foundational pickup mode
 - automatic routing/reuse back into existing public worker threads for new inbound events
-- the original March 12 Slack bridge plan as the active source of truth for the redesign
+- the original March 12 Slack bridge plan as the active design baseline
 - broad bridge-owned lifecycle logic for semantic coordination, case notes, or routing
 
 The current design deliberately favors:
@@ -78,22 +64,25 @@ The current `slack-codex-workers` repo already provides:
 - replaceable backing Codex thread ids preserved across recovery
 - Slack admin DM/control surface
 - Slack-first thread routing for top-level channel posts and thread replies
-- public child worker spawn tooling
-- current notification/restart/status tooling
+- explicit workstream creation/registration and nested workstream scaffolding
+- per-workstream `WORKSTREAM.md`, `AGENTS.md`, `.slack-workers/active`, `.slack-workers/archive`, and `registrations.json`
+- public child worker spawn tooling through registered workstreams
+- notification/restart/status/recovery tooling
+- durable heartbeat, cron, and webhook registrations
+- raw webhook ingress with source-specific routes, handler modules, event dedupe, and wake delivery
+- bridge-global SQLite storage plus local workstream projections and request/response artifacts
 - `WORKSPACE_ROOT` as the canonical local root for current runtime state
 - v2 app-server usage with `experimentalApi: true`
 
 The current implementation does **not** yet provide:
 
-- explicit workstream creation/registration
-- nested workstream directories with `WORKSTREAM.md`
-- per-workstream `.slack-workers/active` + `archive`
-- canonical workstream items as the source of new work
-- wakeup registrations
-- global fired-event storage for cron/heartbeat/webhook
-- the canonical spawn/wake runtime model described below
+- parent worker wait/watch loop for child workers
+- webhook/upload retention cleanup and broader repair tooling
+- richer admin/operator-wide inspection and control-plane tools
+- multi-workspace OAuth install flow
+- HTTP health/readiness endpoints
 
-This spec therefore describes a target architecture to build toward, not a description of what the repo already implements.
+This spec therefore describes both the current architecture and the target direction for areas that are still intentionally incomplete.
 
 ## Core Model
 
@@ -808,17 +797,20 @@ The current `slack-codex-workers` code already provides:
 - stable bridge worker identity with replaceable backing Codex thread id
 - Slack DM/admin surface
 - v2 app-server usage
-- current child worker spawning
+- explicit workstream creation and registration
+- nested workstream directories with `WORKSTREAM.md` and `AGENTS.md`
+- canonical request/response item landing
+- heartbeat, cron, and webhook registration delivery
+- bridge-global event/wake storage and local registration projections
+- global/local hidden directory model
 
-The following parts of this spec are target architecture and not yet implemented:
+The following parts of this spec remain target architecture or incomplete operational hardening:
 
-- workstreams as explicit nested directories with `WORKSTREAM.md`
-- workstream creation/registration
-- canonical item/thread 1:1 landing path
-- wakeup registration system
-- bridge-global fired-event store for cron/heartbeat/webhooks
-- local registration projections
-- global/local hidden directory model as described here
+- parent worker wait/watch loop for child workers
+- broader admin/operator-wide inspection and repair tooling
+- retention/cleanup policy for attachments, webhook payloads, archived items, events, logs, and registrations
+- multi-workspace OAuth install flow
+- HTTP health/readiness endpoints
 
 ## Open Items
 
@@ -828,6 +820,5 @@ Some details remain intentionally unresolved and belong in the separate issues/T
 - exact local/global file names beyond the agreed conceptual buckets
 - exact scaffold wording/templates
 - exact registration JSON shape
-- exact auth/body-limit/idempotency implementation details
 - whether and where to lean on the new v2 filesystem RPCs in implementation
 - retention/cleanup policy for archived items, events, logs, and registrations

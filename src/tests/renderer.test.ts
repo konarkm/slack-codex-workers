@@ -31,10 +31,10 @@ describe("renderer", () => {
 
   it("flattens local markdown links while preserving plain text paths", () => {
     const text = normalizeSlackMrkdwn(
-      "See [schema.ts](/Users/konark/code/work/foo/schema.ts#L10), [local](./src/file.ts), [file](file:///tmp/a.txt), and plain /Users/konark/code/work/foo/schema.ts.",
+      "See [schema.ts](/workspace/project/foo/schema.ts#L10), [local](./src/file.ts), [file](file:///tmp/a.txt), and plain /workspace/project/foo/schema.ts.",
     );
     expect(text).toBe(
-      "See schema.ts, local, file, and plain /Users/konark/code/work/foo/schema.ts.",
+      "See schema.ts, local, file, and plain /workspace/project/foo/schema.ts.",
     );
   });
 });
