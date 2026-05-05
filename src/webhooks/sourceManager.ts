@@ -86,6 +86,8 @@ function buildWebhookHandlerScaffold(source: string): string {
   return `/**
  * Webhook handler for source "${source}".
  *
+ * This file runs as trusted local code inside the bridge process.
+ *
  * normalizeWebhook(ctx) receives:
  *   ctx.source        -> { id, teamId, source, routeToken, handlerPath, enabled, createdAt, updatedAt }
  *   ctx.method        -> HTTP method

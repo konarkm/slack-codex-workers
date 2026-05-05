@@ -273,7 +273,15 @@ afterEach(async () => {
       clearTimeout(service.registrationPollTimer);
       service.registrationPollTimer = null;
     }
+    for (const timer of service.blockedTurnPolls?.values?.() ?? []) {
+      clearTimeout(timer);
+    }
+    service.blockedTurnPolls?.clear?.();
+    service.blockedTurnDeadlines?.clear?.();
     await service.currentRegistrationLoopPromise?.catch(() => undefined);
+    await service.webhooks?.stop?.().catch(() => undefined);
+    await service.slack?.stop?.().catch(() => undefined);
+    await service.codex?.stop?.().catch(() => undefined);
     try {
       service.store.close();
     } catch {
@@ -1422,6 +1430,26 @@ describe("service lifecycle decisions", () => {
     expect(result.response).toContain("dm-thread-new");
     expect((service as any).pendingInteractiveRequests.has("dm-thread-old")).toBe(false);
     expect(store.getDmSession("T1", "U-admin")?.appThreadId).toBe("dm-thread-new");
+    store.close();
+  });
+
+  it("declines orphaned interactive requests without caching them", async () => {
+    const { service, codex, store } = await createService();
+
+    await service.handleInteractiveRequest({
+      kind: "tool_user_input",
+      requestId: "req-orphan",
+      threadId: "missing-thread",
+      turnId: "turn-orphan",
+      itemId: "item-orphan",
+      promptText: "Need input",
+      questionIds: ["confirm"],
+      schemaJson: null,
+      params: {},
+    });
+
+    expect(codex.respondToServerRequest).toHaveBeenCalledWith("req-orphan", { answers: {} });
+    expect((service as any).pendingInteractiveRequests.has("missing-thread")).toBe(false);
     store.close();
   });
 
@@ -3343,6 +3371,11 @@ describe("service lifecycle decisions", () => {
     });
 
     const result = await service.ingestWebhookEvent(makeRawWebhookIngress(webhookSource, {
+      headers: {
+        "authorization": "Bearer secret-token",
+        "content-type": "application/json",
+        "x-hub-signature-256": "sha256=secret",
+      },
       parsedJson: {
         event: "push",
         dedupeKey: "evt-1",
@@ -3361,6 +3394,13 @@ describe("service lifecycle decisions", () => {
     expect(wakes[0]).toMatchObject({ status: "delivered", firedEvent: "push" });
     expect(wakes[0]?.payloadPath).toContain(path.join(dir, "webhooks", "events", "github"));
     await expect(fs.readFile(wakes[0]!.payloadPath!, "utf8")).resolves.toContain("\"source\": \"github\"");
+    const eventPayload = JSON.parse(await fs.readFile(wakes[0]!.payloadPath!, "utf8"));
+    const rawRequest = JSON.parse(await fs.readFile(eventPayload.rawRequestPath, "utf8"));
+    expect(rawRequest.headers).toMatchObject({
+      authorization: "[redacted]",
+      "content-type": "application/json",
+      "x-hub-signature-256": "[redacted]",
+    });
     expect(codex.startTurnWithResumeFallback).toHaveBeenCalledWith(
       "thread-1",
       expect.objectContaining({
@@ -3377,6 +3417,30 @@ describe("service lifecycle decisions", () => {
       expect.any(Object),
       expect.any(Object),
     );
+    store.close();
+  });
+
+  it("does not persist rejected webhook requests", async () => {
+    const { dir, service, store } = await createService();
+    service.runtimeStarted = true;
+    const webhookSource = await createWebhookSource(service, { source: "github" });
+
+    await expect(service.ingestWebhookEvent(makeRawWebhookIngress(webhookSource, {
+      headers: {
+        authorization: "Bearer invalid",
+        "content-type": "application/json",
+      },
+      parsedJson: { reject: true },
+      rawBody: "{\"reject\":true}",
+    }))).resolves.toMatchObject({
+      status: 401,
+      body: expect.objectContaining({
+        ok: false,
+        error: "signature_invalid",
+      }),
+    });
+
+    await expect(fs.access(path.join(dir, "webhooks", "raw", "github"))).rejects.toThrow();
     store.close();
   });
 

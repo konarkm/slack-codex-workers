@@ -2236,6 +2236,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       handler_path: source.handlerPath,
       handler_contract: {
         export_name: "normalizeWebhook",
+        execution_model: "trusted local code loaded in the bridge process",
         ctx_fields: [
           "source",
           "method",
@@ -2351,7 +2352,6 @@ export class SlackCodexWorkersService extends EventEmitter {
     if (!this.runtimeStarted || this.stopping) {
       throw shutdownWebhookIngressError();
     }
-    const rawRequestPath = await this.writeRawWebhookRequest(input);
     const result = await runWebhookHandler(input.source, {
       routePath: input.routePath,
       method: input.method,
@@ -2390,6 +2390,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       };
     }
 
+    const rawRequestPath = await this.writeRawWebhookRequest(input);
     const teamId = input.source.teamId;
     let createdEvents = 0;
     let duplicateEvents = 0;
@@ -2508,7 +2509,7 @@ export class SlackCodexWorkersService extends EventEmitter {
       method: input.method,
       url: input.url,
       receivedAt: input.receivedAt,
-      headers: input.headers,
+      headers: redactWebhookHeaders(input.headers),
       parsedJson: input.parsedJson,
       rawBody: input.rawBody,
     };
@@ -2914,10 +2915,9 @@ export class SlackCodexWorkersService extends EventEmitter {
   }
 
   private async handleInteractiveRequest(request: InteractiveRequest): Promise<void> {
-    this.pendingInteractiveRequests.set(request.threadId, request);
-
     const worker = this.store.getWorkerByAppThreadId(request.threadId);
     if (worker) {
+      this.pendingInteractiveRequests.set(request.threadId, request);
       const pending = this.toPendingRequestState(request);
       this.store.updateWorkerState(worker.key, {
         status: "blocked_input",
@@ -2930,6 +2930,7 @@ export class SlackCodexWorkersService extends EventEmitter {
 
     const session = this.store.listDmSessions().find((candidate) => candidate.appThreadId === request.threadId) ?? null;
     if (session) {
+      this.pendingInteractiveRequests.set(request.threadId, request);
       this.store.upsertDmSession({
         ...session,
         status: "blocked_input",
@@ -3470,6 +3471,7 @@ export class SlackCodexWorkersService extends EventEmitter {
   }
 
   private scheduleWorkerBlockedTurnPoll(workerKey: string): void {
+    if (this.stopping) return;
     const pollKey = this.getWorkerPollKey(workerKey);
     if (this.blockedTurnPolls.has(pollKey)) return;
     this.blockedTurnDeadlines.set(pollKey, Date.now() + BLOCKED_RUNNING_TURN_POLL_WINDOW_MS);
@@ -3477,6 +3479,7 @@ export class SlackCodexWorkersService extends EventEmitter {
   }
 
   private queueWorkerBlockedTurnPoll(workerKey: string): void {
+    if (this.stopping) return;
     const pollKey = this.getWorkerPollKey(workerKey);
     const timer = setTimeout(() => {
       void this.runWorkerBlockedTurnPoll(workerKey);
@@ -3487,6 +3490,10 @@ export class SlackCodexWorkersService extends EventEmitter {
   private async runWorkerBlockedTurnPoll(workerKey: string): Promise<void> {
     const pollKey = this.getWorkerPollKey(workerKey);
     this.blockedTurnPolls.delete(pollKey);
+    if (this.stopping) {
+      this.blockedTurnDeadlines.delete(pollKey);
+      return;
+    }
     const worker = this.store.getWorkerByKey(workerKey);
     if (!worker || worker.status !== "blocked_running_turn") {
       this.clearBlockedTurnPoll(pollKey);
@@ -3516,6 +3523,7 @@ export class SlackCodexWorkersService extends EventEmitter {
   }
 
   private scheduleDmBlockedTurnPoll(teamId: string, userId: string): void {
+    if (this.stopping) return;
     const pollKey = this.getDmPollKey(teamId, userId);
     if (this.blockedTurnPolls.has(pollKey)) return;
     this.blockedTurnDeadlines.set(pollKey, Date.now() + BLOCKED_RUNNING_TURN_POLL_WINDOW_MS);
@@ -3523,6 +3531,7 @@ export class SlackCodexWorkersService extends EventEmitter {
   }
 
   private queueDmBlockedTurnPoll(teamId: string, userId: string): void {
+    if (this.stopping) return;
     const pollKey = this.getDmPollKey(teamId, userId);
     const timer = setTimeout(() => {
       void this.runDmBlockedTurnPoll(teamId, userId);
@@ -3533,6 +3542,10 @@ export class SlackCodexWorkersService extends EventEmitter {
   private async runDmBlockedTurnPoll(teamId: string, userId: string): Promise<void> {
     const pollKey = this.getDmPollKey(teamId, userId);
     this.blockedTurnPolls.delete(pollKey);
+    if (this.stopping) {
+      this.blockedTurnDeadlines.delete(pollKey);
+      return;
+    }
     const session = this.store.getDmSession(teamId, userId);
     if (!session || session.status !== "blocked_running_turn" || !session.appThreadId) {
       this.clearBlockedTurnPoll(pollKey);
@@ -4045,6 +4058,29 @@ function resolveRuntimeSettings(
 
 function supportsFastMode(model: string | null): boolean {
   return model === FAST_MODE_MODEL;
+}
+
+const SENSITIVE_WEBHOOK_HEADER_NAMES = new Set([
+  "authorization",
+  "cookie",
+  "proxy-authorization",
+  "set-cookie",
+  "x-api-key",
+  "x-github-token",
+  "x-hub-signature",
+  "x-hub-signature-256",
+  "x-linear-signature",
+  "x-slack-signature",
+  "x-stripe-signature",
+]);
+
+function redactWebhookHeaders(headers: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(headers).map(([key, value]) => [
+      key,
+      SENSITIVE_WEBHOOK_HEADER_NAMES.has(key.toLowerCase()) ? "[redacted]" : value,
+    ]),
+  );
 }
 
 function formatFastMode(value: boolean): string {
