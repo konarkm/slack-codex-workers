@@ -1,8 +1,22 @@
 # slack-codex-workers
 
-Slack-first bridge for running many Codex app-server workers behind one Slack bot identity.
+Personal, local-first Slack interface for running many Codex app-server workers behind one Slack bot identity.
+
+This is a tool I built for my own Codex workflow as a single human operator. It can be useful for serious work, but it is not a polished team Slack app, SaaS product, or Slack Marketplace install. The core shape is: one trusted person uses Slack as the control surface, and that person can fan out work to many Codex workers, bounded by local machine resources, Slack/Codex limits, and the one shared `codex app-server`.
 
 Licensed under Apache-2.0.
+
+## Trust Model
+
+This bridge is built and tested for a trusted local machine, a trusted Slack workspace, and one trusted human operator. Slack is the interface and transport, not the permission boundary.
+
+Do not add this bot to a shared Slack workspace. It has not been tested as a multi-user Slack app. In the current design, every top-level message in a registered workstream channel can create a Codex worker, and replies in that thread can steer the worker. Treat every person or app that can post in registered workstream channels as trusted with local shell and filesystem access.
+
+Codex worker and admin threads run from `WORKSPACE_ROOT` with non-interactive approval and full local filesystem access, not a filesystem sandbox limited to that directory.
+
+Treat registered Slack workstream channels, local files, webhook handlers, uploaded artifacts, and the configured `codex` runtime as part of one trusted operator environment. Multi-human/team permissioning is a natural future direction, but it is not the safety model implemented here today.
+
+Webhook source route URLs are bearer secrets. If you expose webhook ingress beyond localhost, handler code should verify the upstream provider's signature or shared secret before accepting a delivery. Accepted webhook request bodies and normalized events are stored on disk under the configured webhook payload storage directory, so treat that runtime state as potentially containing secrets or PII.
 
 ## What It Does
 
@@ -72,6 +86,7 @@ Implemented in this repo:
   - `.health` / `/health`
   - `.model` / `/model`
   - `.effort` / `/effort`
+  - `.fast` / `/fast`
   - `.compact` / `/compact`
   - `.stop` / `/stop`
   - `.recover` / `/recover`
@@ -82,6 +97,7 @@ Implemented in this repo:
   - `.health` / `/health`
   - `.model` / `/model`
   - `.effort` / `/effort`
+  - `.fast` / `/fast`
   - `.compact` / `/compact`
   - `.new-thread` / `/new-thread`
   - `.stop` / `/stop`
@@ -90,27 +106,36 @@ Implemented in this repo:
   - `.restart-now` / `/restart-now`
   - `.restart-cancel` / `/restart-cancel`
   - `.workstream-create <slug> [parent=<path>] [channel=<name>] [description...]` / `/workstream-create <slug> [parent=<path>] [channel=<name>] [description...]`
+  - `.workstream-archive <path>` / `/workstream-archive <path>`
 - image and file attachment ingestion
 
-Not implemented yet:
+## Not Yet Supported
 
+These are out of scope for the current repo state:
+
+- multi-human or team-safe permissioning
+- hosted/SaaS deployment
+- Slack Marketplace install flow or multi-workspace OAuth
+- sandboxing webhook handlers or Codex workers away from the local machine
+- npm package distribution
 - parent worker wait/watch loop for child workers
 - webhook/upload retention cleanup and broader repair tooling
 - richer admin/operator-wide inspection and control-plane tools
-- multi-workspace OAuth install flow
 - HTTP health/readiness endpoints
 
 ## Requirements
 
 - Node 24+
-- local `codex` binary on `PATH`, or `CODEX_BIN` set explicitly
+- local authenticated Codex CLI with `codex app-server` support, available on `PATH` or via `CODEX_BIN`
 - Slack app configured for Socket Mode
 
-## Trust Model
+## Slack App Setup
 
-This bridge is designed for a trusted local machine and workspace. Codex worker and admin threads currently run from `WORKSPACE_ROOT` with non-interactive approval and full local filesystem access, not a filesystem sandbox limited to that directory. Only connect it to Slack workspaces and admin users you trust, and treat local files, webhook handlers, and uploaded artifacts as accessible to the running workers.
+Use a Slack app with Socket Mode enabled. The app-level token (`SLACK_APP_TOKEN`) needs:
 
-Required Slack bot scopes for the default bootstrap and workstream-creation path:
+- `connections:write`
+
+Required bot token scopes for the default bootstrap and workstream-creation path:
 
 - `app_mentions:read`
 - `channels:history`
@@ -125,7 +150,17 @@ Required Slack bot scopes for the default bootstrap and workstream-creation path
 - `groups:read`
 - `im:history`
 - `im:read`
+- `im:write`
+- `reactions:write`
 - `users:read`
+
+Subscribe the bot to these event types:
+
+- `message.channels`
+- `message.groups`
+- `message.im`
+
+After adding or changing scopes/events, reinstall the Slack app to the workspace and update `SLACK_BOT_TOKEN` / `SLACK_APP_TOKEN` if Slack rotates either token.
 
 ## Configuration
 
@@ -141,7 +176,7 @@ Key variables:
 - `SLACK_APP_TOKEN`: Socket Mode app token
 - `SLACK_ADMIN_USER_IDS`: comma-separated Slack user IDs allowed to use DM admin controls
 - `SLACK_ALLOWED_TEAM_ID`: optional hard guard for one workspace
-- `WORKSPACE_ROOT`: canonical workspace root. Codex runs here, and bridge state defaults under `WORKSPACE_ROOT/.slack-workers/`
+- `WORKSPACE_ROOT`: existing writable workspace root. Codex runs here, and bridge state defaults under `WORKSPACE_ROOT/.slack-workers/`
 - `CODEX_CWD`: legacy alias for `WORKSPACE_ROOT`; still accepted for compatibility, but `WORKSPACE_ROOT` is the preferred env var
 - `DATABASE_PATH`: optional SQLite override. Default: `WORKSPACE_ROOT/.slack-workers/bridge/bridge.sqlite`
 - `SUPERVISOR_RESTART_ENABLED`: set automatically by `./scripts/launch.sh`; only override it if you know what you are doing
@@ -172,9 +207,10 @@ npm ci
 ./scripts/launch.sh
 ```
 
-That is the preferred path for local use and dogfooding. It:
+That is the preferred path for local use. It:
 - loads `.env`
 - verifies required env vars and the local `codex` binary
+- starts one `codex app-server` subprocess from `WORKSPACE_ROOT`
 - keeps one bridge instance running
 - enables queued `/restart` support automatically
 - runs `tsx src/index.ts` in dev mode so queued restarts actually relaunch the bridge cleanly
@@ -190,6 +226,19 @@ For a supervised production build:
 ```bash
 ./scripts/launch.sh --prod
 ```
+
+## Agent / Operator Notes
+
+If you are an agent reading this repo, preserve the single-operator trust model unless the code changes to enforce something stronger.
+
+- Do not describe this as multi-user safe.
+- Do not assume Slack channel membership is authorization.
+- Treat registered workstream channel messages as operator commands from someone trusted with local shell/filesystem access.
+- Treat webhook handlers as trusted local code running in the bridge process.
+- Treat webhook route URLs as bearer secrets, and verify provider signatures/secrets in handler code before accepting externally exposed webhook deliveries.
+- Treat webhook payload storage as sensitive runtime state because accepted raw bodies and normalized event payloads are persisted.
+- Treat `WORKSPACE_ROOT` as the Codex execution root and the owner of runtime state.
+- Prefer explicit operator approval before creating workstreams, changing webhook handlers, or adding durable registrations.
 
 ## Behavior Notes
 
@@ -219,7 +268,7 @@ For a supervised production build:
 - If Codex is still running but the bridge lost the turn id during a crash/restart window, the thread enters a temporary blocked state and polls until the turn settles or recovery is required.
 - Normal user messages sent while a thread is blocked or recovery-required are rejected and must be resent after the thread becomes usable again.
 - Attachment-only messages are supported; images are passed as images and other files are stored locally with file-path notes.
-- `slack_upload_files` uploads one or more local files from allowed roots into the current Slack conversation; worker threads upload into the active thread, and admin DMs upload into the DM conversation.
+- `slack_upload_files` uploads one or more local files from allowed roots into the current Slack conversation; worker threads upload into the active thread, and admin DMs upload into the DM conversation. Allowed roots are `WORKSPACE_ROOT`, `ATTACHMENT_STORAGE_DIR`, and the OS temp directory.
 - `get_current_time` returns the current UTC time, the configured workspace timezone, and the current local time in that timezone.
 - `get_current_slack_thread_link` is worker-only and returns JSON containing the exact permalink for the current public Slack thread root plus `team_id`, `channel_id`, and `root_ts`.
 - `slack_list_channels` only returns registered workstream channels.
@@ -238,7 +287,7 @@ For a supervised production build:
 - When `target='self'` wake work is actually delivered to a worker, the bridge posts a system message in the Slack thread showing the exact wake input sent to Codex.
 - `set_cron` expects a 5-field numeric cron string and uses `WORKSPACE_TIMEZONE` when evaluating schedules.
 - `list_wake_deliveries` returns runtime wake delivery records in scope, including queued, delivered, failed, and quarantined entries.
-- Webhook ingress listens under `WEBHOOK_PATH`, resolves requests by source-specific secret route tokens, rate-limits repeated handler auth failures per client, times out slow request bodies, and hands raw request bodies plus best-effort parsed JSON to the source handler.
+- Webhook ingress listens under `WEBHOOK_PATH`, resolves requests by source-specific secret route tokens, rate-limits repeated handler auth failures per client, times out slow request bodies, and hands raw request bodies plus best-effort parsed JSON to the source handler. Route tokens are bearer secrets, not a full provider authentication scheme; exposed handlers should verify provider signatures or shared secrets. Accepted raw bodies and normalized events are persisted under `WEBHOOK_PAYLOAD_STORAGE_DIR`.
 - For a local Cloudflare Tunnel deployment, prefer `WEBHOOK_BIND_HOST=127.0.0.1`, set `WEBHOOK_PUBLIC_BASE_URL` to the public hostname, and enable `WEBHOOK_TRUST_LOOPBACK_PROXY=1` so auth throttling can key off Cloudflare-forwarded client IPs only when the immediate peer is local.
 - `/status` and `/health` are available in worker threads and admin DMs. Thread commands report thread-specific state; DM commands report bridge-wide state.
 - Dot-command aliases such as `.status`, `.health`, `.restart`, and `.workstream-create` are supported everywhere the slash commands are supported. In the Slack client, dot commands are the most reliable form because some slash commands collide with Slack's built-in command UI. If you still prefer slash commands, a leading space also works because the bridge trims message text before parsing.
