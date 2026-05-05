@@ -2,6 +2,8 @@
 
 Slack-first bridge for running many Codex app-server workers behind one Slack bot identity.
 
+Licensed under Apache-2.0.
+
 ## What It Does
 
 - Registered Slack channels act as workstream homes.
