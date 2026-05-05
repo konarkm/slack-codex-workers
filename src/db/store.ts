@@ -178,7 +178,7 @@ function parseStringMap(value: string | null | undefined): Record<string, string
 }
 
 function normalizeTeamDefaults(defaults: TeamDefaults): TeamDefaults {
-  if (defaults.model !== "gpt-5.4" && defaults.fastMode) {
+  if (defaults.model !== "gpt-5.5" && defaults.fastMode) {
     return { ...defaults, fastMode: false };
   }
   return defaults;

@@ -348,13 +348,13 @@ describe("codex client dynamic tool routing", () => {
     client.rpc = { request };
     client.activeTurns = new Map();
 
-    await client.createWorkerThread({ model: "gpt-5.4", effort: "high", fastMode: true });
-    await client.createAdminThread({ model: "gpt-5.4", effort: "medium", fastMode: true });
-    await client.forkWorkerThread("thread-parent", { model: "gpt-5.4", effort: "medium", fastMode: false });
+    await client.createWorkerThread({ model: "gpt-5.5", effort: "high", fastMode: true });
+    await client.createAdminThread({ model: "gpt-5.5", effort: "medium", fastMode: true });
+    await client.forkWorkerThread("thread-parent", { model: "gpt-5.5", effort: "medium", fastMode: false });
     await client.startTurn(
       "thread-new",
       { text: "hi", imagePaths: [] },
-      { model: "gpt-5.4", effort: "low", fastMode: false },
+      { model: "gpt-5.5", effort: "low", fastMode: false },
       {
         onTurnStarted: vi.fn(),
         onAgentDelta: vi.fn(),
@@ -366,7 +366,7 @@ describe("codex client dynamic tool routing", () => {
     await client.startTurn(
       "thread-new",
       { text: "go fast", imagePaths: [] },
-      { model: "gpt-5.4", effort: "low", fastMode: true },
+      { model: "gpt-5.5", effort: "low", fastMode: true },
       {
         onTurnStarted: vi.fn(),
         onAgentDelta: vi.fn(),
@@ -378,11 +378,11 @@ describe("codex client dynamic tool routing", () => {
 
     expect(request.mock.calls[0]).toEqual([
       "thread/start",
-      expect.objectContaining({ model: "gpt-5.4", serviceTier: "fast" }),
+      expect.objectContaining({ model: "gpt-5.5", serviceTier: "fast" }),
     ]);
     expect(request.mock.calls[1]).toEqual([
       "thread/start",
-      expect.objectContaining({ model: "gpt-5.4", serviceTier: "fast" }),
+      expect.objectContaining({ model: "gpt-5.5", serviceTier: "fast" }),
     ]);
     expect(request.mock.calls[2]).toEqual([
       "thread/resume",

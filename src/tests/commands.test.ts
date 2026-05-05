@@ -3,10 +3,10 @@ import { helpText, normalizeEffort, parseSlashCommand } from "../core/commands.j
 
 describe("commands", () => {
   it("parses known slash commands", () => {
-    expect(parseSlashCommand("/model gpt-5.4")).toEqual({
+    expect(parseSlashCommand("/model gpt-5.5")).toEqual({
       name: "model",
-      args: ["gpt-5.4"],
-      raw: "/model gpt-5.4",
+      args: ["gpt-5.5"],
+      raw: "/model gpt-5.5",
     });
   });
 

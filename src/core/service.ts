@@ -87,7 +87,7 @@ const BLOCKED_RUNNING_TURN_POLL_WINDOW_MS = 30_000;
 const REGISTRATION_POLL_INTERVAL_MS = 5_000;
 const WAKE_RETRY_MAX_ATTEMPTS = 3;
 const COMPACTION_STALE_TIMEOUT_MS = 10 * 60 * 1000;
-const FAST_MODE_MODEL = "gpt-5.4";
+const FAST_MODE_MODEL = "gpt-5.5";
 const webhookShutdownErrorCode = "WEBHOOK_SHUTDOWN";
 const STATUS_REACTIONS = {
   seen: "eyes",

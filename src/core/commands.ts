@@ -66,7 +66,7 @@ export function helpText(scope: "dm" | "thread"): string {
     lines.push(".restart-cancel - cancel the currently queued restart");
     lines.push(".model [id] - show or set the global default model for threads without overrides");
     lines.push(".effort [level] - show or set the global default effort for threads without overrides");
-    lines.push(".fast [on|off|status] - show or set the global default fast mode for GPT-5.4 threads");
+    lines.push(".fast [on|off|status] - show or set the global default fast mode for GPT-5.5 threads");
     lines.push(".compact - compact the DM admin conversation");
     lines.push(".new-thread - attach this admin DM to a fresh Codex thread immediately");
     lines.push(".stop - request interruption of the active DM admin turn");
@@ -80,7 +80,7 @@ export function helpText(scope: "dm" | "thread"): string {
   lines.push(".health - show this worker thread diagnostics");
   lines.push(".model [id] - show or set model for this worker thread");
   lines.push(".effort [level] - show or set reasoning effort for this worker thread");
-  lines.push(".fast [on|off|status] - show or set GPT-5.4 fast mode for this worker thread");
+  lines.push(".fast [on|off|status] - show or set GPT-5.5 fast mode for this worker thread");
   lines.push(".compact - compact this worker thread when idle");
   lines.push(".stop - request interruption of the active worker turn");
   lines.push(".recover - recover this thread only when the backing Codex thread is missing or blocked");

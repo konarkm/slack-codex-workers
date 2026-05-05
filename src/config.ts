@@ -187,7 +187,7 @@ function validateTimezone(value: string): string {
 }
 
 export const DEFAULT_EFFORTS: ReasoningEffort[] = ["minimal", "low", "medium", "high", "xhigh"];
-export const DEFAULT_MODEL = "gpt-5.4";
+export const DEFAULT_MODEL = "gpt-5.5";
 export const DEFAULT_RUNTIME_SETTINGS: RuntimeSettings = {
   model: DEFAULT_MODEL,
   effort: "medium",

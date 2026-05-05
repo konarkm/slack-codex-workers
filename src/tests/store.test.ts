@@ -102,7 +102,7 @@ describe("store", () => {
       currentAgentSlackTs: "2.000",
       currentAgentItemId: "item-1",
       currentWorklogSlackTs: "3.000",
-      settings: { model: "gpt-5.4", effort: "high", fastMode: true },
+      settings: { model: "gpt-5.5", effort: "high", fastMode: true },
       identity: { username: "Gear", iconEmoji: "gear" },
       parentWorkerKey: null,
       requestItemId: null,
@@ -205,7 +205,7 @@ describe("store", () => {
       null,
       null,
       null,
-      JSON.stringify({ model: "gpt-5.4", effort: "high", fastMode: false }),
+      JSON.stringify({ model: "gpt-5.5", effort: "high", fastMode: false }),
       null,
       null,
       null,
@@ -233,7 +233,7 @@ describe("store", () => {
       null,
       null,
       null,
-      JSON.stringify({ model: "gpt-5.4", effort: "high", fastMode: false }),
+      JSON.stringify({ model: "gpt-5.5", effort: "high", fastMode: false }),
       null,
       null,
       null,
@@ -315,7 +315,7 @@ describe("store", () => {
       null,
       null,
       null,
-      JSON.stringify({ model: "gpt-5.4", effort: "high", fastMode: false }),
+      JSON.stringify({ model: "gpt-5.5", effort: "high", fastMode: false }),
       null,
       null,
       null,
@@ -344,7 +344,7 @@ describe("store", () => {
       null,
       null,
       null,
-      JSON.stringify({ model: "gpt-5.4", effort: "high", fastMode: false }),
+      JSON.stringify({ model: "gpt-5.5", effort: "high", fastMode: false }),
       null,
       null,
       null,
@@ -373,7 +373,7 @@ describe("store", () => {
       null,
       null,
       null,
-      JSON.stringify({ model: "gpt-5.4", effort: "high", fastMode: false }),
+      JSON.stringify({ model: "gpt-5.5", effort: "high", fastMode: false }),
       null,
       null,
       null,
@@ -400,19 +400,19 @@ describe("store", () => {
   it("stores team fast-mode defaults", async () => {
     const { store } = await createStore();
     expect(store.getTeamDefaults("T1")).toMatchObject({
-      model: "gpt-5.4",
+      model: "gpt-5.5",
       effort: "medium",
       fastMode: false,
     });
 
     store.setTeamDefaults("T1", {
-      model: "gpt-5.4",
+      model: "gpt-5.5",
       effort: "high",
       fastMode: true,
     });
 
     expect(store.getTeamDefaults("T1")).toEqual({
-      model: "gpt-5.4",
+      model: "gpt-5.5",
       effort: "high",
       fastMode: true,
     });
@@ -422,18 +422,18 @@ describe("store", () => {
   it("normalizes incompatible persisted team fast-mode defaults on read", async () => {
     const { store } = await createStore();
     store.setTeamDefaults("T1", {
-      model: "gpt-5.5",
+      model: "gpt-5.3",
       effort: "medium",
       fastMode: true,
     });
 
     expect(store.getTeamDefaults("T1")).toEqual({
-      model: "gpt-5.5",
+      model: "gpt-5.3",
       effort: "medium",
       fastMode: false,
     });
     expect(store.getTeamDefaults("T1")).toEqual({
-      model: "gpt-5.5",
+      model: "gpt-5.3",
       effort: "medium",
       fastMode: false,
     });
