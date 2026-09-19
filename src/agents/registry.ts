@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
-import { DEFAULT_WAKE_POLICY, type AgentHost, type AgentSpec } from "./types.js";
+import { DEFAULT_DENY_TOOLS, DEFAULT_WAKE_POLICY, type AgentHost, type AgentSpec } from "./types.js";
 
 const agentNamePattern = /^[a-z][a-z0-9-]{0,31}$/;
 
@@ -27,6 +27,7 @@ const agentSchema = z.object({
   slackAppTokenEnv: z.string().min(1).optional(),
   instructions: z.string().min(1).optional(),
   inheritUserConfig: z.boolean().default(true),
+  denyTools: z.array(z.string().min(1)).optional(),
 });
 
 const registrySchema = z.object({ agents: z.array(agentSchema) });
@@ -69,6 +70,7 @@ export function parseAgentRegistry(raw: unknown, agentsRoot: string): AgentSpec[
       slackAppTokenEnv: entry.slackAppTokenEnv ?? `SLACK_APP_TOKEN_${envSuffix(entry.name)}`,
       instructionsPath: entry.instructions ? path.resolve(expandHome(entry.instructions)) : null,
       inheritUserConfig: entry.inheritUserConfig,
+      denyTools: entry.denyTools ?? DEFAULT_DENY_TOOLS,
     };
   });
 }

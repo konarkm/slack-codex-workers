@@ -21,7 +21,10 @@ export interface InboxItem {
   imagePaths: string[];
   // in_flight: handed to the runtime, not yet confirmed consumed by a finished turn.
   status: "queued" | "in_flight" | "delivered" | "failed";
+  // Times this input has been handed to the runtime.
   attempts: number;
+  // Turns that failed because of this input.
+  faults: number;
   createdAt: string;
   deliveredAt: string | null;
 }
@@ -79,6 +82,7 @@ interface InboxRow {
   image_paths_json: string;
   status: string;
   attempts: number;
+  faults: number;
   created_at: string;
   delivered_at: string | null;
 }
@@ -163,6 +167,9 @@ export class AgentStore {
     if (!(this.db.prepare("PRAGMA table_info(inbox)").all() as Array<{ name: string }>).some((column) => column.name === "attempts")) {
       this.db.exec("ALTER TABLE inbox ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0");
     }
+    if (!(this.db.prepare("PRAGMA table_info(inbox)").all() as Array<{ name: string }>).some((column) => column.name === "faults")) {
+      this.db.exec("ALTER TABLE inbox ADD COLUMN faults INTEGER NOT NULL DEFAULT 0");
+    }
   }
 
   close(): void {
@@ -227,18 +234,37 @@ export class AgentStore {
     for (const id of ids) statement.run(id);
   }
 
-  // The runtime finished the turns that consumed this input.
-  markInFlightDelivered(agent: string): void {
-    this.db.prepare("UPDATE inbox SET status = 'delivered', delivered_at = ? WHERE agent = ? AND status = 'in_flight'").run(new Date().toISOString(), agent);
+  // The hand-off to the runtime failed, so the agent never saw these; this does not count as a delivery.
+  returnUndelivered(ids: number[]): void {
+    const statement = this.db.prepare("UPDATE inbox SET status = 'queued', attempts = MAX(attempts - 1, 0) WHERE id = ? AND status = 'in_flight'");
+    for (const id of ids) statement.run(id);
   }
 
-  // The runtime died or failed before confirming this input; it goes back in the queue, up to maxAttempts deliveries.
-  // Returns the rows given up on.
-  requeueInFlight(agent: string, maxAttempts: number): InboxItem[] {
-    const abandoned = (this.db.prepare("SELECT * FROM inbox WHERE agent = ? AND status = 'in_flight' AND attempts >= ?").all(agent, maxAttempts) as unknown as InboxRow[]).map(mapInboxRow);
-    this.db.prepare("UPDATE inbox SET status = 'failed' WHERE agent = ? AND status = 'in_flight' AND attempts >= ?").run(agent, maxAttempts);
-    this.db.prepare("UPDATE inbox SET status = 'queued' WHERE agent = ? AND status = 'in_flight'").run(agent);
+  // A finished turn took these inputs in.
+  markDelivered(ids: number[]): void {
+    const statement = this.db.prepare("UPDATE inbox SET status = 'delivered', delivered_at = ? WHERE id = ? AND status = 'in_flight'");
+    const now = new Date().toISOString();
+    for (const id of ids) statement.run(now, id);
+  }
+
+  // A turn that took these inputs failed. They go back in the queue. When the input itself caused the failure it counts
+  // as a fault, and an input with maxFaults faults is given up on. Returns the rows given up on.
+  requeue(ids: number[], countFault: boolean, maxFaults: number): InboxItem[] {
+    const abandoned: InboxItem[] = [];
+    for (const id of ids) {
+      const row = this.getInboxItem(id);
+      if (!row || row.status !== "in_flight") continue;
+      const faults = row.faults + (countFault ? 1 : 0);
+      const status = faults >= maxFaults ? "failed" : "queued";
+      this.db.prepare("UPDATE inbox SET status = ?, faults = ? WHERE id = ?").run(status, faults, id);
+      if (status === "failed") abandoned.push({ ...row, status, faults });
+    }
     return abandoned;
+  }
+
+  // The runtime went away without reporting on these; nothing suggests the input was at fault.
+  requeueAllInFlight(agent: string): number {
+    return Number(this.db.prepare("UPDATE inbox SET status = 'queued' WHERE agent = ? AND status = 'in_flight'").run(agent).changes);
   }
 
   // Marks a source event as handled without delivering it (operator commands), so a redelivery is ignored.
@@ -428,6 +454,7 @@ function mapInboxRow(row: InboxRow): InboxItem {
     imagePaths: JSON.parse(row.image_paths_json) as string[],
     status: row.status as InboxItem["status"],
     attempts: row.attempts,
+    faults: row.faults,
     createdAt: row.created_at,
     deliveredAt: row.delivered_at,
   };

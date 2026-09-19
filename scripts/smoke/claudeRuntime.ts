@@ -20,6 +20,7 @@ const spec: AgentSpec = {
   slackAppTokenEnv: "",
   instructionsPath: null,
   inheritUserConfig: false,
+  denyTools: [],
 };
 
 const sent: string[] = [];

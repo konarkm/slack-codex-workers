@@ -3,6 +3,7 @@
 // Needs an app configuration token for the target workspace (api.slack.com/apps → "Your App Configuration Tokens"):
 //   SLACK_CONFIG_TOKEN, and optionally SLACK_CONFIG_REFRESH_TOKEN so the 12-hour token can be rotated.
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { WebClient } from "@slack/web-api";
@@ -24,7 +25,7 @@ if (args.includes("--dry-run")) {
   process.exit(0);
 }
 
-const stateRoot = path.resolve(process.env.AGENTS_STATE_ROOT ?? path.join(process.cwd(), ".slack-agents"));
+const stateRoot = path.resolve(process.env.AGENTS_STATE_ROOT ?? path.join(os.homedir(), ".slack-agents"));
 const tokenFile = path.join(stateRoot, "slack-config-token.json");
 const saved = fs.existsSync(tokenFile) ? (JSON.parse(fs.readFileSync(tokenFile, "utf8")) as { token?: string; refreshToken?: string }) : {};
 let token = saved.token ?? process.env.SLACK_CONFIG_TOKEN;

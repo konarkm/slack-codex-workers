@@ -20,6 +20,10 @@ export interface SlackInbound {
   botUserId: string | null;
   text: string;
   files: SlackFileRef[];
+  // Files Slack listed without a download link (external or still uploading); named so the agent knows they exist.
+  unavailableFiles: string[];
+  // Set when this is an edit of an earlier message; ts is then the edited message's ts.
+  editedAt: string | null;
 }
 
 export interface SlackIdentity {
@@ -67,9 +71,37 @@ interface RawMessageEvent {
   text?: string;
   team?: string;
   files?: Array<{ id?: string; name?: string; mimetype?: string; url_private_download?: string }>;
+  attachments?: Array<{ fallback?: string; text?: string; pretext?: string; title?: string; author_name?: string; from_url?: string }>;
+  blocks?: unknown[];
+  // message_changed wraps the new version here.
+  message?: RawMessageEvent & { edited?: { ts?: string } };
+  previous_message?: RawMessageEvent;
 }
 
-const DELIVERABLE_SUBTYPES = new Set([undefined, "file_share", "bot_message", "thread_broadcast", "me_message"]);
+// Shared and forwarded messages, and most app posts, carry their words in attachments or blocks rather than in text.
+export function supplementaryText(raw: Pick<RawMessageEvent, "attachments" | "blocks">): string {
+  const parts: string[] = [];
+  for (const attachment of raw.attachments ?? []) {
+    const body = [attachment.author_name, attachment.title, attachment.pretext, attachment.text ?? attachment.fallback].filter(Boolean).join(" · ");
+    if (body) parts.push(`[shared] ${body}${attachment.from_url ? ` (${attachment.from_url})` : ""}`);
+  }
+  if (parts.length === 0) {
+    const texts: string[] = [];
+    const walk = (node: unknown): void => {
+      if (Array.isArray(node)) node.forEach(walk);
+      else if (node && typeof node === "object") {
+        const record = node as Record<string, unknown>;
+        if (typeof record.text === "string" && record.type !== "emoji") texts.push(record.text);
+        for (const key of ["text", "elements", "fields", "accessory"]) if (typeof record[key] === "object") walk(record[key]);
+      }
+    };
+    walk(raw.blocks ?? []);
+    if (texts.length > 0) parts.push(texts.join(" "));
+  }
+  return parts.join("\n");
+}
+
+const DELIVERABLE_SUBTYPES = new Set([undefined, "file_share", "bot_message", "thread_broadcast", "me_message", "message_changed"]);
 
 // One named agent's presence in Slack: its own app, its own bot user, its own socket.
 export class AgentSlackClient {
@@ -109,22 +141,36 @@ export class AgentSlackClient {
     (this.app.event as (name: string, listener: () => Promise<void>) => void)("agent_session_stopped", handler);
   }
 
-  async start(): Promise<SlackIdentity> {
-    // Identity first: events start flowing the moment the socket opens, and handling them needs to know who we are.
+  // Who this app is. Called before connect(), so everything that handles events exists before events can arrive.
+  async identify(): Promise<SlackIdentity> {
     const auth = await this.app.client.auth.test({ token: this.botToken });
     if (!auth.team_id || !auth.user_id || !auth.bot_id) throw new Error(`Slack auth.test for ${this.agentName} returned no bot identity`);
     this.identityValue = { teamId: auth.team_id, teamName: auth.team ?? null, botUserId: auth.user_id, botId: auth.bot_id, appId: (auth as { app_id?: string }).app_id ?? null };
-    await this.app.start();
-    logInfo("slack agent connected", { agent: this.agentName, botUserId: auth.user_id, team: auth.team });
     return this.identityValue;
+  }
+
+  async connect(): Promise<void> {
+    await this.app.start();
+    logInfo("slack agent connected", { agent: this.agentName, botUserId: this.identity().botUserId, team: this.identity().teamName });
   }
 
   async stop(): Promise<void> {
     await this.app.stop();
   }
 
-  private async normalize(raw: RawMessageEvent): Promise<SlackInbound | null> {
-    if (raw.hidden || !DELIVERABLE_SUBTYPES.has(raw.subtype)) return null;
+  private async normalize(event: RawMessageEvent): Promise<SlackInbound | null> {
+    if (!DELIVERABLE_SUBTYPES.has(event.subtype)) return null;
+    // An edit arrives wrapped; unwrap it, and ignore the "edits" Slack makes itself (unfurls, thread counters).
+    let raw = event;
+    let editedAt: string | null = null;
+    if (event.subtype === "message_changed") {
+      const changed = event.message;
+      if (!changed || !changed.edited?.ts || changed.text === event.previous_message?.text) return null;
+      raw = { ...changed, channel: event.channel, channel_type: event.channel_type };
+      editedAt = changed.edited.ts;
+    } else if (event.hidden) {
+      return null;
+    }
     if (!raw.channel || !raw.ts) return null;
     const identity = this.identity();
     if (raw.bot_id === identity.botId || raw.user === identity.botUserId) return null;
@@ -134,8 +180,11 @@ export class AgentSlackClient {
     const files = (raw.files ?? [])
       .filter((file) => file.id && file.url_private_download)
       .map((file) => ({ id: file.id!, name: file.name ?? file.id!, mimetype: file.mimetype ?? "application/octet-stream", urlPrivateDownload: file.url_private_download! }));
-    const text = raw.text ?? "";
-    if (!text.trim() && files.length === 0) return null;
+    const unavailableFiles = (raw.files ?? []).filter((file) => !(file.id && file.url_private_download)).map((file) => file.name ?? file.id ?? "unnamed file");
+    const own = raw.text ?? "";
+    const extra = supplementaryText(raw);
+    const text = extra && !own.includes(extra) ? [own, extra].filter((part) => part.trim()).join("\n") : own;
+    if (!text.trim() && files.length === 0 && unavailableFiles.length === 0) return null;
     const botId = raw.bot_id ?? null;
     return {
       teamId: raw.team ?? identity.teamId,
@@ -148,6 +197,8 @@ export class AgentSlackClient {
       botUserId: botId ? await this.resolveBotUser(botId) : null,
       text,
       files,
+      unavailableFiles,
+      editedAt,
     };
   }
 

@@ -17,6 +17,7 @@ const spec: AgentSpec = {
   slackAppTokenEnv: "",
   instructionsPath: null,
   inheritUserConfig: false,
+  denyTools: [],
 };
 
 class FakeRpc extends EventEmitter {
@@ -46,7 +47,7 @@ function setup(sessionId: string | null, sent: string[] = []) {
   const rpc = new FakeRpc();
   const states: RuntimeState[] = [];
   const sessions: Array<string | null> = [];
-  const turns: Array<{ status: string; finalText: string }> = [];
+  const turns: Array<{ status: string; finalText: string; consumedInputIds: string[] }> = [];
   const events: RuntimeEvents = {
     onSessionChanged: (id) => void sessions.push(id),
     onStateChanged: (state) => void states.push(state),
@@ -97,8 +98,8 @@ describe("CodexRuntime", () => {
 
   it("starts a turn when idle and steers the running turn otherwise", async () => {
     const { rpc, runtime, states, turns } = setup(null);
-    await runtime.deliver({ text: "one", imagePaths: [], priority: "next" });
-    await runtime.deliver({ text: "two", imagePaths: ["/tmp/a.png"], priority: "next" });
+    await runtime.deliver({ id: "in-one", text: "one", imagePaths: [], priority: "next" });
+    await runtime.deliver({ id: "in-two", text: "two", imagePaths: ["/tmp/a.png"], priority: "next" });
     const methods = rpc.requests.map((r) => r.method);
     expect(methods).toEqual(["thread/start", "turn/start", "turn/steer"]);
     expect(rpc.requests[2]!.params).toMatchObject({ expectedTurnId: "turn-1" });
@@ -107,18 +108,18 @@ describe("CodexRuntime", () => {
     rpc.emit("notification", { method: "item/completed", params: { threadId: "thread-new", item: { id: "i1", type: "agentMessage", text: "done" } } });
     rpc.emit("notification", { method: "turn/completed", params: { threadId: "thread-new", turn: { id: "turn-1", status: "completed" } } });
     await flush();
-    expect(turns).toEqual([{ status: "completed", finalText: "done", error: null }]);
+    expect(turns).toEqual([{ status: "completed", finalText: "done", error: null, consumedInputIds: ["in-one", "in-two"], inputFault: false }]);
     expect(states.at(-1)).toBe("idle");
 
-    await runtime.deliver({ text: "three", imagePaths: [], priority: "next" });
+    await runtime.deliver({ id: "in-three", text: "three", imagePaths: [], priority: "next" });
     expect(rpc.requests.at(-1)!.method).toBe("turn/start");
   });
 
   it("falls through to a new turn when the steer target already ended", async () => {
     const { rpc, runtime } = setup(null);
-    await runtime.deliver({ text: "one", imagePaths: [], priority: "next" });
+    await runtime.deliver({ id: "in-one", text: "one", imagePaths: [], priority: "next" });
     rpc.failNext["turn/steer"] = "no active turn to steer";
-    await runtime.deliver({ text: "two", imagePaths: [], priority: "next" });
+    await runtime.deliver({ id: "in-two", text: "two", imagePaths: [], priority: "next" });
     expect(rpc.requests.map((r) => r.method)).toEqual(["thread/start", "turn/start", "turn/steer", "turn/start"]);
   });
 
@@ -135,7 +136,7 @@ describe("CodexRuntime", () => {
       }
       return result;
     };
-    await runtime.deliver({ text: "quick", imagePaths: [], priority: "next" });
+    await runtime.deliver({ id: "in-quick", text: "quick", imagePaths: [], priority: "next" });
     await flush();
     expect(runtime.state()).toBe("idle");
     expect(states.at(-1)).toBe("idle");
@@ -143,9 +144,9 @@ describe("CodexRuntime", () => {
 
   it("does not resend input as a new turn when a steer times out", async () => {
     const { rpc, runtime } = setup(null);
-    await runtime.deliver({ text: "one", imagePaths: [], priority: "next" });
+    await runtime.deliver({ id: "in-one", text: "one", imagePaths: [], priority: "next" });
     rpc.failNext["turn/steer"] = "RPC request timed out: turn/steer";
-    await expect(runtime.deliver({ text: "two", imagePaths: [], priority: "next" })).rejects.toThrow(/timed out/);
+    await expect(runtime.deliver({ id: "in-two", text: "two", imagePaths: [], priority: "next" })).rejects.toThrow(/timed out/);
     expect(rpc.requests.filter((r) => r.method === "turn/start")).toHaveLength(1);
   });
 
@@ -161,7 +162,7 @@ describe("CodexRuntime", () => {
       }
       return original<T>(method, params);
     };
-    await runtime.deliver({ text: "one", imagePaths: [], priority: "next" });
+    await runtime.deliver({ id: "in-one", text: "one", imagePaths: [], priority: "next" });
     expect(runtime.state()).toBe("running");
   });
 
@@ -179,7 +180,7 @@ describe("CodexRuntime", () => {
   it("runs tool calls from the agent and ignores other threads' notifications", async () => {
     const sent: string[] = [];
     const { rpc, runtime, turns } = setup(null, sent);
-    await runtime.deliver({ text: "one", imagePaths: [], priority: "next" });
+    await runtime.deliver({ id: "in-one", text: "one", imagePaths: [], priority: "next" });
     rpc.emit("request", { id: 7, method: "item/tool/call", params: { threadId: "thread-new", tool: "send", arguments: { text: "hi" } } });
     rpc.emit("request", { id: 8, method: "item/tool/call", params: { threadId: "thread-new", tool: "send", arguments: { text: 5 } } });
     rpc.emit("notification", { method: "turn/completed", params: { threadId: "someone-else", turn: { id: "x", status: "completed" } } });

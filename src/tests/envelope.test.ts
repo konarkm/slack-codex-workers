@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildThreadContext, decideWake, renderEnvelope, renderSlackText, replyTarget } from "../agents/envelope.js";
 import { DEFAULT_WAKE_POLICY } from "../agents/types.js";
-import type { SlackInbound } from "../slack/agentSlack.js";
+import { supplementaryText, type SlackInbound } from "../slack/agentSlack.js";
 
 const OWN = "UAGENT";
 
@@ -17,6 +17,8 @@ function message(overrides: Partial<SlackInbound> = {}): SlackInbound {
     botUserId: null,
     text: "hello",
     files: [],
+    unavailableFiles: [],
+    editedAt: null,
     ...overrides,
   };
 }
@@ -55,6 +57,14 @@ describe("replyTarget", () => {
   it("answers in the flow of a DM unless the person chose a thread", () => {
     expect(replyTarget(message({ channelType: "im", channelId: "D1" }))).toEqual({ channel: "D1", threadTs: null });
     expect(replyTarget(message({ channelType: "im", channelId: "D1", threadTs: "5.5" }))).toEqual({ channel: "D1", threadTs: "5.5" });
+  });
+});
+
+describe("supplementaryText", () => {
+  it("recovers the words of a shared message and of a blocks-only app post", () => {
+    expect(supplementaryText({ attachments: [{ author_name: "Priya", text: "ship it friday", from_url: "https://x.slack.com/archives/C1/p1" }] })).toBe("[shared] Priya · ship it friday (https://x.slack.com/archives/C1/p1)");
+    expect(supplementaryText({ blocks: [{ type: "section", text: { type: "mrkdwn", text: "Build 41 failed" } }] })).toBe("Build 41 failed");
+    expect(supplementaryText({})).toBe("");
   });
 });
 

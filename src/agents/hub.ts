@@ -47,13 +47,16 @@ interface Seat {
   intake: Promise<void>;
 }
 
+// An agent-to-agent exchange that has been quiet this long starts over with a full budget.
+const AGENT_WAKE_BUDGET_QUIET_MS = 30 * 60_000;
+
 const OPERATOR_COMMANDS = new Set([".status", ".stop", ".compact", ".reset"]);
 
 // Runs every named agent: one Slack app, one mind, and one provider session each.
 export class AgentHub {
   private readonly store: AgentStore;
   private readonly seats = new Map<string, Seat>();
-  private readonly agentWakeCounts = new Map<string, number>();
+  private readonly agentWakeCounts = new Map<string, { count: number; lastAt: number }>();
   private registeredAgents = new Set<string>();
   private readonly scheduler: WakeScheduler;
   private readonly webhookWakes: WebhookWakes | null;
@@ -128,7 +131,9 @@ export class AgentHub {
 
     const slack = this.createSlack(spec, botToken, appToken);
     const seat: Seat = { spec, slack, mind: null as unknown as AgentMind, statusThreads: new Map(), lastState: "down", intake: Promise.resolve() };
-    slack.onMessage((message) => {
+    slack.onMessage(async (message) => {
+      // Operator commands skip the line: a stop must not wait behind a large download.
+      if (await this.handleOperatorCommand(seat, message)) return;
       seat.intake = seat.intake.then(() => this.handleInbound(seat, message));
       return seat.intake;
     });
@@ -136,7 +141,7 @@ export class AgentHub {
       logInfo("stop requested from Slack", { agent: spec.name });
       await seat.mind.interrupt();
     });
-    const identity = await slack.start();
+    const identity = await slack.identify();
 
     const tools = [
       ...buildWakeTools(spec.name, this.store, this.config.timezone),
@@ -157,15 +162,31 @@ export class AgentHub {
       }),
     ];
     const ownInstructions = spec.instructionsPath && fs.existsSync(spec.instructionsPath) ? fs.readFileSync(spec.instructionsPath, "utf8") : null;
-    const instructions = buildInstructions({ spec, ownUserId: identity.botUserId, workspaceName: identity.teamName, ownInstructions });
+    const instructions = buildInstructions({ spec, ownUserId: identity.botUserId, workspaceName: identity.teamName, operatorUserIds: this.config.adminUserIds, ownInstructions });
     seat.mind = new AgentMind(spec, this.store, this.createRuntime, instructions, tools, {
       onStateChanged: (_agent, state) => this.onMindState(seat, state),
       onTurnCompleted: (_agent, event) => {
         if (event.status === "failed") logError("agent turn failed", { agent: spec.name, error: event.error });
       },
+      onAbandoned: (_agent, items, reason) =>
+        this.tellOperators(seat, `I stopped trying to deliver ${items.length} message(s) to ${spec.name}; each made three turns fail (${reason}). Whoever sent them is still waiting: ${items.map((item) => item.sourceKey).join(", ")}`),
+      onTrouble: (_agent, message) => this.tellOperators(seat, `${spec.name} is in trouble: ${message}`),
     });
     this.seats.set(spec.name, seat);
+    // The mind exists before the socket opens, so no event can arrive with nowhere to go.
+    await slack.connect();
     await seat.mind.start();
+  }
+
+  // Harness trouble goes to the operators as the bridge, in the agent's DM with them. It is never posted as the agent.
+  private async tellOperators(seat: Seat, text: string): Promise<void> {
+    for (const userId of this.config.adminUserIds) {
+      try {
+        await seat.slack.postMessage({ channelId: await seat.slack.openDm(userId), text: `_bridge (${seat.spec.name})_\n${text}` });
+      } catch (error) {
+        logError("could not reach an operator", { agent: seat.spec.name, userId, error: errorMessage(error) });
+      }
+    }
   }
 
   private async onMindState(seat: Seat, state: RuntimeState): Promise<void> {
@@ -184,30 +205,35 @@ export class AgentHub {
     try {
       const key = sourceKey(message);
       if (this.store.hasSource(spec.name, key)) return;
-      if (await this.handleOperatorCommand(seat, message)) return;
 
       const identity = slack.identity();
       const threadRoot = message.threadTs ?? message.ts;
       const participant = message.threadTs ? this.store.isThreadParticipant(spec.name, message.channelId, message.threadTs) : false;
       let decision = decideWake(message, identity.botUserId, spec.wake, participant);
 
+      const author = await this.describeAuthor(seat, message);
+
+      // The loop breaker is for our own agents talking to each other. Other apps (CI, Linear) always get through.
       // Threads are budgeted one by one; DMs and top-level messages share their conversation's budget, since each is its own root.
       const channelPrefix = `${spec.name}:${message.channelId}:`;
       const budgetKey = `${channelPrefix}${message.threadTs ?? "top"}`;
-      if (!message.botId) {
+      const now = Date.now();
+      for (const [existing, entry] of this.agentWakeCounts) {
+        if (now - entry.lastAt > AGENT_WAKE_BUDGET_QUIET_MS) this.agentWakeCounts.delete(existing);
+      }
+      if (author.kind === "human") {
         for (const existing of this.agentWakeCounts.keys()) {
           if (existing === budgetKey || (!message.threadTs && existing.startsWith(channelPrefix))) this.agentWakeCounts.delete(existing);
         }
-      } else if (decision.wake) {
-        const count = (this.agentWakeCounts.get(budgetKey) ?? 0) + 1;
-        this.agentWakeCounts.set(budgetKey, count);
+      } else if (author.kind === "agent" && decision.wake) {
+        const count = (this.agentWakeCounts.get(budgetKey)?.count ?? 0) + 1;
+        this.agentWakeCounts.set(budgetKey, { count, lastAt: now });
         if (count > this.config.agentWakeBudget) {
           logWarn("agent-to-agent wake budget spent; delivering as context", { agent: spec.name, channelId: message.channelId, threadRoot });
           decision = { ...decision, wake: false, budgetExhausted: true };
         }
       }
 
-      const author = await this.describeAuthor(seat, message);
       const names = new Map<string, string>();
       for (const match of message.text.matchAll(/<@([A-Z0-9]+)/g)) {
         if (!names.has(match[1]!)) names.set(match[1]!, (await slack.getPerson(match[1]!)).name);
@@ -216,12 +242,17 @@ export class AgentHub {
 
       let imagePaths: string[] = [];
       let fileNotes: string[] = [];
-      if (message.files.length > 0) {
+      if (message.files.length > 0 && !decision.wake) {
+        // Background messages list their files; the agent can fetch history if it wants them.
+        fileNotes = message.files.map((file) => `${file.name} (not downloaded)`);
+      } else if (message.files.length > 0) {
         const prepared = await prepareSlackAttachments(`${spec.name}:${key}`, message.files, [], slack.botTokenForDownloads(), this.config);
         imagePaths = prepared.imagePaths;
         // Downloaded paths exist on the bridge machine only.
         fileNotes = spec.host.kind === "local" ? prepared.fileNotes : message.files.map((file) => `${file.name} (not available on your machine)`);
       }
+
+      fileNotes.push(...message.unavailableFiles.map((name) => `${name} (Slack gave no download link)`));
 
       let threadContext: ThreadContext | null = null;
       if (decision.wake && message.threadTs && !this.store.hasSeenThread(spec.name, message.channelId, message.threadTs)) {

@@ -18,6 +18,11 @@ import type { AgentRuntime, RuntimeInput, RuntimeOptions, RuntimeState } from ".
 
 export const AGENT_TOOL_SERVER = "workspace";
 
+const MAX_INLINE_IMAGE_BYTES = 4 * 1024 * 1024;
+
+// Turn failures caused by what was sent in, as opposed to the provider, the login, or the harness.
+const INPUT_FAULT_REASONS = new Set(["image_error", "prompt_too_long"]);
+
 const IMAGE_MEDIA_TYPES: Record<string, "image/png" | "image/jpeg" | "image/gif" | "image/webp"> = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
@@ -68,10 +73,10 @@ export class ClaudeRuntime implements AgentRuntime {
   private input: InputQueue | null = null;
   private currentState: RuntimeState = "down";
   private currentSessionId: string | null;
-  private pendingWakes = 0;
+  // Messages pushed to the session and not yet reported as consumed by a finished turn: message uuid → input id.
+  private readonly unconfirmed = new Map<string, string | null>();
   private lastAssistantText = "";
   private stopping = false;
-  private resumeRejected = false;
 
   constructor(private readonly options: RuntimeOptions) {
     this.currentSessionId = options.sessionId;
@@ -92,7 +97,7 @@ export class ClaudeRuntime implements AgentRuntime {
     const session = query({ prompt: input, options: this.buildOptions() });
     this.input = input;
     this.session = session;
-    this.pendingWakes = 0;
+    this.unconfirmed.clear();
     await this.setState("idle");
     void this.consume(session, input);
   }
@@ -109,7 +114,7 @@ export class ClaudeRuntime implements AgentRuntime {
   async deliver(input: RuntimeInput): Promise<void> {
     await this.start();
     const message = await this.buildUserMessage(input);
-    this.pendingWakes += 1;
+    this.unconfirmed.set(message.uuid!, input.id);
     await this.setState("running");
     this.input!.push(message);
   }
@@ -119,7 +124,8 @@ export class ClaudeRuntime implements AgentRuntime {
   }
 
   async compact(): Promise<void> {
-    await this.deliver({ text: "/compact", imagePaths: [], priority: "next" });
+    // `later`, so a compaction requested mid-turn runs as its own turn instead of being folded into the running one.
+    await this.deliver({ id: null, text: "/compact", imagePaths: [], priority: "later" });
   }
 
   private buildOptions(): Options {
@@ -149,12 +155,11 @@ export class ClaudeRuntime implements AgentRuntime {
       strictMcpConfig: !spec.inheritUserConfig,
       settings: spec.inheritUserConfig ? undefined : { disableClaudeAiConnectors: true },
       mcpServers: { [AGENT_TOOL_SERVER]: server },
+      // Deny rules hold even with permission prompts bypassed.
+      disallowedTools: spec.denyTools,
       permissionMode: "bypassPermissions",
       allowDangerouslySkipPermissions: true,
       title: spec.name,
-      stderr: (data) => {
-        if (/No conversation found with session ID/i.test(data)) this.resumeRejected = true;
-      },
       spawnClaudeCodeProcess: remote ? (spawnOptions) => this.spawnRemote(spawnOptions) : undefined,
     };
   }
@@ -181,15 +186,21 @@ export class ClaudeRuntime implements AgentRuntime {
 
   private async buildUserMessage(input: RuntimeInput): Promise<SDKUserMessage> {
     const images = [];
+    const skipped: string[] = [];
     for (const imagePath of input.imagePaths) {
       const mediaType = IMAGE_MEDIA_TYPES[path.extname(imagePath).toLowerCase()];
-      if (!mediaType) continue;
+      // An image the API rejects fails the turn, and can keep failing the session once it is in the transcript.
+      if (!mediaType || (await fs.stat(imagePath)).size > MAX_INLINE_IMAGE_BYTES) {
+        skipped.push(imagePath);
+        continue;
+      }
       const data = (await fs.readFile(imagePath)).toString("base64");
       images.push({ type: "image" as const, source: { type: "base64" as const, media_type: mediaType, data } });
     }
+    const withSkipped = skipped.length > 0 ? `${input.text}\n\n[bridge notice] Not attached inline (too large or an unsupported type); open from disk if you need them: ${skipped.join(", ")}` : input.text;
     return {
       type: "user",
-      message: { role: "user", content: images.length > 0 ? [{ type: "text", text: input.text }, ...images] : input.text },
+      message: { role: "user", content: images.length > 0 ? [{ type: "text", text: withSkipped }, ...images] : withSkipped },
       parent_tool_use_id: null,
       // Without a uuid the result never echoes which messages a turn consumed; without an origin the CLI treats the message as unattributed.
       uuid: randomUUID(),
@@ -213,12 +224,13 @@ export class ClaudeRuntime implements AgentRuntime {
     } catch (error) {
       if (!this.stopping) {
         logError("claude session ended with error", { agent: spec.name, error: error instanceof Error ? error.message : String(error) });
-        await events.onTurnCompleted({ status: "failed", finalText: "", error: error instanceof Error ? error.message : String(error) });
+        await events.onTurnCompleted({ status: "failed", finalText: "", error: error instanceof Error ? error.message : String(error), consumedInputIds: this.takeAllUnconfirmed(), inputFault: false });
       }
     } finally {
       if (this.session === session) {
         this.session = null;
         this.input = null;
+        this.unconfirmed.clear();
         input.close();
         await this.setState("down");
       }
@@ -242,10 +254,6 @@ export class ClaudeRuntime implements AgentRuntime {
       }
       return;
     }
-    if (message.type === "system" && message.subtype === "session_state_changed") {
-      if (message.state === "running") await this.setState("running");
-      return;
-    }
     if (message.type === "system" && message.subtype === "status") {
       if (message.status === "compacting") await events.onCompaction({ status: "started" });
       if (message.compact_result) await events.onCompaction({ status: message.compact_result === "success" ? "completed" : "failed" });
@@ -264,31 +272,46 @@ export class ClaudeRuntime implements AgentRuntime {
       }
       return;
     }
-    if (message.type === "result" && this.resumeRejected && this.currentSessionId) {
-      // The transcript for the saved session is gone (moved host, pruned history). Forget it; the retry starts a new session.
-      this.resumeRejected = false;
-      const lost = this.currentSessionId;
-      this.currentSessionId = null;
-      await events.onSessionChanged(null);
-      await events.onProblem(`Claude session ${lost} could not be resumed; its transcript is missing. The next input starts a new session.`);
-      await events.onTurnCompleted({ status: "failed", finalText: "", error: `session ${lost} could not be resumed` });
-      this.session?.close();
-      return;
-    }
     if (message.type === "result") {
+      const errors = message.subtype === "success" ? "" : message.errors.join("; ");
+      if (this.currentSessionId && /No conversation found with session ID/i.test(errors)) {
+        // The transcript for the saved session is gone (moved host, pruned history). Forget it; the retry starts a new session.
+        const lost = this.currentSessionId;
+        this.currentSessionId = null;
+        await events.onSessionChanged(null);
+        await events.onProblem(`Claude session ${lost} could not be resumed; its transcript is missing. The next input starts a new session.`);
+        await events.onTurnCompleted({ status: "failed", finalText: "", error: `session ${lost} could not be resumed`, consumedInputIds: this.takeAllUnconfirmed(), inputFault: false });
+        this.session?.close();
+        return;
+      }
       const finalText = message.subtype === "success" ? message.result : this.lastAssistantText;
       this.lastAssistantText = "";
-      const queued = message.queued_turn_count ?? 0;
-      this.pendingWakes = Math.min(Math.max(this.pendingWakes - 1, 0), queued);
+      // The result names the messages this turn took in; several sent close together can be merged into one turn.
+      const consumed = message.user_message_uuids ?? (message.user_message_uuid ? [message.user_message_uuid] : [...this.unconfirmed.keys()]);
+      const consumedInputIds: string[] = [];
+      for (const uuid of consumed) {
+        const inputId = this.unconfirmed.get(uuid);
+        if (inputId) consumedInputIds.push(inputId);
+        this.unconfirmed.delete(uuid);
+      }
       const interrupted = message.terminal_reason === "aborted_streaming" || message.terminal_reason === "aborted_tools";
       const failed = message.subtype !== "success" || message.is_error;
       await events.onTurnCompleted({
         status: interrupted ? "interrupted" : failed ? "failed" : "completed",
         finalText,
-        error: message.subtype === "success" ? (message.is_error ? message.result : null) : message.errors.join("; "),
+        error: message.subtype === "success" ? (message.is_error ? message.result : null) : errors,
+        consumedInputIds,
+        inputFault: failed && !interrupted && INPUT_FAULT_REASONS.has(message.terminal_reason ?? ""),
       });
-      if (queued === 0) await this.setState("idle");
+      // Idle only when nothing pushed is still waiting for a turn; a message can land after the CLI counted its queue.
+      if ((message.queued_turn_count ?? 0) === 0 && this.unconfirmed.size === 0) await this.setState("idle");
     }
+  }
+
+  private takeAllUnconfirmed(): string[] {
+    const ids = [...this.unconfirmed.values()].filter((id): id is string => id !== null);
+    this.unconfirmed.clear();
+    return ids;
   }
 
   private async setState(state: RuntimeState): Promise<void> {

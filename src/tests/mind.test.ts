@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AgentStore } from "../agents/agentStore.js";
-import { AgentMind } from "../agents/mind.js";
+import { AgentMind, type MindObserver } from "../agents/mind.js";
 import { DEFAULT_WAKE_POLICY, type AgentRuntime, type AgentSpec, type RuntimeInput, type RuntimeOptions, type RuntimeState } from "../agents/types.js";
 
 const spec: AgentSpec = {
@@ -16,10 +16,12 @@ const spec: AgentSpec = {
   slackAppTokenEnv: "",
   instructionsPath: null,
   inheritUserConfig: false,
+  denyTools: [],
 };
 
 class FakeRuntime implements AgentRuntime {
   delivered: RuntimeInput[] = [];
+  unconfirmed: string[] = [];
   failNextDeliver = false;
   private current: RuntimeState = "down";
   constructor(readonly options: RuntimeOptions) {}
@@ -36,6 +38,7 @@ class FakeRuntime implements AgentRuntime {
       throw new Error("runtime unavailable");
     }
     this.delivered.push(input);
+    if (input.id) this.unconfirmed.push(input.id);
     await this.set("running");
   }
   async interrupt(): Promise<void> {}
@@ -47,11 +50,11 @@ class FakeRuntime implements AgentRuntime {
     return this.options.sessionId;
   }
   async finishTurn(): Promise<void> {
-    await this.options.events.onTurnCompleted({ status: "completed", finalText: "", error: null });
+    await this.options.events.onTurnCompleted({ status: "completed", finalText: "", error: null, consumedInputIds: this.unconfirmed.splice(0), inputFault: false });
     await this.set("idle");
   }
-  async failTurn(): Promise<void> {
-    await this.options.events.onTurnCompleted({ status: "failed", finalText: "", error: "api error" });
+  async failTurn(inputFault = false): Promise<void> {
+    await this.options.events.onTurnCompleted({ status: "failed", finalText: "", error: "api error", consumedInputIds: this.unconfirmed.splice(0), inputFault });
     await this.set("idle");
   }
   async crash(): Promise<void> {
@@ -63,14 +66,14 @@ class FakeRuntime implements AgentRuntime {
   }
 }
 
-function setup() {
+function setup(observer: MindObserver = {}) {
   const store = new AgentStore(":memory:");
   const runtimes: FakeRuntime[] = [];
   const mind = new AgentMind(spec, store, (options) => {
     const runtime = new FakeRuntime(options);
     runtimes.push(runtime);
     return runtime;
-  }, "instructions", []);
+  }, "instructions", [], observer);
   return { store, mind, runtimes };
 }
 
@@ -134,40 +137,137 @@ describe("AgentMind", () => {
     expect(store.getInboxItem(1)!.status).toBe("delivered");
   });
 
-  it("keeps input queued when the runtime cannot take it", async () => {
-    const { mind, runtimes, store } = setup();
-    await mind.start();
-    runtimes[0]!.failNextDeliver = true;
-    await expect(mind.receive({ sourceKey: "a", wake: true, priority: "next", text: "first", imagePaths: [] })).rejects.toThrow("runtime unavailable");
-    expect(store.listQueued("ada")).toHaveLength(1);
-    await mind.receive({ sourceKey: "b", wake: true, priority: "next", text: "second", imagePaths: [] });
-    expect(runtimes[0]!.delivered).toHaveLength(1);
-    expect(runtimes[0]!.delivered[0]!.text).toContain("first");
-    expect(runtimes[0]!.delivered[0]!.text).toContain("second");
-    await mind.stop();
+  it("keeps input queued when the runtime cannot take it, and waits before trying again", async () => {
+    vi.useFakeTimers();
+    try {
+      const { mind, runtimes, store } = setup();
+      await mind.start();
+      runtimes[0]!.failNextDeliver = true;
+      await expect(mind.receive({ sourceKey: "a", wake: true, priority: "next", text: "first", imagePaths: [] })).rejects.toThrow("runtime unavailable");
+      expect(store.listQueued("ada")).toHaveLength(1);
+      expect(store.getInboxItem(1)!.attempts).toBe(0);
+      await mind.receive({ sourceKey: "b", wake: true, priority: "next", text: "second", imagePaths: [] });
+      expect(runtimes[0]!.delivered).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(runtimes[0]!.delivered).toHaveLength(1);
+      expect(runtimes[0]!.delivered[0]!.text).toContain("first");
+      expect(runtimes[0]!.delivered[0]!.text).toContain("second");
+      expect(runtimes[0]!.delivered[0]!.text).not.toContain("delivered to you before");
+      await mind.stop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
-  it("puts input back in the queue when the runtime dies mid-turn", async () => {
+  it("puts input back in the queue when the runtime dies mid-turn, and says it is a redelivery", async () => {
     const { mind, runtimes, store } = setup();
     await mind.receive({ sourceKey: "a", wake: true, priority: "next", text: "first", imagePaths: [] });
     await runtimes[0]!.crash();
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(runtimes[0]!.delivered.map((input) => input.text)).toEqual(["first", "first"]);
+    expect(runtimes[0]!.delivered).toHaveLength(2);
+    expect(runtimes[0]!.delivered[1]!.text).toContain("delivered to you before");
+    expect(runtimes[0]!.delivered[1]!.text).toContain("first");
     expect(store.getInboxItem(1)!.attempts).toBe(2);
     await mind.stop();
   });
 
-  it("gives up on input after three failed turns and records why", async () => {
+  it("rides out provider failures without giving up on anything, backing off and telling the operators", async () => {
+    vi.useFakeTimers();
+    try {
+      const troubles: string[] = [];
+      const abandoned: string[] = [];
+      const { mind, runtimes, store } = setup({ onTrouble: (_agent, message) => void troubles.push(message), onAbandoned: (_agent, items) => void abandoned.push(...items.map((item) => item.sourceKey)) });
+      await mind.receive({ sourceKey: "a", wake: true, priority: "next", text: "asked during an outage", imagePaths: [] });
+      const delays = [5_000, 10_000, 20_000, 40_000];
+      for (const delay of delays) {
+        await runtimes[0]!.failTurn();
+        await vi.advanceTimersByTimeAsync(delay - 1);
+        const before = runtimes[0]!.delivered.length;
+        await vi.advanceTimersByTimeAsync(1);
+        expect(runtimes[0]!.delivered.length).toBe(before + 1);
+      }
+      expect(store.getInboxItem(1)!.status).toBe("in_flight");
+      expect(store.getInboxItem(1)!.faults).toBe(0);
+      expect(abandoned).toEqual([]);
+      expect(troubles).toHaveLength(1);
+      mind.noteVisibleAction();
+      await runtimes[0]!.finishTurn();
+      expect(store.getInboxItem(1)!.status).toBe("delivered");
+      await mind.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("gives up on an input that makes three turns fail by itself, and tells the operators", async () => {
+    vi.useFakeTimers();
+    try {
+      const abandoned: string[] = [];
+      const { mind, runtimes, store } = setup({ onAbandoned: (_agent, items) => void abandoned.push(...items.map((item) => item.sourceKey)) });
+      await mind.receive({ sourceKey: "a", wake: true, priority: "next", text: "poison", imagePaths: [] });
+      for (let round = 0; round < 3; round += 1) {
+        await runtimes[0]!.failTurn(true);
+        await vi.advanceTimersByTimeAsync(300_000);
+      }
+      expect(store.getInboxItem(1)!.status).toBe("failed");
+      expect(abandoned).toEqual(["a"]);
+      expect(runtimes[0]!.delivered).toHaveLength(3);
+      await mind.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("confirms only the input a finished turn took, not one pushed while the result was arriving", async () => {
     const { mind, runtimes, store } = setup();
-    await mind.receive({ sourceKey: "a", wake: true, priority: "next", text: "poison", imagePaths: [] });
-    await runtimes[0]!.failTurn();
-    await mind.receive({ sourceKey: "b", wake: true, priority: "next", text: "kick 1", imagePaths: [] });
-    await runtimes[0]!.failTurn();
-    await mind.receive({ sourceKey: "c", wake: true, priority: "next", text: "kick 2", imagePaths: [] });
-    await runtimes[0]!.failTurn();
-    expect(store.getInboxItem(1)!.status).toBe("failed");
-    expect(store.getAgentState("ada")!.lastError).toContain("Gave up on 1 input");
+    await mind.receive({ sourceKey: "a", wake: true, priority: "next", text: "first", imagePaths: [] });
+    await mind.receive({ sourceKey: "b", wake: true, priority: "next", text: "second", imagePaths: [] });
+    mind.noteVisibleAction();
+    const [firstInput] = runtimes[0]!.unconfirmed.splice(0, 1);
+    await runtimes[0]!.options.events.onTurnCompleted({ status: "completed", finalText: "", error: null, consumedInputIds: [firstInput!], inputFault: false });
+    expect(store.getInboxItem(1)!.status).toBe("delivered");
+    expect(store.getInboxItem(2)!.status).toBe("in_flight");
+    await runtimes[0]!.crash();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(runtimes[0]!.delivered.at(-1)!.text).toContain("second");
+    expect(runtimes[0]!.delivered.at(-1)!.text).not.toContain("first");
     await mind.stop();
+  });
+
+  it("does not deliver again what an operator's stop interrupted", async () => {
+    const { mind, runtimes, store } = setup();
+    await mind.receive({ sourceKey: "a", wake: true, priority: "next", text: "long task", imagePaths: [] });
+    await runtimes[0]!.options.events.onTurnCompleted({ status: "interrupted", finalText: "", error: null, consumedInputIds: runtimes[0]!.unconfirmed.splice(0), inputFault: false });
+    expect(store.getInboxItem(1)!.status).toBe("delivered");
+    expect(runtimes[0]!.delivered).toHaveLength(1);
+    await mind.stop();
+  });
+
+  it("resets mid-turn into a new runtime and a new session, and never restarts the old one", async () => {
+    const store = new AgentStore(":memory:");
+    store.setAgentSession("ada", "old-session");
+    const runtimes: FakeRuntime[] = [];
+    const mind = new AgentMind(spec, store, (options) => {
+      const runtime = new FakeRuntime(options);
+      runtimes.push(runtime);
+      return runtime;
+    }, "instructions", []);
+    await mind.receive({ sourceKey: "a", wake: true, priority: "next", text: "wedging input", imagePaths: [] });
+    await mind.resetSession();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(runtimes[0]!.delivered).toHaveLength(1);
+    expect(runtimes[0]!.state()).toBe("down");
+    expect(store.getAgentState("ada")!.sessionId).toBeNull();
+    await mind.receive({ sourceKey: "b", wake: true, priority: "next", text: "after reset", imagePaths: [] });
+    expect(runtimes).toHaveLength(2);
+    expect(runtimes[1]!.options.sessionId).toBeNull();
+    expect(runtimes[1]!.delivered[0]!.text).toContain("wedging input");
+    // A late event from the old runtime changes nothing.
+    await runtimes[0]!.options.events.onTurnCompleted({ status: "completed", finalText: "", error: null, consumedInputIds: [], inputFault: false });
+    expect(store.getInboxItem(1)!.status).toBe("in_flight");
+    await mind.stop();
+    expect(runtimes[1]!.state()).toBe("down");
+    expect(runtimes).toHaveLength(2);
   });
 
   it("resumes the persisted session and redelivers queued input after a restart", async () => {

@@ -39,11 +39,25 @@ export interface AgentSpec {
   instructionsPath: string | null;
   // Load the operator's user-level harness config (settings, MCP servers, cloud connectors) into this agent.
   inheritUserConfig: boolean;
+  // Tools removed from the agent's reach, as harness tool specs (a whole MCP server: "mcp__server").
+  denyTools: string[];
 }
+
+// Inherited connectors an agent never gets unless its entry lifts the denial: the operator's own Slack (posting through
+// it would speak as the operator) and the ones that move money. Approvals are off, and what an agent reads is not trusted.
+export const DEFAULT_DENY_TOOLS = [
+  "mcp__claude_ai_Slack",
+  "mcp__plugin_productivity_slack",
+  "mcp__slack",
+  "mcp__claude_ai_Robinhood",
+  "mcp__claude_ai_Natural",
+];
 
 export type InputPriority = "now" | "next" | "later";
 
 export interface RuntimeInput {
+  // Identifies this input in turn-completion reports. Null for bridge notices that have no inbox rows behind them.
+  id: string | null;
   text: string;
   imagePaths: string[];
   priority: InputPriority;
@@ -52,6 +66,16 @@ export interface RuntimeInput {
 export type RuntimeState = "down" | "idle" | "running";
 
 export type TurnStatus = "completed" | "interrupted" | "failed";
+
+export interface TurnCompletion {
+  status: TurnStatus;
+  finalText: string;
+  error: string | null;
+  // Ids of the inputs this turn took in.
+  consumedInputIds: string[];
+  // True when a failure was caused by the input itself (an unreadable image, an over-long prompt) rather than by the provider or the harness.
+  inputFault: boolean;
+}
 
 export interface ActivityItem {
   id: string;
@@ -64,7 +88,7 @@ export interface RuntimeEvents {
   // null when the provider session is gone and the next input will start a new one.
   onSessionChanged(sessionId: string | null): void | Promise<void>;
   onStateChanged(state: RuntimeState): void | Promise<void>;
-  onTurnCompleted(event: { status: TurnStatus; finalText: string; error: string | null }): void | Promise<void>;
+  onTurnCompleted(event: TurnCompletion): void | Promise<void>;
   onActivity(item: ActivityItem): void | Promise<void>;
   onCompaction(event: { status: "started" | "completed" | "failed" }): void | Promise<void>;
   // The runtime is up but something is wrong with it that an operator should see.

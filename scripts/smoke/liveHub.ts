@@ -30,6 +30,8 @@ await (hub as unknown as { handleInbound(seat: unknown, message: unknown): Promi
   botUserId: null,
   text: `<@${identity.botUserId}> ${question}`,
   files: [],
+  unavailableFiles: [],
+  editedAt: null,
 });
 
 await new Promise((resolve) => setTimeout(resolve, 60_000));

@@ -15,20 +15,26 @@ if [[ -f "${ROOT_DIR}/.env" ]]; then
   set +a
 fi
 
-export AGENTS_STATE_ROOT="${AGENTS_STATE_ROOT:-${ROOT_DIR}/.slack-agents}"
+export AGENTS_STATE_ROOT="${AGENTS_STATE_ROOT:-${HOME}/.slack-agents}"
 if [[ ! -f "${AGENTS_FILE:-${AGENTS_STATE_ROOT}/agents.json}" ]]; then
   echo "no agent registry at ${AGENTS_FILE:-${AGENTS_STATE_ROOT}/agents.json}; copy agents.example.json there and edit it" >&2
   exit 1
 fi
 
 mkdir -p "${AGENTS_STATE_ROOT}"
-if command -v flock >/dev/null 2>&1; then
-  exec 9>"${AGENTS_STATE_ROOT}/launcher.lock"
-  if ! flock -n 9; then
-    echo "the agent hub is already running" >&2
+# Two hubs on one state root would each take half the Slack events and deliver every input twice.
+# mkdir is atomic everywhere; macOS has no flock.
+LOCK_DIR="${AGENTS_STATE_ROOT}/launcher.lock"
+if ! mkdir "${LOCK_DIR}" 2>/dev/null; then
+  other="$(cat "${LOCK_DIR}/pid" 2>/dev/null || true)"
+  if [[ -n "${other}" ]] && kill -0 "${other}" 2>/dev/null; then
+    echo "the agent hub is already running (pid ${other})" >&2
     exit 1
   fi
+  echo "removing a stale launcher lock" >&2
 fi
+echo $$ > "${LOCK_DIR}/pid"
+trap 'rm -rf "${LOCK_DIR}"' EXIT
 
 cd "${ROOT_DIR}"
 if [[ "${MODE}" == "prod" ]]; then

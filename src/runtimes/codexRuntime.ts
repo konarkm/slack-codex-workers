@@ -33,6 +33,8 @@ export class CodexRuntime implements AgentRuntime {
   // Turn ids already seen to complete, so a late turn/start response cannot mark a finished turn as running.
   private readonly completedTurnIds = new Set<string>();
   private resumeFailures = 0;
+  // Inputs taken by the current turn (the one that started it and any steered in).
+  private turnInputIds: string[] = [];
   private chain: Promise<void> = Promise.resolve();
 
   constructor(
@@ -77,6 +79,7 @@ export class CodexRuntime implements AgentRuntime {
     if (this.activeTurnId) {
       try {
         await this.rpc!.request("turn/steer", { threadId: this.threadId, expectedTurnId: this.activeTurnId, input: items });
+        if (input.id) this.turnInputIds.push(input.id);
         return;
       } catch (error) {
         // A timeout leaves the outcome unknown; sending the input again as a new turn could make the agent answer twice.
@@ -87,6 +90,7 @@ export class CodexRuntime implements AgentRuntime {
       }
     }
     let startedId: string;
+    if (input.id) this.turnInputIds.push(input.id);
     try {
       const raw = await this.rpc!.request("turn/start", {
         threadId: this.threadId,
@@ -100,6 +104,7 @@ export class CodexRuntime implements AgentRuntime {
     } catch (error) {
       // If a turn/started notification arrived while the request was failing, the turn is running and the input was taken.
       if (this.activeTurnId) return;
+      this.turnInputIds = this.turnInputIds.filter((id) => id !== input.id);
       throw error;
     }
     // A fast turn can finish before this response is handled.
@@ -140,7 +145,7 @@ export class CodexRuntime implements AgentRuntime {
       const wasRunning = this.activeTurnId !== null;
       this.activeTurnId = null;
       void (async () => {
-        if (wasRunning) await this.options.events.onTurnCompleted({ status: "failed", finalText: "", error: "codex app-server exited mid-turn" });
+        if (wasRunning) await this.options.events.onTurnCompleted({ status: "failed", finalText: "", error: "codex app-server exited mid-turn", consumedInputIds: this.takeTurnInputs(), inputFault: false });
         await this.setState("down");
       })();
     });
@@ -234,7 +239,7 @@ export class CodexRuntime implements AgentRuntime {
       const status: TurnStatus = turn?.status === "completed" ? "completed" : turn?.status === "interrupted" ? "interrupted" : "failed";
       const finalText = this.lastAgentText;
       this.lastAgentText = "";
-      await events.onTurnCompleted({ status, finalText, error: status === "failed" ? (turn?.error?.message ?? "turn failed") : null });
+      await events.onTurnCompleted({ status, finalText, error: status === "failed" ? (turn?.error?.message ?? "turn failed") : null, consumedInputIds: this.takeTurnInputs(), inputFault: false });
       await this.setState("idle");
     }
   }
@@ -272,6 +277,12 @@ export class CodexRuntime implements AgentRuntime {
       default:
         await rpc.respondError(request.id, -32601, `Unsupported server request method: ${request.method}`);
     }
+  }
+
+  private takeTurnInputs(): string[] {
+    const ids = this.turnInputIds;
+    this.turnInputIds = [];
+    return ids;
   }
 
   private async setState(state: RuntimeState): Promise<void> {

@@ -14,14 +14,14 @@ Webhook URLs are bearer secrets, handler files run as trusted code inside the br
 
 ```bash
 npm install
-mkdir -p .slack-agents && cp agents.example.json .slack-agents/agents.json   # then edit
+mkdir -p ~/.slack-agents && cp agents.example.json ~/.slack-agents/agents.json   # then edit
 cp .env.example .env                                                        # then fill in
 npm run agents            # or: npm run launch (restarts on crash), npm run launch:prod (compiled)
 ```
 
 Requires Node 24 or newer, a logged-in `claude` CLI for Claude agents, and a logged-in `codex` CLI for Codex agents, on whichever machine each agent runs.
 
-State lives under `.slack-agents/` (override with `AGENTS_STATE_ROOT`): the registry `agents.json`, the SQLite database, downloaded attachments, and each local agent's home directory under `homes/<name>`.
+State lives under `~/.slack-agents/` (override with `AGENTS_STATE_ROOT`), outside the checkout on purpose, since Claude keys a session's transcript by the agent's home directory: the registry `agents.json`, the SQLite database, downloaded attachments, and each local agent's home directory under `homes/<name>`.
 
 Credentials come from the environment, per agent: `SLACK_BOT_TOKEN_<NAME>` and `SLACK_APP_TOKEN_<NAME>` (name upper-cased, hyphens as underscores). An entry can point at other variable names with `slackBotTokenEnv` and `slackAppTokenEnv`. An agent with missing credentials is skipped with an error; the others still start.
 
@@ -49,13 +49,14 @@ This creates the app from a manifest (scopes, events, Socket Mode, agent surface
 | `cwd` | The agent's home directory. Defaults to `homes/<name>` under the state root. |
 | `wake` | What wakes the agent: `mentions` (default on), `directMessages` (default on), `participatingThreads` (replies in threads it has spoken in, default on), `ambient` (every message in its channels, default off). |
 | `instructions` | Path to the agent's own standing instructions, appended to the base instructions. |
+| `denyTools` | Harness tool specs the agent never gets, such as a whole MCP server (`mcp__server`). Deny rules hold even with approvals off. Default: the operator's own Slack connectors (posting through them would speak as the operator) and connectors that move money. Set `[]` to lift it. |
 | `inheritUserConfig` | Claude only. Default on: the agent loads the operator's user-level settings, MCP servers, and claude.ai connectors, so it can use what the operator can. Set it to `false` to confine an agent to the bridge's tools and its own home directory's config. |
 
 ## How a message reaches an agent
 
 Every message the agent's app can see is stored in the agent's inbox, once, keyed by its Slack coordinates. A message that matches the agent's wake rules wakes it. Any other message waits in the inbox and is delivered with the next wake, marked as context. Nothing is dropped on the way in.
 
-Input counts as delivered only when the agent finishes the turn that took it. If the harness dies, a turn fails, or the saved session cannot be resumed (the bridge then starts a new one), the input goes back in the queue and is delivered again, so an agent can see a message twice but does not miss one. After three deliveries that end in failure the bridge gives up on that input and records why; `.status` shows it.
+Input counts as delivered only when the turn that took it ends. If the harness dies, a turn fails, or the saved session cannot be resumed (the bridge then starts a new one), the input goes back in the queue and is delivered again with a note saying so; an agent can see a message twice but does not miss one. Failures that are not the input's fault (a usage limit, an expired login, an outage) are retried for as long as it takes, with waits growing from 5 seconds to 5 minutes, and the operators get a DM from the bridge after three in a row. Only an input that itself makes three turns fail (an image the API rejects, a prompt that is too long) is given up on, and the operators are told which.
 
 Messages arrive as tagged sections. The bridge writes the header fields; the content is escaped so it cannot imitate one:
 
@@ -74,7 +75,8 @@ Content:
 - The reply target is computed by the bridge: under the message in channels, flat under an existing thread root, in the flow of a DM.
 - A mention in a thread the agent has not seen brings the most recent earlier messages in a `<thread-context>` section, with `included`, `total`, and `truncated` attributes.
 - A message that arrives mid-turn is delivered into the running turn with a note to keep working and take it into account.
-- Another agent wakes an agent by mentioning it, or by sending it a DM. After `AGENT_WAKE_BUDGET` consecutive agent-to-agent wakes in one thread (or one DM, or one channel's top level), further ones arrive as context until a human posts there.
+- Another agent wakes an agent by mentioning it, or by sending it a DM. After `AGENT_WAKE_BUDGET` consecutive wakes by agents of this bridge in one thread (or one DM, or one channel's top level), further ones arrive as context until a person posts there or half an hour passes. Other apps are never limited.
+- An edited message is delivered as its own input, so a corrected ask or a late @mention is heard. Shared and forwarded messages and app posts arrive with their words included. Files Slack gives no download link for are named.
 - Slack events are handled one at a time per agent, in the order Slack sent them. Slack sends a mention twice (as a message and as a mention); the agent gets it once.
 
 ## How an agent speaks
@@ -89,10 +91,12 @@ Where the app is declared as a Slack agent, the thread shows Slack's working ind
 
 ## Operator commands
 
-Admins can send these in an agent's DM. They control the harness and are not delivered to the agent; replies are marked `_bridge_`.
+Admins can send these in an agent's DM. They control the harness and are not delivered to the agent; replies are marked `_bridge_`. The bridge also DMs the admins, marked the same way, when an agent keeps failing or an input is given up on.
 
 - `.status`: state, runtime, host, session id, queued input, last error
 - `.stop`: interrupt the current turn
 - `.compact`: compact the session's context
 - `.reset`: forget the session; the next message starts a new one
+
+A Claude session records its system prompt when it starts and keeps it until the conversation is compacted. Changes to an agent's instructions, or to the bridge's base instructions, therefore reach a running agent at its next compaction; `.compact` applies them now, and `.reset` applies them by starting over.
 

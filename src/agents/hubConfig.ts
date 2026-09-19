@@ -1,3 +1,4 @@
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import type { HubConfig } from "./hub.js";
@@ -8,7 +9,8 @@ function numberFromEnv(name: string, fallback: number): number {
 }
 
 export function loadHubConfig(): HubConfig {
-  const stateRoot = path.resolve(process.env.AGENTS_STATE_ROOT ?? path.join(process.cwd(), ".slack-agents"));
+  // Outside the checkout: agent homes live here, and Claude keys a session's transcript by its working directory.
+  const stateRoot = path.resolve(process.env.AGENTS_STATE_ROOT ?? path.join(os.homedir(), ".slack-agents"));
   return {
     agentsFile: path.resolve(process.env.AGENTS_FILE ?? path.join(stateRoot, "agents.json")),
     agentsRoot: path.resolve(process.env.AGENTS_ROOT ?? path.join(stateRoot, "homes")),

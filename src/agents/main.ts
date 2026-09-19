@@ -13,11 +13,19 @@ async function main(): Promise<void> {
     if (stopping) return;
     stopping = true;
     logInfo(`received ${signal}, shutting down`);
+    // A harness that will not stop (a hung ssh session) must not keep the hub from exiting.
+    const deadline = setTimeout(() => process.exit(0), 15_000);
+    deadline.unref();
     await hub.stop();
     process.exit(0);
   };
   process.on("SIGINT", () => void shutdown("SIGINT"));
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
+  process.on("unhandledRejection", (reason) => {
+    // Slack's socket client rejects this way when it gives up on a connection. Record why before the launcher restarts us.
+    logError("unhandled rejection; exiting so the launcher can restart the hub", { reason: reason instanceof Error ? reason.message : String(reason) });
+    process.exit(1);
+  });
   await hub.start();
 }
 

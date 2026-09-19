@@ -134,11 +134,11 @@ export function renderEnvelope(input: EnvelopeInput): string {
     `From: ${sanitizeHeader(author.name)} (${author.id}, ${author.kind})`,
     `Where: ${describeWhere(message.channelType, input.channelName, message.channelId, message.threadTs)}`,
     `Time: ${formatTime(message.ts, input.timezone)}`,
-    `Message ts: ${message.ts}`,
+    `Message ts: ${message.ts}${message.editedAt ? " (this is an edit of a message you may have seen; the content below is the new version)" : ""}`,
     `Reply target: channel=${target.channel}${target.threadTs ? ` thread_ts=${target.threadTs}` : ""}`,
   ];
   if (decision.budgetExhausted) {
-    fields.push("Note: this mention did not wake you. Agents have been waking each other in this thread without a human; a human message resets that.");
+    fields.push("Note: this did not wake you. Agents have been waking each other here without a person; a person's message, or half an hour of quiet, resets that.");
   }
   const attachments = [...input.fileNotes.map(sanitizeHeader), ...(input.imageCount > 0 ? [`${input.imageCount} image${input.imageCount === 1 ? "" : "s"} attached to this input`] : [])];
   if (attachments.length > 0) fields.push(`Files: ${attachments.join("; ")}`);
@@ -171,6 +171,7 @@ export function buildThreadContext(
 }
 
 // Channel and ts identify a message. The team id is left out: the two event types Slack sends for one mention disagree on it.
+// An edit is its own input, so a corrected ask or a late @mention is heard.
 export function sourceKey(message: SlackInbound): string {
-  return `slack:${message.channelId}:${message.ts}`;
+  return `slack:${message.channelId}:${message.ts}${message.editedAt ? `:edited:${message.editedAt}` : ""}`;
 }

@@ -8,6 +8,7 @@ import type { AgentSlackClient, SlackInbound } from "../slack/agentSlack.js";
 
 class FakeRuntime implements AgentRuntime {
   delivered: RuntimeInput[] = [];
+  unconfirmed: string[] = [];
   interrupted = 0;
   private current: RuntimeState = "down";
   constructor(readonly options: RuntimeOptions) {}
@@ -20,6 +21,7 @@ class FakeRuntime implements AgentRuntime {
   async deliver(input: RuntimeInput): Promise<void> {
     await this.start();
     this.delivered.push(input);
+    if (input.id) this.unconfirmed.push(input.id);
     await this.set("running");
   }
   async interrupt(): Promise<void> {
@@ -33,7 +35,7 @@ class FakeRuntime implements AgentRuntime {
     return null;
   }
   async finishTurn(): Promise<void> {
-    await this.options.events.onTurnCompleted({ status: "completed", finalText: "", error: null });
+    await this.options.events.onTurnCompleted({ status: "completed", finalText: "", error: null, consumedInputIds: this.unconfirmed.splice(0), inputFault: false });
     await this.set("idle");
   }
   tool(name: string) {
@@ -61,8 +63,12 @@ class FakeSlack {
   onStopRequested(handler: () => Promise<void>) {
     this.stopHandler = handler;
   }
-  async start() {
+  async identify() {
     return this.identity();
+  }
+  async connect() {}
+  async openDm(userId: string) {
+    return `D-${userId}`;
   }
   async stop() {}
   async getPerson(id: string) {
@@ -90,7 +96,7 @@ class FakeSlack {
 }
 
 function inbound(overrides: Partial<SlackInbound> = {}): SlackInbound {
-  return { teamId: "T1", channelId: "C1", channelType: "channel", ts: "1726700000.000100", threadTs: null, userId: "UHUMAN", botId: null, botUserId: null, text: "hello", files: [], ...overrides };
+  return { teamId: "T1", channelId: "C1", channelType: "channel", ts: "1726700000.000100", threadTs: null, userId: "UHUMAN", botId: null, botUserId: null, text: "hello", files: [], unavailableFiles: [], editedAt: null, ...overrides };
 }
 
 let dir: string;
@@ -205,10 +211,19 @@ describe("AgentHub", () => {
     expect(text.indexOf("second, no mention")).toBeLessThan(text.indexOf("third"));
   });
 
-  it("applies the agent-to-agent budget to DMs, where every message is its own root", async () => {
+  it("never makes an agent deaf to an outside app, however often it mentions the agent", async () => {
     await startHub([{ name: "ada", runtime: "claude" }]);
     const slack = slacks[0]!;
-    const dm = (n: number) => inbound({ channelId: "D9", channelType: "im", userId: null, botId: "BOTHER", ts: `1726700030.00000${n}`, text: `ping ${n}` });
+    for (const n of [1, 2, 3, 4, 5]) {
+      await slack.handler!(inbound({ userId: null, botId: "BCI", ts: `1726700040.00000${n}`, threadTs: "1726700040.000000", text: `<@UBOT1> build ${n} failed` }));
+    }
+    expect(runtimes.get("ada")!.delivered).toHaveLength(5);
+  });
+
+  it("applies the agent-to-agent budget to DMs, where every message is its own root", async () => {
+    await startHub([{ name: "ada", runtime: "claude" }, { name: "cody", runtime: "codex" }]);
+    const slack = slacks[0]!;
+    const dm = (n: number) => inbound({ channelId: "D9", channelType: "im", userId: null, botId: "BBOT2", ts: `1726700030.00000${n}`, text: `ping ${n}` });
     for (const n of [1, 2, 3, 4]) await slack.handler!(dm(n));
     expect(runtimes.get("ada")!.delivered).toHaveLength(2);
   });
@@ -219,6 +234,41 @@ describe("AgentHub", () => {
     const command = inbound({ channelId: "D1", channelType: "im", text: ".status" });
     await Promise.all([slack.handler!(command), slack.handler!(command)]);
     expect(slack.posted).toHaveLength(1);
+  });
+
+  it("hears an edit that adds the mention, as its own input", async () => {
+    await startHub([{ name: "ada", runtime: "claude" }]);
+    const slack = slacks[0]!;
+    await slack.handler!(inbound({ ts: "1726700050.000100", text: "can someone check the deploy" }));
+    expect(runtimes.get("ada")?.delivered ?? []).toHaveLength(0);
+    await slack.handler!(inbound({ ts: "1726700050.000100", editedAt: "1726700055.000000", text: "<@UBOT1> can you check the deploy" }));
+    const text = runtimes.get("ada")!.delivered[0]!.text;
+    expect(text).toContain("this is an edit");
+    expect(text).toContain("can you check the deploy");
+  });
+
+  it("names files it could not or did not download instead of hiding them", async () => {
+    await startHub([{ name: "ada", runtime: "claude" }]);
+    const slack = slacks[0]!;
+    await slack.handler!(inbound({ text: "<@UBOT1> see attached", unavailableFiles: ["design.fig"] }));
+    expect(runtimes.get("ada")!.delivered[0]!.text).toContain("design.fig (Slack gave no download link)");
+  });
+
+  it("tells the operators, as the bridge, when it gives up on someone's message", async () => {
+    await startHub([{ name: "ada", runtime: "claude" }]);
+    const slack = slacks[0]!;
+    await slack.handler!(inbound({ text: "<@UBOT1> poison" }));
+    const runtime = runtimes.get("ada")!;
+    for (let round = 0; round < 3; round += 1) {
+      await runtime.options.events.onTurnCompleted({ status: "failed", finalText: "", error: "image rejected", consumedInputIds: runtime.unconfirmed.splice(0), inputFault: true });
+      if (round < 2) {
+        // Skip the retry wait rather than sleeping through it.
+        const mind = (hub as unknown as { seats: Map<string, { mind: { pump(): Promise<void>; holdUntil: number } }> }).seats.get("ada")!.mind;
+        mind.holdUntil = 0;
+        await mind.pump();
+      }
+    }
+    expect(slack.posted.some((post) => post.channelId === "D-UHUMAN" && post.text.includes("_bridge (ada)_") && post.text.includes("stopped trying"))).toBe(true);
   });
 
   it("gives each agent its own mind and wakes only the one that was named", async () => {
@@ -247,9 +297,9 @@ describe("AgentHub", () => {
   });
 
   it("stops agents waking each other after the budget, until a human speaks", async () => {
-    await startHub([{ name: "ada", runtime: "claude" }]);
+    await startHub([{ name: "ada", runtime: "claude" }, { name: "cody", runtime: "codex" }]);
     const slack = slacks[0]!;
-    const fromAgent = (n: number) => inbound({ userId: null, botId: "BOTHER", ts: `1726700010.00000${n}`, threadTs: "1726700010.000000", text: "<@UBOT1> ping" });
+    const fromAgent = (n: number) => inbound({ userId: null, botId: "BBOT2", ts: `1726700010.00000${n}`, threadTs: "1726700010.000000", text: "<@UBOT1> ping" });
     await slack.handler!(fromAgent(1));
     await slack.handler!(fromAgent(2));
     await slack.handler!(fromAgent(3));

@@ -74,7 +74,14 @@ export class WakeScheduler {
     let fired = 0;
     for (const wake of this.store.listScheduledWakes()) {
       if (!wake.enabled) continue;
-      const due = dueAt(wake, now);
+      let due: Date | null;
+      try {
+        due = dueAt(wake, now);
+      } catch (error) {
+        // One unreadable schedule must not stop everyone else's wakes.
+        logError("scheduled wake could not be evaluated", { agent: wake.agent, wakeId: wake.id, error: error instanceof Error ? error.message : String(error) });
+        continue;
+      }
       if (!due) continue;
       try {
         await this.deliver(wake.agent, { sourceKey: `wake:${wake.id}:${due.toISOString()}`, text: renderScheduledWake(wake, due) });
@@ -108,11 +115,19 @@ export function buildWakeTools(agent: string, store: AgentStore, defaultTimezone
       },
       handler: async (args) => {
         if ((args.every_minutes === undefined) === (args.cron === undefined)) throw new Error("Give exactly one of every_minutes or cron.");
-        if (args.cron) validateCronSchedule(args.cron);
+        const timezone = args.timezone ?? defaultTimezone;
+        if (args.cron) {
+          validateCronSchedule(args.cron);
+          try {
+            new Intl.DateTimeFormat("en-US", { timeZone: timezone });
+          } catch {
+            throw new Error(`Unknown timezone "${timezone}". Use an IANA name such as America/Los_Angeles.`);
+          }
+        }
         const wake = store.createScheduledWake({
           id: randomUUID().slice(0, 8),
           agent,
-          trigger: args.cron ? { kind: "cron", schedule: args.cron, timezone: args.timezone ?? defaultTimezone } : { kind: "interval", minutes: args.every_minutes! },
+          trigger: args.cron ? { kind: "cron", schedule: args.cron, timezone } : { kind: "interval", minutes: args.every_minutes! },
           note: args.note,
         });
         return `scheduled. id=${wake.id} (${describeTrigger(wake)})`;
