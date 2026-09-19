@@ -13,7 +13,8 @@
     "launch": "bash scripts/launch.sh",
     "launch:prod": "bash scripts/launch.sh --prod",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run src/tests"
+    "test": "vitest run src/tests",
+    "agents": "tsx src/agents/main.ts"
   },
   "engines": {
     "node": ">=24"
