@@ -43,14 +43,20 @@ export interface AgentSpec {
   denyTools: string[];
 }
 
-// Inherited connectors an agent never gets unless its entry lifts the denial: the operator's own Slack (posting through
-// it would speak as the operator) and the ones that move money. Approvals are off, and what an agent reads is not trusted.
+// Inherited connectors an agent never gets unless its entry lifts the denial: the ones that speak as the operator (their
+// own Slack, their iMessage), connector hubs that include those, and the ones that move money. Approvals are off, and what
+// an agent reads is not trusted. Found the hard way: a test agent posted to the operator's Slack under the operator's name.
 export const DEFAULT_DENY_TOOLS = [
   "mcp__claude_ai_Slack",
   "mcp__plugin_productivity_slack",
   "mcp__slack",
   "mcp__claude_ai_Robinhood",
   "mcp__claude_ai_Natural",
+  "mcp__mac_messages",
+  "mcp__messages",
+  // Connector hubs that can post to Slack and other accounts as the operator.
+  "mcp__composio",
+  "mcp__codex_apps",
 ];
 
 export type InputPriority = "now" | "next" | "later";

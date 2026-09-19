@@ -1,16 +1,16 @@
-// Live smoke test for ClaudeRuntime: context-only delivery, wake, tool call, resume.
+// Live smoke test for CodexRuntime: wake, tool call, restart and resume (tools must survive the resume).
 // Usage: tsx scripts/smoke/claudeRuntime.ts <cwd> [model] [ssh-target]
 import { z } from "zod";
-import { ClaudeRuntime } from "../../src/runtimes/claudeRuntime.js";
+import { CodexRuntime } from "../../src/runtimes/codexRuntime.js";
 import { DEFAULT_WAKE_POLICY, type AgentSpec, type AgentTool, type RuntimeEvents } from "../../src/agents/types.js";
 
-const [cwd, model = "claude-haiku-4-5-20251001", sshTarget] = process.argv.slice(2);
-if (!cwd) throw new Error("usage: claudeRuntime.ts <cwd> [model] [ssh-target]");
+const [cwd, model = "gpt-5.6-luna", sshTarget] = process.argv.slice(2);
+if (!cwd) throw new Error("usage: codexRuntime.ts <cwd> [model] [ssh-target]");
 
 const spec: AgentSpec = {
   name: "smoke",
   title: null,
-  runtime: "claude",
+  runtime: "codex",
   model,
   effort: null,
   host: sshTarget ? { kind: "ssh", target: sshTarget } : { kind: "local" },
@@ -20,6 +20,7 @@ const spec: AgentSpec = {
   slackAppTokenEnv: "",
   instructionsPath: null,
   inheritUserConfig: false,
+  // A smoke test gets no operator setup at all: its stub tools must be the only way out.
   denyTools: [],
 };
 
@@ -37,7 +38,7 @@ const tools: AgentTool[] = [
   },
 ];
 
-function makeRuntime(sessionId: string | null): { runtime: ClaudeRuntime; turnDone: () => Promise<void>; session: () => string | null } {
+function makeRuntime(sessionId: string | null): { runtime: CodexRuntime; turnDone: () => Promise<void>; session: () => string | null } {
   let resolveTurn: (() => void) | null = null;
   let session = sessionId;
   const events: RuntimeEvents = {
@@ -48,10 +49,10 @@ function makeRuntime(sessionId: string | null): { runtime: ClaudeRuntime; turnDo
     onCompaction: (event) => console.log("compaction", event.status),
     onProblem: (message) => console.log("problem", message),
   };
-  const runtime = new ClaudeRuntime({
+  const runtime = new CodexRuntime({
     spec,
     sessionId,
-    instructions: "You are a teammate reached through chat. Nothing you write is seen unless you call send_message. Keep messages to one sentence.",
+    instructions: "This is a test harness with no real chat system behind it. You are a teammate reached through chat. Nothing you write is seen unless you call send_message. Keep messages to one sentence.",
     tools,
     events,
   });

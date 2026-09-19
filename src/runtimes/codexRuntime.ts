@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { z } from "zod";
 import { spawnOnHost } from "../agents/hostSpawn.js";
 import { RuntimeError, type AgentRuntime, type RuntimeInput, type RuntimeOptions, type RuntimeState, type TurnStatus } from "../agents/types.js";
@@ -19,6 +22,8 @@ export interface CodexRpc {
 const threadResponseSchema = z.object({ thread: z.object({ id: z.string() }) });
 const turnResponseSchema = z.object({ turn: z.object({ id: z.string() }) });
 const toolCallSchema = z.object({ tool: z.string(), arguments: z.unknown().optional() });
+
+const CODEX_APPS_SERVER = "codex_apps";
 
 const CLIENT_INFO = { name: "slack-agents", title: "Slack Agents", version: "0.2.0" };
 
@@ -126,7 +131,7 @@ export class CodexRuntime implements AgentRuntime {
   private async startInner(): Promise<void> {
     const { spec } = this.options;
     const rpc = this.createRpc?.() ?? new CodexRpcClient(this.codexBin, spec.cwd, CLIENT_INFO, () =>
-      spawnOnHost({ host: spec.host, command: this.codexBin, args: ["app-server"], cwd: spec.cwd }),
+      spawnOnHost({ host: spec.host, command: this.codexBin, args: ["app-server", ...codexDenyArgs(spec.inheritUserConfig ? spec.denyTools : [...spec.denyTools, `mcp__${CODEX_APPS_SERVER}`])], cwd: spec.cwd, env: this.isolatedHomeEnv() }),
     );
     rpc.on("notification", (event) => {
       this.chain = this.chain.then(() => this.handleNotification(event)).catch((error) => {
@@ -138,7 +143,7 @@ export class CodexRuntime implements AgentRuntime {
         logError("codex server request failed", { agent: spec.name, method: event.method, error: errorMessage(error) });
       });
     });
-    rpc.on("stderr", (chunk) => logError("codex stderr", { agent: spec.name, chunk: chunk.trim() }));
+    rpc.on("stderr", (chunk) => logInfo("codex stderr", { agent: spec.name, chunk: chunk.trim().slice(0, 300) }));
     rpc.on("exit", () => {
       if (this.rpc !== rpc) return;
       this.rpc = null;
@@ -166,7 +171,8 @@ export class CodexRuntime implements AgentRuntime {
     const { spec, events } = this.options;
     if (this.threadId) {
       try {
-        await rpc.request("thread/resume", { threadId: this.threadId });
+        // Instructions and policy are sent again on resume, so changes to them reach an existing thread.
+        await rpc.request("thread/resume", { threadId: this.threadId, ...this.threadSettings() });
         this.resumeFailures = 0;
         logInfo("codex thread resumed", { agent: spec.name, threadId: this.threadId });
         return;
@@ -180,11 +186,7 @@ export class CodexRuntime implements AgentRuntime {
       }
     }
     const raw = await rpc.request("thread/start", {
-      cwd: spec.cwd,
-      model: spec.model ?? undefined,
-      approvalPolicy: "never",
-      sandbox: "danger-full-access",
-      developerInstructions: this.options.instructions,
+      ...this.threadSettings(),
       dynamicTools: this.options.tools.map((tool) => ({
         type: "function",
         name: tool.name,
@@ -195,6 +197,31 @@ export class CodexRuntime implements AgentRuntime {
     this.threadId = threadResponseSchema.parse(raw).thread.id;
     await events.onSessionChanged(this.threadId);
     logInfo("codex thread started", { agent: spec.name, threadId: this.threadId });
+  }
+
+  // An agent that does not inherit the operator's setup gets its own Codex home: the operator's login, and nothing else
+  // (no MCP servers, no user instructions; the app connectors are switched off separately, since they follow the login).
+  // Local agents only; a remote host keeps its own home.
+  private isolatedHomeEnv(): Record<string, string> | undefined {
+    const { spec } = this.options;
+    if (spec.inheritUserConfig || spec.host.kind !== "local") return undefined;
+    const home = path.join(spec.cwd, ".codex-home");
+    const operatorHome = process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
+    fs.mkdirSync(home, { recursive: true });
+    const link = path.join(home, "auth.json");
+    if (!fs.existsSync(link)) fs.symlinkSync(path.join(operatorHome, "auth.json"), link);
+    return { CODEX_HOME: home };
+  }
+
+  private threadSettings(): Record<string, unknown> {
+    const { spec } = this.options;
+    return {
+      cwd: spec.cwd,
+      model: spec.model ?? undefined,
+      approvalPolicy: "never",
+      sandbox: "danger-full-access",
+      developerInstructions: this.options.instructions,
+    };
   }
 
   private async handleNotification(event: RpcNotification): Promise<void> {
@@ -290,6 +317,14 @@ export class CodexRuntime implements AgentRuntime {
     this.currentState = state;
     await this.options.events.onStateChanged(state);
   }
+}
+
+// Codex has no per-tool deny list, so a denied MCP server is switched off for the agent's whole app-server process.
+// The ChatGPT app connectors (Slack, mail, payments, and the rest) follow the login, not the config, and come as one
+// built-in server; denying it turns the feature off.
+export function codexDenyArgs(denyTools: string[]): string[] {
+  const servers = denyTools.map((entry) => /^mcp__([A-Za-z0-9_-]+)$/.exec(entry)?.[1]).filter((name): name is string => Boolean(name));
+  return servers.flatMap((name) => ["-c", name === CODEX_APPS_SERVER ? "features.apps=false" : `mcp_servers.${name}.enabled=false`]);
 }
 
 // Codex reports these conditions only as English error text.

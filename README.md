@@ -49,8 +49,8 @@ This creates the app from a manifest (scopes, events, Socket Mode, agent surface
 | `cwd` | The agent's home directory. Defaults to `homes/<name>` under the state root. |
 | `wake` | What wakes the agent: `mentions` (default on), `directMessages` (default on), `participatingThreads` (replies in threads it has spoken in, default on), `ambient` (every message in its channels, default off). |
 | `instructions` | Path to the agent's own standing instructions, appended to the base instructions. |
-| `denyTools` | Harness tool specs the agent never gets, such as a whole MCP server (`mcp__server`). Deny rules hold even with approvals off. Default: the operator's own Slack connectors (posting through them would speak as the operator) and connectors that move money. Set `[]` to lift it. |
-| `inheritUserConfig` | Claude only. Default on: the agent loads the operator's user-level settings, MCP servers, and claude.ai connectors, so it can use what the operator can. Set it to `false` to confine an agent to the bridge's tools and its own home directory's config. |
+| `denyTools` | Harness tool specs the agent never gets, such as a whole MCP server (`mcp__server`). Deny rules hold even with approvals off. Default: connectors that speak as the operator (their own Slack, iMessage), connector hubs that include those (Composio, and Codex's built-in ChatGPT app connectors, which follow the login rather than the config), and connectors that move money. For Codex a denied server is switched off for the agent's whole app-server. Set `[]` to lift it. |
+| `inheritUserConfig` | Claude only. Default on: the agent loads the operator's user-level settings, MCP servers, and claude.ai connectors, so it can use what the operator can. Set it to `false` to confine an agent to the bridge's tools and its own home directory's config; a Codex agent then runs with its own Codex home holding only the login, with the app connectors off. |
 
 ## How a message reaches an agent
 

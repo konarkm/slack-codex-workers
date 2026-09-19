@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { CodexRuntime, classifyCodexError, type CodexRpc } from "../runtimes/codexRuntime.js";
+import { CodexRuntime, classifyCodexError, codexDenyArgs, type CodexRpc } from "../runtimes/codexRuntime.js";
 import { DEFAULT_WAKE_POLICY, type AgentSpec, type RuntimeEvents, type RuntimeState } from "../agents/types.js";
 
 const spec: AgentSpec = {
@@ -189,6 +189,21 @@ describe("CodexRuntime", () => {
     expect(rpc.responses.find((r) => r.id === 7)).toMatchObject({ result: { success: true } });
     expect(rpc.responses.find((r) => r.id === 8)).toMatchObject({ result: { success: false } });
     expect(turns).toEqual([]);
+  });
+
+  it("turns denied servers into process-level overrides, and the app connectors into a feature switch", () => {
+    expect(codexDenyArgs(["mcp__composio", "mcp__codex_apps", "Bash(rm *)", "mcp__claude_ai_Slack"])).toEqual([
+      "-c", "mcp_servers.composio.enabled=false",
+      "-c", "features.apps=false",
+      "-c", "mcp_servers.claude_ai_Slack.enabled=false",
+    ]);
+    expect(codexDenyArgs([])).toEqual([]);
+  });
+
+  it("sends instructions and policy again when resuming a thread", async () => {
+    const { rpc, runtime } = setup("thread-old");
+    await runtime.start();
+    expect(rpc.requests[0]).toMatchObject({ method: "thread/resume", params: { threadId: "thread-old", developerInstructions: "be a teammate", approvalPolicy: "never", sandbox: "danger-full-access" } });
   });
 
   it("classifies Codex error text", () => {
