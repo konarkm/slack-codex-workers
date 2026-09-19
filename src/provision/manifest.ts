@@ -42,9 +42,9 @@ export function buildAgentManifest(input: AgentManifestInput): Record<string, un
       bot_user: { display_name: input.name, always_online: true },
       ...(input.agentView ? { agent_view: { agent_description: description.slice(0, 140) } } : {}),
     },
-    oauth_config: { scopes: { bot: BOT_SCOPES } },
+    oauth_config: { scopes: { bot: input.agentView ? [...BOT_SCOPES, "assistant:write"] : BOT_SCOPES } },
     settings: {
-      event_subscriptions: { bot_events: input.agentView ? [...BOT_EVENTS, "agent_session_stopped"] : BOT_EVENTS },
+      event_subscriptions: { bot_events: input.agentView ? [...BOT_EVENTS, "agent_session_stopped", "app_home_opened"] : BOT_EVENTS },
       interactivity: { is_enabled: false },
       org_deploy_enabled: false,
       socket_mode_enabled: true,
