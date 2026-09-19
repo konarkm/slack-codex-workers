@@ -2,7 +2,9 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { AppConfig } from "../config.js";
+import type { UploadConfig } from "../settings.js";
+
+type AppConfig = UploadConfig & Record<string, unknown>;
 import { validateSlackUploadFiles } from "../slack/uploads.js";
 
 const tempDirs: string[] = [];

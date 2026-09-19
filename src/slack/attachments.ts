@@ -1,12 +1,12 @@
 import fs from "node:fs";
 import fsPromises from "node:fs/promises";
 import path from "node:path";
-import type { AppConfig } from "../config.js";
+import type { AttachmentConfig } from "../settings.js";
 import type { MessageAttachmentRecord, SlackAttachmentInput, SlackFileRef } from "../types.js";
 
 const IMAGE_PREFIXES = ["image/"];
 
-export type AttachmentConfig = Pick<AppConfig, "attachmentStorageDir" | "attachmentTotalMaxBytes" | "attachmentDownloadTimeoutMs" | "attachmentMaxBytes">;
+export type { AttachmentConfig };
 
 interface DownloadedAttachment {
   record: MessageAttachmentRecord;

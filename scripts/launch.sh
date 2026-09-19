@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Runs the agent hub and keeps it running. --prod builds first and runs the compiled output.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -14,59 +15,39 @@ if [[ -f "${ROOT_DIR}/.env" ]]; then
   set +a
 fi
 
-WORKSPACE_ROOT="${WORKSPACE_ROOT:-${CODEX_CWD:-${ROOT_DIR}}}"
-CODEX_BIN="${CODEX_BIN:-codex}"
-STATE_DIR="${WORKSPACE_ROOT}/.slack-workers"
-LOCK_DIR="${STATE_DIR}/launcher"
-LOCK_FILE="${LOCK_DIR}/launcher.lock"
-RESTART_EXIT_CODE=42
-
-required_vars=(SLACK_BOT_TOKEN SLACK_APP_TOKEN SLACK_ADMIN_USER_IDS WORKSPACE_ROOT)
-for name in "${required_vars[@]}"; do
-  if [[ -z "${!name:-}" ]]; then
-    echo "missing required env var: ${name}" >&2
-    exit 1
-  fi
-done
-
-mkdir -p "${LOCK_DIR}"
-
-if ! command -v "${CODEX_BIN}" >/dev/null 2>&1; then
-  echo "codex binary not found: ${CODEX_BIN}" >&2
+export AGENTS_STATE_ROOT="${AGENTS_STATE_ROOT:-${ROOT_DIR}/.slack-agents}"
+if [[ ! -f "${AGENTS_FILE:-${AGENTS_STATE_ROOT}/agents.json}" ]]; then
+  echo "no agent registry at ${AGENTS_FILE:-${AGENTS_STATE_ROOT}/agents.json}; copy agents.example.json there and edit it" >&2
   exit 1
 fi
-"${CODEX_BIN}" --version >/dev/null
 
+mkdir -p "${AGENTS_STATE_ROOT}"
 if command -v flock >/dev/null 2>&1; then
-  exec 9>"${LOCK_FILE}"
+  exec 9>"${AGENTS_STATE_ROOT}/launcher.lock"
   if ! flock -n 9; then
-    echo "slack-codex-workers is already running" >&2
+    echo "the agent hub is already running" >&2
     exit 1
   fi
 fi
 
 cd "${ROOT_DIR}"
-export SUPERVISOR_RESTART_ENABLED=1
-export LAUNCH_MODE="${MODE}"
-export WORKSPACE_ROOT
-export CODEX_CWD="${WORKSPACE_ROOT}"
-export CODEX_BIN
-
 if [[ "${MODE}" == "prod" ]]; then
   npm run build
 fi
 
+# A crash restarts the hub after a pause; agents resume their sessions and queued input. A clean exit stops the loop.
 while true; do
   set +e
   if [[ "${MODE}" == "prod" ]]; then
-    node dist/index.js
+    node dist/agents/main.js
   else
-    npm run dev:run
+    npx tsx src/agents/main.ts
   fi
-  exit_code=$?
+  code=$?
   set -e
-  if [[ ${exit_code} -ne ${RESTART_EXIT_CODE} ]]; then
-    exit ${exit_code}
+  if [[ ${code} -eq 0 ]]; then
+    exit 0
   fi
-  echo "bridge requested restart; relaunching..." >&2
+  echo "agent hub exited with code ${code}; restarting in 5s" >&2
+  sleep 5
 done

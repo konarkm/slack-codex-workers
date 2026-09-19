@@ -22,11 +22,13 @@ function message(overrides: Partial<SlackInbound> = {}): SlackInbound {
 }
 
 describe("decideWake", () => {
-  it("wakes on mentions and DMs by default, and keeps everything else as context", () => {
+  it("wakes on mentions, DMs, and threads the agent is in by default, and keeps everything else as context", () => {
     expect(decideWake(message({ text: `hey <@${OWN}>` }), OWN, DEFAULT_WAKE_POLICY, false)).toEqual({ reason: "mention", wake: true });
     expect(decideWake(message({ channelType: "im" }), OWN, DEFAULT_WAKE_POLICY, false)).toEqual({ reason: "direct_message", wake: true });
     expect(decideWake(message(), OWN, DEFAULT_WAKE_POLICY, false)).toEqual({ reason: "ambient", wake: false });
-    expect(decideWake(message({ threadTs: "1.1" }), OWN, DEFAULT_WAKE_POLICY, true)).toEqual({ reason: "thread_reply", wake: false });
+    expect(decideWake(message({ threadTs: "1.1" }), OWN, DEFAULT_WAKE_POLICY, true)).toEqual({ reason: "thread_reply", wake: true });
+    expect(decideWake(message({ threadTs: "1.1" }), OWN, DEFAULT_WAKE_POLICY, false)).toEqual({ reason: "ambient", wake: false });
+    expect(decideWake(message({ threadTs: "1.1" }), OWN, { ...DEFAULT_WAKE_POLICY, participatingThreads: false }, true).wake).toBe(false);
   });
 
   it("follows each agent's own wake policy", () => {

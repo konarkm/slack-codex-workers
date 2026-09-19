@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AppConfig } from "../config.js";
+import type { WebhookServerConfig } from "../settings.js";
+
+type AppConfig = WebhookServerConfig & Record<string, unknown>;
 import { WebhookIngressServer } from "../webhooks/server.js";
 import type { WebhookSourceRecord } from "../types.js";
 

@@ -5,7 +5,7 @@ import { z } from "zod";
 import { logError } from "../logger.js";
 import { runWebhookHandler } from "../webhooks/handlers.js";
 import type { RawWebhookIngress, WebhookIngressResponse } from "../webhooks/server.js";
-import { buildWebhookHandlerScaffold } from "../webhooks/sourceManager.js";
+import { buildWebhookHandlerScaffold } from "../webhooks/scaffold.js";
 import type { WebhookSourceRecord } from "../types.js";
 import type { AgentStore, WebhookSource, WebhookSubscription } from "./agentStore.js";
 import type { AgentTool } from "./types.js";

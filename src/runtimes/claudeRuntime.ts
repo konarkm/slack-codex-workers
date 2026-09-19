@@ -144,7 +144,7 @@ export class ClaudeRuntime implements AgentRuntime {
       effort: (spec.effort as Options["effort"]) ?? undefined,
       resume: this.currentSessionId ?? undefined,
       systemPrompt: { type: "preset", preset: "claude_code", append: instructions },
-      // An agent's capabilities are its own unless the spec opts in to the operator's user-level setup and cloud connectors.
+      // By default an agent shares the operator's user-level setup and cloud connectors; a spec can turn that off to confine it to the bridge's tools.
       settingSources: spec.inheritUserConfig ? ["user", "project", "local"] : ["project", "local"],
       strictMcpConfig: !spec.inheritUserConfig,
       settings: spec.inheritUserConfig ? undefined : { disableClaudeAiConnectors: true },

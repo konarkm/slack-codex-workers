@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { logInfo, logWarn } from "../logger.js";
-import type { AppConfig } from "../config.js";
+import type { WebhookServerConfig } from "../settings.js";
 import type { WebhookSourceRecord } from "../types.js";
 
 const AUTH_FAILURE_WINDOW_MS = 5 * 60 * 1000;
@@ -30,10 +30,7 @@ export interface WebhookIngressResponse {
   headers?: Record<string, string>;
 }
 
-export type WebhookServerConfig = Pick<
-  AppConfig,
-  "webhookPort" | "webhookBindHost" | "webhookPath" | "webhookTrustLoopbackProxy" | "webhookBodyMaxBytes" | "webhookBodyReadTimeoutMs"
->;
+export type { WebhookServerConfig };
 
 export class WebhookIngressServer {
   private server: Server | null = null;

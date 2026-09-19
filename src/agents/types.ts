@@ -19,7 +19,7 @@ export interface WakePolicy {
 export const DEFAULT_WAKE_POLICY: WakePolicy = {
   mentions: true,
   directMessages: true,
-  participatingThreads: false,
+  participatingThreads: true,
   ambient: false,
 };
 

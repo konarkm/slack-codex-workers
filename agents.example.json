@@ -4,15 +4,15 @@
       "name": "ada",
       "title": "generalist manager",
       "runtime": "claude",
-      "model": "claude-opus-5",
-      "wake": { "participatingThreads": true }
+      "model": "claude-opus-5"
     },
     {
       "name": "cody",
       "title": "builder",
       "runtime": "codex",
       "model": "gpt-5.5",
-      "effort": "medium"
+      "effort": "medium",
+      "wake": { "participatingThreads": false }
     },
     {
       "name": "scout",

@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { AppConfig } from "../config.js";
+import type { UploadConfig } from "../settings.js";
 
 export interface SlackUploadInput {
   path: string;
@@ -17,7 +17,7 @@ export interface ValidatedSlackUploadFile {
 
 export async function validateSlackUploadFiles(
   files: SlackUploadInput[],
-  config: Pick<AppConfig, "slackUploadMaxFiles" | "workspaceRoot" | "attachmentStorageDir" | "attachmentMaxBytes">,
+  config: UploadConfig,
 ): Promise<ValidatedSlackUploadFile[]> {
   if (files.length === 0) {
     throw new Error("At least one file is required.");

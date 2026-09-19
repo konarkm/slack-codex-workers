@@ -26,7 +26,7 @@ const agentSchema = z.object({
   slackBotTokenEnv: z.string().min(1).optional(),
   slackAppTokenEnv: z.string().min(1).optional(),
   instructions: z.string().min(1).optional(),
-  inheritUserConfig: z.boolean().default(false),
+  inheritUserConfig: z.boolean().default(true),
 });
 
 const registrySchema = z.object({ agents: z.array(agentSchema) });
