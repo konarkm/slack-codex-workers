@@ -66,6 +66,8 @@ export interface RuntimeEvents {
   onTurnCompleted(event: { status: TurnStatus; finalText: string; error: string | null }): void | Promise<void>;
   onActivity(item: ActivityItem): void | Promise<void>;
   onCompaction(event: { status: "started" | "completed" | "failed" }): void | Promise<void>;
+  // The runtime is up but something is wrong with it that an operator should see.
+  onProblem(message: string): void | Promise<void>;
 }
 
 export interface AgentTool<Shape extends z.ZodRawShape = z.ZodRawShape> {

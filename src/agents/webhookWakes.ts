@@ -160,12 +160,13 @@ export function buildWebhookTools(agent: string, store: AgentStore, webhooks: We
       shape: {
         source: z.string().min(1),
         events: z.array(z.string().min(1)).optional().describe("Event names to match. Omit for every event from the source."),
-        match: z.record(z.string(), z.string()).optional().describe("Event fields that must match exactly."),
+        // A list rather than a free-form object: the Claude SDK drops every tool on the server when one schema uses a record.
+        match: z.array(z.object({ field: z.string().min(1), equals: z.string() })).optional().describe("Event fields that must match exactly."),
         note: z.string().min(1),
       },
       handler: async (args) => {
         if (!store.getWebhookSource(args.source.toLowerCase())) throw new Error(`Webhook source ${args.source} does not exist.`);
-        const subscription = store.createWebhookSubscription({ id: randomUUID().slice(0, 8), agent, source: args.source.toLowerCase(), events: args.events ?? [], match: args.match ?? {}, note: args.note });
+        const subscription = store.createWebhookSubscription({ id: randomUUID().slice(0, 8), agent, source: args.source.toLowerCase(), events: args.events ?? [], match: Object.fromEntries((args.match ?? []).map((item) => [item.field, item.equals])), note: args.note });
         return `subscribed. id=${subscription.id}`;
       },
     }),

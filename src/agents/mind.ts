@@ -106,6 +106,9 @@ export class AgentMind {
         await this.afterTurn(event.status);
       },
       onActivity: () => {},
+      onProblem: (message) => {
+        this.store.setAgentError(this.spec.name, message);
+      },
       onCompaction: (event) => {
         logInfo("agent compaction", { agent: this.spec.name, status: event.status });
       },

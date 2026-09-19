@@ -224,6 +224,13 @@ export class ClaudeRuntime implements AgentRuntime {
         await events.onSessionChanged(message.session_id);
       }
       logInfo("claude session ready", { agent: spec.name, sessionId: message.session_id, model: message.model });
+      // A tool schema the harness cannot serve makes it drop every bridge tool without an error, leaving the agent mute.
+      const missing = this.options.tools.map((definition) => `mcp__${AGENT_TOOL_SERVER}__${definition.name}`).filter((name) => !message.tools.includes(name));
+      if (missing.length > 0) {
+        const problem = `The harness is not serving ${missing.length} of ${this.options.tools.length} bridge tools (first: ${missing[0]}). The agent may be unable to speak.`;
+        logError(problem, { agent: spec.name });
+        await events.onProblem(problem);
+      }
       return;
     }
     if (message.type === "system" && message.subtype === "session_state_changed") {

@@ -45,6 +45,7 @@ function makeRuntime(sessionId: string | null): { runtime: ClaudeRuntime; turnDo
     onTurnCompleted: (event) => { console.log("turn", event.status, event.error ?? "", JSON.stringify(event.finalText.slice(0, 120))); resolveTurn?.(); },
     onActivity: (item) => console.log("activity", item.title),
     onCompaction: (event) => console.log("compaction", event.status),
+    onProblem: (message) => console.log("problem", message),
   };
   const runtime = new ClaudeRuntime({
     spec,

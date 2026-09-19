@@ -53,6 +53,7 @@ function setup(sessionId: string | null, sent: string[] = []) {
     onTurnCompleted: (event) => void turns.push(event),
     onActivity: () => {},
     onCompaction: () => {},
+    onProblem: () => {},
   };
   const runtime = new CodexRuntime(
     {

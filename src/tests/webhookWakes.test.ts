@@ -52,9 +52,9 @@ describe("webhook wakes", () => {
   it("wakes each matching subscriber once, with the payload on disk and the content escaped", async () => {
     await wakes.createSource("github", "ada");
     writeHandler("github");
-    await tool("ada", "subscribe_webhook").handler({ source: "github", events: ["pr.opened"], match: { repo: "bridge" }, note: "review it" } as never);
+    await tool("ada", "subscribe_webhook").handler({ source: "github", events: ["pr.opened"], match: [{ field: "repo", equals: "bridge" }], note: "review it" } as never);
     await tool("cody", "subscribe_webhook").handler({ source: "github", note: "log everything" } as never);
-    await tool("cody", "subscribe_webhook").handler({ source: "github", match: { repo: "other" }, note: "never matches" } as never);
+    await tool("cody", "subscribe_webhook").handler({ source: "github", match: [{ field: "repo", equals: "other" }], note: "never matches" } as never);
 
     const response = await wakes.ingest(await request("github", { event: "pr.opened", id: "1", repo: "bridge" }));
     expect(response).toEqual({ status: 202, body: { ok: true, events: 1, wakes: 2 } });
