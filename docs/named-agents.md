@@ -70,6 +70,8 @@ Only through tools: `send_message`, `react`, `upload_files`, `edit_message`, `de
 
 Other tools: `read_history`, `list_channels`, `list_people`, `join_channel`, `open_dm`, `get_message_link`, `get_current_time`, and `schedule_wake` / `list_wakes` / `cancel_wake` for interval and cron wakes the agent sets for itself.
 
+Inbound webhooks: `create_webhook_source` makes a secret URL and a handler file that turns an outside system's requests into named events; `subscribe_webhook` wakes the agent on matching events with its own note. Payloads are written to disk and the wake carries the path. The listener binds `127.0.0.1:3014` by default (`WEBHOOK_PORT`, `WEBHOOK_BIND_HOST`, `WEBHOOK_PUBLIC_BASE_URL`; `WEBHOOK_PORT=off` disables it). Handler files run as trusted code in the bridge and should verify the sender's signature.
+
 Where the app is declared as a Slack agent, the thread shows Slack's working indicator while the agent's turn runs, and Slack's stop button interrupts the turn.
 
 ## Operator commands

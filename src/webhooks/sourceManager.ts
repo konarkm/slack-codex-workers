@@ -82,7 +82,7 @@ function generateRouteToken(): string {
   return randomBytes(18).toString("hex");
 }
 
-function buildWebhookHandlerScaffold(source: string): string {
+export function buildWebhookHandlerScaffold(source: string): string {
   return `/**
  * Webhook handler for source "${source}".
  *

@@ -37,6 +37,27 @@ export interface ScheduledWake {
   lastFiredAt: string | null;
 }
 
+export interface WebhookSource {
+  source: string;
+  routeToken: string;
+  handlerPath: string;
+  enabled: boolean;
+  ownerAgent: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WebhookSubscription {
+  id: string;
+  agent: string;
+  source: string;
+  events: string[];
+  // Every listed field must equal the event's field of the same name.
+  match: Record<string, string>;
+  note: string;
+  enabled: boolean;
+}
+
 export interface NewInboxItem {
   agent: string;
   sourceKey: string;
@@ -103,6 +124,31 @@ export class AgentStore {
         enabled INTEGER NOT NULL,
         created_at TEXT NOT NULL,
         last_fired_at TEXT
+      );
+      CREATE TABLE IF NOT EXISTS webhook_sources (
+        source TEXT PRIMARY KEY,
+        route_token TEXT NOT NULL UNIQUE,
+        handler_path TEXT NOT NULL,
+        enabled INTEGER NOT NULL,
+        owner_agent TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS webhook_subscriptions (
+        id TEXT PRIMARY KEY,
+        agent TEXT NOT NULL,
+        source TEXT NOT NULL,
+        events_json TEXT NOT NULL,
+        match_json TEXT NOT NULL,
+        note TEXT NOT NULL,
+        enabled INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS webhook_events (
+        source TEXT NOT NULL,
+        event TEXT NOT NULL,
+        dedupe_key TEXT NOT NULL,
+        received_at TEXT NOT NULL,
+        PRIMARY KEY(source, event, dedupe_key)
       );
       CREATE TABLE IF NOT EXISTS thread_seen (
         agent TEXT NOT NULL,
@@ -217,6 +263,80 @@ export class AgentStore {
     return this.db.prepare("UPDATE scheduled_wakes SET enabled = 0 WHERE id = ? AND agent = ?").run(id, agent).changes > 0;
   }
 
+  createWebhookSource(input: Pick<WebhookSource, "source" | "routeToken" | "handlerPath" | "ownerAgent">): WebhookSource {
+    const now = new Date().toISOString();
+    this.db
+      .prepare("INSERT INTO webhook_sources (source, route_token, handler_path, enabled, owner_agent, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?, ?)")
+      .run(input.source, input.routeToken, input.handlerPath, input.ownerAgent, now, now);
+    return this.getWebhookSource(input.source)!;
+  }
+
+  getWebhookSource(source: string): WebhookSource | null {
+    const row = this.db.prepare("SELECT * FROM webhook_sources WHERE source = ?").get(source) as WebhookSourceRow | undefined;
+    return row ? mapWebhookSource(row) : null;
+  }
+
+  getWebhookSourceByRouteToken(routeToken: string): WebhookSource | null {
+    const row = this.db.prepare("SELECT * FROM webhook_sources WHERE route_token = ?").get(routeToken) as WebhookSourceRow | undefined;
+    return row ? mapWebhookSource(row) : null;
+  }
+
+  listWebhookSources(): WebhookSource[] {
+    return (this.db.prepare("SELECT * FROM webhook_sources ORDER BY source").all() as unknown as WebhookSourceRow[]).map(mapWebhookSource);
+  }
+
+  updateWebhookSource(source: string, patch: { enabled?: boolean; routeToken?: string }): WebhookSource | null {
+    const current = this.getWebhookSource(source);
+    if (!current) return null;
+    this.db
+      .prepare("UPDATE webhook_sources SET enabled = ?, route_token = ?, updated_at = ? WHERE source = ?")
+      .run((patch.enabled ?? current.enabled) ? 1 : 0, patch.routeToken ?? current.routeToken, new Date().toISOString(), source);
+    return this.getWebhookSource(source);
+  }
+
+  createWebhookSubscription(input: Omit<WebhookSubscription, "enabled">): WebhookSubscription {
+    this.db
+      .prepare("INSERT INTO webhook_subscriptions (id, agent, source, events_json, match_json, note, enabled) VALUES (?, ?, ?, ?, ?, ?, 1)")
+      .run(input.id, input.agent, input.source, JSON.stringify(input.events), JSON.stringify(input.match), input.note);
+    return { ...input, enabled: true };
+  }
+
+  listWebhookSubscriptions(filter: { agent?: string; source?: string } = {}): WebhookSubscription[] {
+    const rows = this.db.prepare("SELECT * FROM webhook_subscriptions ORDER BY id").all() as unknown as Array<{
+      id: string;
+      agent: string;
+      source: string;
+      events_json: string;
+      match_json: string;
+      note: string;
+      enabled: number;
+    }>;
+    return rows
+      .filter((row) => (!filter.agent || row.agent === filter.agent) && (!filter.source || row.source === filter.source))
+      .map((row) => ({
+        id: row.id,
+        agent: row.agent,
+        source: row.source,
+        events: JSON.parse(row.events_json) as string[],
+        match: JSON.parse(row.match_json) as Record<string, string>,
+        note: row.note,
+        enabled: row.enabled === 1,
+      }));
+  }
+
+  disableWebhookSubscription(agent: string, id: string): boolean {
+    return this.db.prepare("UPDATE webhook_subscriptions SET enabled = 0 WHERE id = ? AND agent = ?").run(id, agent).changes > 0;
+  }
+
+  // Returns false when this event was already recorded, so a redelivered webhook wakes nobody twice.
+  recordWebhookEvent(source: string, event: string, dedupeKey: string): boolean {
+    return (
+      this.db
+        .prepare("INSERT OR IGNORE INTO webhook_events (source, event, dedupe_key, received_at) VALUES (?, ?, ?, ?)")
+        .run(source, event, dedupeKey, new Date().toISOString()).changes > 0
+    );
+  }
+
   recordThreadParticipation(agent: string, channelId: string, threadTs: string): void {
     this.db
       .prepare("INSERT OR IGNORE INTO thread_participation (agent, channel_id, thread_ts, created_at) VALUES (?, ?, ?, ?)")
@@ -237,6 +357,28 @@ export class AgentStore {
       this.db.prepare("SELECT 1 FROM thread_participation WHERE agent = ? AND channel_id = ? AND thread_ts = ?").get(agent, channelId, threadTs),
     );
   }
+}
+
+interface WebhookSourceRow {
+  source: string;
+  route_token: string;
+  handler_path: string;
+  enabled: number;
+  owner_agent: string;
+  created_at: string;
+  updated_at: string;
+}
+
+function mapWebhookSource(row: WebhookSourceRow): WebhookSource {
+  return {
+    source: row.source,
+    routeToken: row.route_token,
+    handlerPath: row.handler_path,
+    enabled: row.enabled === 1,
+    ownerAgent: row.owner_agent,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
 function mapInboxRow(row: InboxRow): InboxItem {

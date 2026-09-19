@@ -12,7 +12,9 @@ import { AgentMind, type RuntimeFactory } from "./mind.js";
 import { loadAgentRegistry } from "./registry.js";
 import { buildSlackTools } from "./slackTools.js";
 import type { AgentSpec, RuntimeState } from "./types.js";
+import { WebhookIngressServer, type WebhookServerConfig } from "../webhooks/server.js";
 import { WakeScheduler, buildWakeTools } from "./wakes.js";
+import { WebhookWakes, buildWebhookTools } from "./webhookWakes.js";
 
 export interface HubConfig extends AttachmentConfig {
   agentsFile: string;
@@ -26,6 +28,8 @@ export interface HubConfig extends AttachmentConfig {
   // Consecutive times other agents may wake an agent in one thread before a human has to speak again.
   agentWakeBudget: number;
   threadContextLimit: number;
+  // Inbound webhooks. Null turns the listener off.
+  webhooks: (WebhookServerConfig & { storageDir: string; publicBaseUrl: string | null }) | null;
 }
 
 export interface SlackClientFactory {
@@ -49,6 +53,8 @@ export class AgentHub {
   private readonly seats = new Map<string, Seat>();
   private readonly agentWakeCounts = new Map<string, number>();
   private readonly scheduler: WakeScheduler;
+  private readonly webhookWakes: WebhookWakes | null;
+  private webhookServer: WebhookIngressServer | null = null;
 
   constructor(
     private readonly config: HubConfig,
@@ -57,12 +63,16 @@ export class AgentHub {
       options.spec.runtime === "claude" ? new ClaudeRuntime(options) : new CodexRuntime(options, config.codexBin),
   ) {
     this.store = new AgentStore(config.databasePath);
-    this.scheduler = new WakeScheduler(this.store, async (agent, item) => {
+    const deliverWake = async (agent: string, item: { sourceKey: string; text: string }): Promise<void> => {
       // A wake for an agent that is not running stays due and fires once the agent is back.
       const seat = this.seats.get(agent);
       if (!seat) throw new Error(`agent ${agent} is not running`);
       await seat.mind.receive({ ...item, wake: true, priority: "later", imagePaths: [] });
-    });
+    };
+    this.scheduler = new WakeScheduler(this.store, deliverWake);
+    this.webhookWakes = config.webhooks
+      ? new WebhookWakes(this.store, { storageDir: config.webhooks.storageDir, webhookPath: config.webhooks.webhookPath, publicBaseUrl: config.webhooks.publicBaseUrl }, deliverWake)
+      : null;
   }
 
   async start(): Promise<void> {
@@ -74,11 +84,23 @@ export class AgentHub {
     });
     if (this.seats.size === 0) throw new Error("No agent could be started");
     this.scheduler.start();
+    if (this.config.webhooks && this.webhookWakes) {
+      const wakes = this.webhookWakes;
+      const server = new WebhookIngressServer(this.config.webhooks, (token) => wakes.resolveSource(token), (input) => wakes.ingest(input));
+      try {
+        await server.start();
+        this.webhookServer = server;
+      } catch (error) {
+        logError("webhook listener failed to start; agents run without inbound webhooks", { error: errorMessage(error) });
+      }
+    }
     logInfo("agent hub ready", { agents: [...this.seats.keys()] });
   }
 
   async stop(): Promise<void> {
     this.scheduler.stop();
+    await this.webhookServer?.stop().catch(() => {});
+    this.webhookServer = null;
     await Promise.allSettled([...this.seats.values()].map(async (seat) => {
       await seat.slack.stop();
       await seat.mind.stop();
@@ -102,7 +124,10 @@ export class AgentHub {
     });
     const identity = await slack.start();
 
-    const tools = [...buildWakeTools(spec.name, this.store, this.config.timezone), ...buildSlackTools({
+    const tools = [
+      ...buildWakeTools(spec.name, this.store, this.config.timezone),
+      ...(this.webhookWakes ? buildWebhookTools(spec.name, this.store, this.webhookWakes) : []),
+      ...buildSlackTools({
       slack,
       noteVisibleAction: () => seat.mind.noteVisibleAction(),
       recordThreadParticipation: (channelId, threadTs) => this.store.recordThreadParticipation(spec.name, channelId, threadTs),
@@ -113,8 +138,9 @@ export class AgentHub {
         attachmentMaxBytes: this.config.attachmentMaxBytes,
       },
       timezone: this.config.timezone,
-      canUploadLocalFiles: spec.host.kind === "local",
-    })];
+        canUploadLocalFiles: spec.host.kind === "local",
+      }),
+    ];
     const ownInstructions = spec.instructionsPath && fs.existsSync(spec.instructionsPath) ? fs.readFileSync(spec.instructionsPath, "utf8") : null;
     const instructions = buildInstructions({ spec, ownUserId: identity.botUserId, workspaceName: identity.teamName, ownInstructions });
     seat.mind = new AgentMind(spec, this.store, this.createRuntime, instructions, tools, {

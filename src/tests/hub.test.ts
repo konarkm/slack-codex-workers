@@ -107,6 +107,7 @@ async function startHub(agents: unknown[], overrides: Partial<HubConfig> = {}): 
     adminUserIds: ["UHUMAN"],
     agentWakeBudget: 2,
     threadContextLimit: 12,
+    webhooks: null,
     attachmentStorageDir: path.join(dir, "attachments"),
     attachmentMaxBytes: 1024,
     attachmentTotalMaxBytes: null,

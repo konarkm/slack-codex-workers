@@ -30,12 +30,17 @@ export interface WebhookIngressResponse {
   headers?: Record<string, string>;
 }
 
+export type WebhookServerConfig = Pick<
+  AppConfig,
+  "webhookPort" | "webhookBindHost" | "webhookPath" | "webhookTrustLoopbackProxy" | "webhookBodyMaxBytes" | "webhookBodyReadTimeoutMs"
+>;
+
 export class WebhookIngressServer {
   private server: Server | null = null;
   private readonly authFailures = new Map<string, AuthFailureState>();
 
   constructor(
-    private readonly config: AppConfig,
+    private readonly config: WebhookServerConfig,
     private readonly resolveSource: (routeToken: string) => WebhookSourceRecord | null,
     private readonly handler: (input: RawWebhookIngress) => Promise<WebhookIngressResponse>,
     private readonly canAcceptRequest: () => boolean = () => true,
