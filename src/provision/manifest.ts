@@ -1,7 +1,7 @@
-export interface AgentManifestInput {
-  name: string;
-  title: string | null;
-  // Declares the app as a Slack agent: working indicator, stop button, agents sidebar.
+export interface TeamAppManifestInput {
+  // The app's name in Slack, e.g. "Agents". People never have to type it; agents are addressed by their own names.
+  appName: string;
+  // Declares the app as a Slack agent: working indicator and stop button per thread.
   agentView: boolean;
 }
 
@@ -11,6 +11,8 @@ const BOT_SCOPES = [
   "channels:join",
   "channels:read",
   "chat:write",
+  // Lets each agent post under its own name and icon.
+  "chat:write.customize",
   "files:read",
   "files:write",
   "groups:history",
@@ -28,19 +30,16 @@ const BOT_SCOPES = [
 
 const BOT_EVENTS = ["app_mention", "message.channels", "message.groups", "message.im", "message.mpim", "member_joined_channel"];
 
-function displayName(name: string): string {
-  return name.charAt(0).toUpperCase() + name.slice(1);
-}
-
-// One Slack app per named agent: Slack gives each app exactly one bot user, and only a bot user can be @-mentioned or DMed.
-export function buildAgentManifest(input: AgentManifestInput): Record<string, unknown> {
-  const description = input.title ? `${displayName(input.name)}, ${input.title}` : `${displayName(input.name)}, an agent teammate`;
+// One Slack app for the whole team of agents. Slack gives an app a single bot user, so the agents are personas of it:
+// each posts under its own name and icon, and the bridge works out who a message is for.
+export function buildTeamAppManifest(input: TeamAppManifestInput): Record<string, unknown> {
+  const description = "A team of AI agents. Talk to them by name, the way you would a colleague.";
   return {
-    display_information: { name: displayName(input.name), description: description.slice(0, 140) },
+    display_information: { name: input.appName, description },
     features: {
       app_home: { home_tab_enabled: false, messages_tab_enabled: true, messages_tab_read_only_enabled: false },
-      bot_user: { display_name: input.name, always_online: true },
-      ...(input.agentView ? { agent_view: { agent_description: description.slice(0, 140) } } : {}),
+      bot_user: { display_name: input.appName.toLowerCase().replace(/[^a-z0-9._-]+/g, "-"), always_online: true },
+      ...(input.agentView ? { agent_view: { agent_description: description } } : {}),
     },
     oauth_config: { scopes: { bot: input.agentView ? [...BOT_SCOPES, "assistant:write"] : BOT_SCOPES } },
     settings: {

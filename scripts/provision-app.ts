@@ -1,5 +1,5 @@
-// Creates the Slack app for a named agent from a manifest.
-// Usage: tsx scripts/provision-agent.ts <agent-name> [--title "..."] [--no-agent-view] [--dry-run]
+// Creates the one Slack app the whole team of agents speaks through. Done once per workspace; adding agents needs no Slack setup.
+// Usage: tsx scripts/provision-app.ts [--name "Agents"] [--no-agent-view] [--dry-run]
 // Needs an app configuration token for the target workspace (api.slack.com/apps → "Your App Configuration Tokens"):
 //   SLACK_CONFIG_TOKEN, and optionally SLACK_CONFIG_REFRESH_TOKEN so the 12-hour token can be rotated.
 import fs from "node:fs";
@@ -8,17 +8,14 @@ import path from "node:path";
 import process from "node:process";
 import { WebClient } from "@slack/web-api";
 import { config as loadDotEnv } from "dotenv";
-import { envSuffix } from "../src/agents/registry.js";
-import { buildAgentManifest } from "../src/provision/manifest.js";
+import { buildTeamAppManifest } from "../src/provision/manifest.js";
 
 loadDotEnv({ quiet: true });
 
 const args = process.argv.slice(2);
-const name = args.find((arg) => !arg.startsWith("--"));
-if (!name || !/^[a-z][a-z0-9-]{0,31}$/.test(name)) throw new Error("usage: provision-agent.ts <agent-name> [--title ...] [--no-agent-view] [--dry-run]");
-const titleIndex = args.indexOf("--title");
-const title = titleIndex >= 0 ? (args[titleIndex + 1] ?? null) : null;
-const manifest = buildAgentManifest({ name, title, agentView: !args.includes("--no-agent-view") });
+const nameIndex = args.indexOf("--name");
+const appName = nameIndex >= 0 ? (args[nameIndex + 1] ?? "Agents") : "Agents";
+const manifest = buildTeamAppManifest({ appName, agentView: !args.includes("--no-agent-view") });
 
 if (args.includes("--dry-run")) {
   console.log(JSON.stringify(manifest, null, 2));
@@ -48,17 +45,16 @@ const created = (await web.apiCall("apps.manifest.create", { token, manifest: JS
 };
 if (!created.app_id) throw new Error(`apps.manifest.create returned no app id: ${JSON.stringify(created)}`);
 
-const suffix = envSuffix(name);
 console.log(
   [
-    `Created Slack app ${created.app_id} for agent "${name}".`,
+    `Created Slack app ${created.app_id} ("${appName}").`,
     "",
-    "Two steps need a person, about a minute in total:",
+    "Two steps need a person, once, about a minute in total:",
     `1. Install it to the workspace: ${created.oauth_authorize_url}`,
-    `   Then copy the Bot User OAuth Token from https://api.slack.com/apps/${created.app_id}/oauth into SLACK_BOT_TOKEN_${suffix}.`,
+    `   Then copy the Bot User OAuth Token from https://api.slack.com/apps/${created.app_id}/oauth into SLACK_BOT_TOKEN.`,
     `2. Generate an app-level token with the connections:write scope at https://api.slack.com/apps/${created.app_id}/general`,
-    `   and put it in SLACK_APP_TOKEN_${suffix}.`,
+    "   and put it in SLACK_APP_TOKEN.",
     "",
-    `Then add "${name}" to agents.json and restart the hub.`,
+    "Invite the app to the channels the agents should hear. Agents themselves are entries in agents.json, or made by other agents.",
   ].join("\n"),
 );

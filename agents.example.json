@@ -1,25 +1,8 @@
 {
+  "defaultAgent": "ada",
   "agents": [
-    {
-      "name": "ada",
-      "title": "generalist manager",
-      "runtime": "claude",
-      "model": "claude-opus-5"
-    },
-    {
-      "name": "cody",
-      "title": "builder",
-      "runtime": "codex",
-      "model": "gpt-5.5",
-      "effort": "medium",
-      "wake": { "participatingThreads": false }
-    },
-    {
-      "name": "scout",
-      "title": "researcher on the worker box",
-      "runtime": "claude",
-      "host": "ssh:grok-bot",
-      "cwd": "/home/box/agents/scout"
-    }
+    { "name": "ada", "title": "generalist manager: plans, coordinates, reports to the operator", "icon": ":brain:", "runtime": "claude", "model": "claude-opus-5" },
+    { "name": "cody", "title": "builder: writes, fixes, and ships code", "icon": ":hammer_and_wrench:", "runtime": "codex", "model": "gpt-5.5", "effort": "medium" },
+    { "name": "scout", "title": "researcher on the worker box", "icon": ":satellite:", "runtime": "claude", "host": "ssh:grok-bot", "cwd": "/home/box/agents/scout", "wake": { "threshold": 0.6 } }
   ]
 }
