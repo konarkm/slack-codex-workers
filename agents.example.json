@@ -1,0 +1,25 @@
+{
+  "agents": [
+    {
+      "name": "ada",
+      "title": "generalist manager",
+      "runtime": "claude",
+      "model": "claude-opus-5",
+      "wake": { "participatingThreads": true }
+    },
+    {
+      "name": "cody",
+      "title": "builder",
+      "runtime": "codex",
+      "model": "gpt-5.5",
+      "effort": "medium"
+    },
+    {
+      "name": "scout",
+      "title": "researcher on the worker box",
+      "runtime": "claude",
+      "host": "ssh:grok-bot",
+      "cwd": "/home/box/agents/scout"
+    }
+  ]
+}
