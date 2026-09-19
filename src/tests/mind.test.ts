@@ -89,7 +89,10 @@ describe("AgentMind", () => {
     const { mind, runtimes } = setup();
     await mind.receive({ sourceKey: "a", wake: true, priority: "next", text: "first", imagePaths: [] });
     await mind.receive({ sourceKey: "b", wake: true, priority: "now", text: "second", imagePaths: [] });
-    expect(runtimes[0]!.delivered.map((input) => input.text)).toEqual(["first", "second"]);
+    const texts = runtimes[0]!.delivered.map((input) => input.text);
+    expect(texts[0]).toBe("first");
+    expect(texts[1]).toContain("second");
+    expect(texts[1]).toContain("arrived while you were working");
   });
 
   it("tells the agent once when a woken turn ends with no visible action", async () => {

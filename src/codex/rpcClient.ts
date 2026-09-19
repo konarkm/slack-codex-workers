@@ -32,6 +32,8 @@ export class CodexRpcClient extends EventEmitter {
     private readonly codexBin: string,
     private readonly cwd: string,
     private readonly clientInfo: { name: string; title: string; version: string },
+    // Overrides the local spawn, e.g. to run the app-server on another machine over ssh.
+    private readonly spawnChild?: () => ChildProcessWithoutNullStreams,
   ) {
     super();
   }
@@ -39,11 +41,13 @@ export class CodexRpcClient extends EventEmitter {
   async start(): Promise<void> {
     if (this.child) return;
 
-    const child = spawn(this.codexBin, ["app-server"], {
-      cwd: this.cwd,
-      env: process.env,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    const child = this.spawnChild
+      ? this.spawnChild()
+      : spawn(this.codexBin, ["app-server"], {
+        cwd: this.cwd,
+        env: process.env,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
     this.child = child;
     this.childExitPromise = new Promise<void>((resolve) => {
       this.childExitResolve = resolve;

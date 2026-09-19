@@ -6,6 +6,8 @@ import type { MessageAttachmentRecord, SlackAttachmentInput, SlackFileRef } from
 
 const IMAGE_PREFIXES = ["image/"];
 
+export type AttachmentConfig = Pick<AppConfig, "attachmentStorageDir" | "attachmentTotalMaxBytes" | "attachmentDownloadTimeoutMs" | "attachmentMaxBytes">;
+
 interface DownloadedAttachment {
   record: MessageAttachmentRecord;
   note: string;
@@ -16,7 +18,7 @@ export async function prepareSlackAttachments(
   files: SlackFileRef[],
   existing: MessageAttachmentRecord[],
   botToken: string,
-  config: AppConfig,
+  config: AttachmentConfig,
 ): Promise<SlackAttachmentInput> {
   await fsPromises.mkdir(config.attachmentStorageDir, { recursive: true });
 
@@ -78,7 +80,7 @@ async function downloadSlackAttachment(
   messageKey: string,
   file: SlackFileRef,
   botToken: string,
-  config: AppConfig,
+  config: AttachmentConfig,
   remainingBudget: number,
 ): Promise<DownloadedAttachment> {
   const safeName = `${Date.now()}-${sanitizeFileName(file.name)}`;

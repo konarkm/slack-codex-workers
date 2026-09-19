@@ -17,6 +17,9 @@ const SILENT_TURN_NOTICE = [
   "If a reply is due, send it now. If none is due, call dismiss with a short reason so the record shows you chose not to reply.",
 ].join("\n");
 
+const MID_TURN_NOTE =
+  "Note: this arrived while you were working. Continue your in-progress work and take this into account if it is relevant; if it is unrelated, handle it without abandoning what you were doing.";
+
 // One named agent's mind. Every surface feeds the same durable inbox, and the inbox feeds one provider session.
 export class AgentMind {
   private runtime: AgentRuntime | null = null;
@@ -25,6 +28,8 @@ export class AgentMind {
   private visibleActionSinceWake = false;
   private noticeSentForWake = false;
   private awaitingVisibleAction = false;
+  private retryTimer: NodeJS.Timeout | null = null;
+  private retryDelayMs = 5_000;
 
   constructor(
     readonly spec: AgentSpec,
@@ -41,7 +46,9 @@ export class AgentMind {
   }
 
   async stop(): Promise<void> {
-    await this.pumping;
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+    await this.pumping?.catch(() => {});
     await this.runtime?.stop();
     this.runtime = null;
   }
@@ -145,23 +152,36 @@ export class AgentMind {
     return this.pumping;
   }
 
+  private scheduleRetry(): void {
+    if (this.retryTimer) return;
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      void this.pump().catch(() => {});
+    }, this.retryDelayMs);
+    this.retryTimer.unref();
+    this.retryDelayMs = Math.min(this.retryDelayMs * 2, 300_000);
+  }
+
   // Context-only items wait in the inbox and ride along with the next item that wakes the agent.
   private async deliverQueued(): Promise<void> {
     const queued = this.store.listQueued(this.spec.name);
     if (!queued.some((item) => item.wake)) return;
     const runtime = this.ensureRuntime();
+    const midTurn = runtime.state() === "running";
     try {
       await runtime.deliver({
-        text: renderBatch(queued),
+        text: midTurn ? `${renderBatch(queued)}\n\n${MID_TURN_NOTE}` : renderBatch(queued),
         imagePaths: queued.flatMap((item) => item.imagePaths),
         priority: queued.reduce<InputPriority>((best, item) => (PRIORITY_RANK[item.priority] < PRIORITY_RANK[best] ? item.priority : best), "later"),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.store.setAgentError(this.spec.name, message);
-      logError("agent delivery failed", { agent: this.spec.name, error: message });
+      logError("agent delivery failed; input stays queued", { agent: this.spec.name, error: message, retryInMs: this.retryDelayMs });
+      this.scheduleRetry();
       throw error;
     }
+    this.retryDelayMs = 5_000;
     this.store.markDelivered(queued.map((item) => item.id));
     this.visibleActionSinceWake = false;
     this.noticeSentForWake = false;

@@ -82,6 +82,12 @@ export class AgentStore {
         created_at TEXT NOT NULL,
         PRIMARY KEY(agent, channel_id, thread_ts)
       );
+      CREATE TABLE IF NOT EXISTS thread_seen (
+        agent TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
+        thread_ts TEXT NOT NULL,
+        PRIMARY KEY(agent, channel_id, thread_ts)
+      );
     `);
   }
 
@@ -128,6 +134,10 @@ export class AgentStore {
     return this.getInboxItem(Number(result.lastInsertRowid));
   }
 
+  hasSource(agent: string, sourceKey: string): boolean {
+    return Boolean(this.db.prepare("SELECT 1 FROM inbox WHERE agent = ? AND source_key = ?").get(agent, sourceKey));
+  }
+
   getInboxItem(id: number): InboxItem | null {
     const row = this.db.prepare("SELECT * FROM inbox WHERE id = ?").get(id) as InboxRow | undefined;
     return row ? mapInboxRow(row) : null;
@@ -149,6 +159,15 @@ export class AgentStore {
     this.db
       .prepare("INSERT OR IGNORE INTO thread_participation (agent, channel_id, thread_ts, created_at) VALUES (?, ?, ?, ?)")
       .run(agent, channelId, threadTs, new Date().toISOString());
+  }
+
+  // A thread is seen once any of its messages has reached the agent, so its history is already in the agent's context.
+  markThreadSeen(agent: string, channelId: string, threadTs: string): void {
+    this.db.prepare("INSERT OR IGNORE INTO thread_seen (agent, channel_id, thread_ts) VALUES (?, ?, ?)").run(agent, channelId, threadTs);
+  }
+
+  hasSeenThread(agent: string, channelId: string, threadTs: string): boolean {
+    return Boolean(this.db.prepare("SELECT 1 FROM thread_seen WHERE agent = ? AND channel_id = ? AND thread_ts = ?").get(agent, channelId, threadTs));
   }
 
   isThreadParticipant(agent: string, channelId: string, threadTs: string): boolean {

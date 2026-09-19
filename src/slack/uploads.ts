@@ -17,7 +17,7 @@ export interface ValidatedSlackUploadFile {
 
 export async function validateSlackUploadFiles(
   files: SlackUploadInput[],
-  config: AppConfig,
+  config: Pick<AppConfig, "slackUploadMaxFiles" | "workspaceRoot" | "attachmentStorageDir" | "attachmentMaxBytes">,
 ): Promise<ValidatedSlackUploadFile[]> {
   if (files.length === 0) {
     throw new Error("At least one file is required.");
