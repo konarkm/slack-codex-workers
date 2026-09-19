@@ -22,7 +22,8 @@ export function buildRemoteCommand(request: Pick<HostSpawnRequest, "command" | "
     .filter((entry): entry is [string, string] => typeof entry[1] === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(entry[0]))
     .map(([key, value]) => `${key}=${shellQuote(value)}`);
   const exec = ["exec", ...(assignments.length > 0 ? ["env", ...assignments] : []), shellQuote(request.command), ...request.args.map(shellQuote)];
-  return `cd ${shellQuote(request.cwd)} && ${exec.join(" ")}`;
+  // The agent's home is created on first use, as it is locally.
+  return `mkdir -p ${shellQuote(request.cwd)} && cd ${shellQuote(request.cwd)} && ${exec.join(" ")}`;
 }
 
 // Both agent harnesses speak over stdio, so running one on another machine is the same spawn behind ssh.
