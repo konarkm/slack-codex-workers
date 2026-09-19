@@ -68,7 +68,10 @@ class FakeSlack {
   async getPerson(id: string) {
     return { id, name: id === "UHUMAN" ? "Konark" : id, isBot: id.startsWith("UBOT"), title: null };
   }
+  conversationLookups = 0;
   async getConversation(id: string) {
+    this.conversationLookups += 1;
+    await new Promise((resolve) => setTimeout(resolve, 5));
     return { id, name: "general", type: "channel" as const, isMember: true };
   }
   async readHistory() {
@@ -177,6 +180,45 @@ describe("AgentHub", () => {
     await slack.handler!(inbound({ text: "<@UBOT1> hi" }));
     await slack.handler!(inbound({ text: "<@UBOT1> hi" }));
     expect(runtimes.get("ada")!.delivered).toHaveLength(1);
+  });
+
+  it("handles Slack's concurrent double delivery of one mention as a single message", async () => {
+    await startHub([{ name: "ada", runtime: "claude" }]);
+    const slack = slacks[0]!;
+    const mention = inbound({ text: "<@UBOT1> hi" });
+    // The app_mention copy carries the bot's team, the message copy the author's; they are still one message.
+    await Promise.all([slack.handler!(mention), slack.handler!({ ...mention, teamId: "TOTHER" })]);
+    expect(runtimes.get("ada")!.delivered).toHaveLength(1);
+    expect(slack.conversationLookups).toBe(1);
+  });
+
+  it("keeps messages in the order Slack sent them, however long each takes to prepare", async () => {
+    await startHub([{ name: "ada", runtime: "claude" }]);
+    const slack = slacks[0]!;
+    await Promise.all([
+      slack.handler!(inbound({ ts: "1726700020.000001", text: "first, no mention" })),
+      slack.handler!(inbound({ ts: "1726700020.000002", text: "second, no mention" })),
+      slack.handler!(inbound({ ts: "1726700020.000003", text: "<@UBOT1> third" })),
+    ]);
+    const text = runtimes.get("ada")!.delivered[0]!.text;
+    expect(text.indexOf("first, no mention")).toBeLessThan(text.indexOf("second, no mention"));
+    expect(text.indexOf("second, no mention")).toBeLessThan(text.indexOf("third"));
+  });
+
+  it("applies the agent-to-agent budget to DMs, where every message is its own root", async () => {
+    await startHub([{ name: "ada", runtime: "claude" }]);
+    const slack = slacks[0]!;
+    const dm = (n: number) => inbound({ channelId: "D9", channelType: "im", userId: null, botId: "BOTHER", ts: `1726700030.00000${n}`, text: `ping ${n}` });
+    for (const n of [1, 2, 3, 4]) await slack.handler!(dm(n));
+    expect(runtimes.get("ada")!.delivered).toHaveLength(2);
+  });
+
+  it("runs an operator command once when Slack redelivers it", async () => {
+    await startHub([{ name: "ada", runtime: "claude" }]);
+    const slack = slacks[0]!;
+    const command = inbound({ channelId: "D1", channelType: "im", text: ".status" });
+    await Promise.all([slack.handler!(command), slack.handler!(command)]);
+    expect(slack.posted).toHaveLength(1);
   });
 
   it("gives each agent its own mind and wakes only the one that was named", async () => {

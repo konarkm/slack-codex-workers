@@ -45,7 +45,7 @@ class FakeRpc extends EventEmitter {
 function setup(sessionId: string | null, sent: string[] = []) {
   const rpc = new FakeRpc();
   const states: RuntimeState[] = [];
-  const sessions: string[] = [];
+  const sessions: Array<string | null> = [];
   const turns: Array<{ status: string; finalText: string }> = [];
   const events: RuntimeEvents = {
     onSessionChanged: (id) => void sessions.push(id),
@@ -120,6 +120,60 @@ describe("CodexRuntime", () => {
     rpc.failNext["turn/steer"] = "no active turn to steer";
     await runtime.deliver({ text: "two", imagePaths: [], priority: "next" });
     expect(rpc.requests.map((r) => r.method)).toEqual(["thread/start", "turn/start", "turn/steer", "turn/start"]);
+  });
+
+  it("does not mark a turn running when it finished before the start response arrived", async () => {
+    const { rpc, runtime, states } = setup(null);
+    await runtime.start();
+    const original = rpc.request.bind(rpc);
+    rpc.request = async <T>(method: string, params: unknown): Promise<T> => {
+      const result = await original<T>(method, params);
+      if (method === "turn/start") {
+        rpc.emit("notification", { method: "turn/started", params: { threadId: "thread-new", turn: { id: "turn-1" } } });
+        rpc.emit("notification", { method: "turn/completed", params: { threadId: "thread-new", turn: { id: "turn-1", status: "completed" } } });
+        await flush();
+      }
+      return result;
+    };
+    await runtime.deliver({ text: "quick", imagePaths: [], priority: "next" });
+    await flush();
+    expect(runtime.state()).toBe("idle");
+    expect(states.at(-1)).toBe("idle");
+  });
+
+  it("does not resend input as a new turn when a steer times out", async () => {
+    const { rpc, runtime } = setup(null);
+    await runtime.deliver({ text: "one", imagePaths: [], priority: "next" });
+    rpc.failNext["turn/steer"] = "RPC request timed out: turn/steer";
+    await expect(runtime.deliver({ text: "two", imagePaths: [], priority: "next" })).rejects.toThrow(/timed out/);
+    expect(rpc.requests.filter((r) => r.method === "turn/start")).toHaveLength(1);
+  });
+
+  it("treats a failed start request as taken when the turn is seen to have started", async () => {
+    const { rpc, runtime } = setup(null);
+    await runtime.start();
+    const original = rpc.request.bind(rpc);
+    rpc.request = async <T>(method: string, params: unknown): Promise<T> => {
+      if (method === "turn/start") {
+        rpc.emit("notification", { method: "turn/started", params: { threadId: "thread-new", turn: { id: "turn-9" } } });
+        await flush();
+        throw new Error("RPC request timed out: turn/start");
+      }
+      return original<T>(method, params);
+    };
+    await runtime.deliver({ text: "one", imagePaths: [], priority: "next" });
+    expect(runtime.state()).toBe("running");
+  });
+
+  it("gives up on a thread that keeps failing to resume, whatever the error says", async () => {
+    const { rpc, runtime, sessions } = setup("thread-old");
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      rpc.failNext["thread/resume"] = "conversation is corrupt";
+      await expect(runtime.start()).rejects.toThrow(/corrupt/);
+    }
+    rpc.failNext["thread/resume"] = "conversation is corrupt";
+    await runtime.start();
+    expect(sessions).toEqual(["thread-new"]);
   });
 
   it("runs tool calls from the agent and ignores other threads' notifications", async () => {

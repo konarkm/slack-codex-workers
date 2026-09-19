@@ -20,6 +20,7 @@ const spec: AgentSpec = {
 
 class FakeRuntime implements AgentRuntime {
   delivered: RuntimeInput[] = [];
+  failNextDeliver = false;
   private current: RuntimeState = "down";
   constructor(readonly options: RuntimeOptions) {}
   async start(): Promise<void> {
@@ -30,6 +31,10 @@ class FakeRuntime implements AgentRuntime {
   }
   async deliver(input: RuntimeInput): Promise<void> {
     await this.start();
+    if (this.failNextDeliver) {
+      this.failNextDeliver = false;
+      throw new Error("runtime unavailable");
+    }
     this.delivered.push(input);
     await this.set("running");
   }
@@ -44,6 +49,13 @@ class FakeRuntime implements AgentRuntime {
   async finishTurn(): Promise<void> {
     await this.options.events.onTurnCompleted({ status: "completed", finalText: "", error: null });
     await this.set("idle");
+  }
+  async failTurn(): Promise<void> {
+    await this.options.events.onTurnCompleted({ status: "failed", finalText: "", error: "api error" });
+    await this.set("idle");
+  }
+  async crash(): Promise<void> {
+    await this.set("down");
   }
   private async set(state: RuntimeState): Promise<void> {
     this.current = state;
@@ -111,6 +123,51 @@ describe("AgentMind", () => {
     mind.noteVisibleAction();
     await runtimes[0]!.finishTurn();
     expect(runtimes[0]!.delivered).toHaveLength(1);
+  });
+
+  it("counts input as delivered only once the turn that took it has finished", async () => {
+    const { mind, runtimes, store } = setup();
+    await mind.receive({ sourceKey: "a", wake: true, priority: "next", text: "first", imagePaths: [] });
+    mind.noteVisibleAction();
+    expect(store.getInboxItem(1)!.status).toBe("in_flight");
+    await runtimes[0]!.finishTurn();
+    expect(store.getInboxItem(1)!.status).toBe("delivered");
+  });
+
+  it("keeps input queued when the runtime cannot take it", async () => {
+    const { mind, runtimes, store } = setup();
+    await mind.start();
+    runtimes[0]!.failNextDeliver = true;
+    await expect(mind.receive({ sourceKey: "a", wake: true, priority: "next", text: "first", imagePaths: [] })).rejects.toThrow("runtime unavailable");
+    expect(store.listQueued("ada")).toHaveLength(1);
+    await mind.receive({ sourceKey: "b", wake: true, priority: "next", text: "second", imagePaths: [] });
+    expect(runtimes[0]!.delivered).toHaveLength(1);
+    expect(runtimes[0]!.delivered[0]!.text).toContain("first");
+    expect(runtimes[0]!.delivered[0]!.text).toContain("second");
+    await mind.stop();
+  });
+
+  it("puts input back in the queue when the runtime dies mid-turn", async () => {
+    const { mind, runtimes, store } = setup();
+    await mind.receive({ sourceKey: "a", wake: true, priority: "next", text: "first", imagePaths: [] });
+    await runtimes[0]!.crash();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(runtimes[0]!.delivered.map((input) => input.text)).toEqual(["first", "first"]);
+    expect(store.getInboxItem(1)!.attempts).toBe(2);
+    await mind.stop();
+  });
+
+  it("gives up on input after three failed turns and records why", async () => {
+    const { mind, runtimes, store } = setup();
+    await mind.receive({ sourceKey: "a", wake: true, priority: "next", text: "poison", imagePaths: [] });
+    await runtimes[0]!.failTurn();
+    await mind.receive({ sourceKey: "b", wake: true, priority: "next", text: "kick 1", imagePaths: [] });
+    await runtimes[0]!.failTurn();
+    await mind.receive({ sourceKey: "c", wake: true, priority: "next", text: "kick 2", imagePaths: [] });
+    await runtimes[0]!.failTurn();
+    expect(store.getInboxItem(1)!.status).toBe("failed");
+    expect(store.getAgentState("ada")!.lastError).toContain("Gave up on 1 input");
+    await mind.stop();
   });
 
   it("resumes the persisted session and redelivers queued input after a restart", async () => {

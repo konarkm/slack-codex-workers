@@ -71,6 +71,7 @@ export class ClaudeRuntime implements AgentRuntime {
   private pendingWakes = 0;
   private lastAssistantText = "";
   private stopping = false;
+  private resumeRejected = false;
 
   constructor(private readonly options: RuntimeOptions) {
     this.currentSessionId = options.sessionId;
@@ -151,6 +152,9 @@ export class ClaudeRuntime implements AgentRuntime {
       permissionMode: "bypassPermissions",
       allowDangerouslySkipPermissions: true,
       title: spec.name,
+      stderr: (data) => {
+        if (/No conversation found with session ID/i.test(data)) this.resumeRejected = true;
+      },
       spawnClaudeCodeProcess: remote ? (spawnOptions) => this.spawnRemote(spawnOptions) : undefined,
     };
   }
@@ -199,7 +203,12 @@ export class ClaudeRuntime implements AgentRuntime {
     const { events, spec } = this.options;
     try {
       for await (const message of session) {
-        await this.handleMessage(message);
+        try {
+          await this.handleMessage(message);
+        } catch (error) {
+          // A failing observer must not take the agent's session down with it.
+          logError("claude message handling failed", { agent: spec.name, error: error instanceof Error ? error.message : String(error) });
+        }
       }
     } catch (error) {
       if (!this.stopping) {
@@ -253,6 +262,17 @@ export class ClaudeRuntime implements AgentRuntime {
           await events.onActivity({ id: block.id, title: block.name, status: "started", detail: null });
         }
       }
+      return;
+    }
+    if (message.type === "result" && this.resumeRejected && this.currentSessionId) {
+      // The transcript for the saved session is gone (moved host, pruned history). Forget it; the retry starts a new session.
+      this.resumeRejected = false;
+      const lost = this.currentSessionId;
+      this.currentSessionId = null;
+      await events.onSessionChanged(null);
+      await events.onProblem(`Claude session ${lost} could not be resumed; its transcript is missing. The next input starts a new session.`);
+      await events.onTurnCompleted({ status: "failed", finalText: "", error: `session ${lost} could not be resumed` });
+      this.session?.close();
       return;
     }
     if (message.type === "result") {

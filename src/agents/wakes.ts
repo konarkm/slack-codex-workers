@@ -40,6 +40,7 @@ export interface WakeDelivery {
 // Fires due wakes into their agents' inboxes. The inbox source key makes a wake that is due once arrive once.
 export class WakeScheduler {
   private timer: NodeJS.Timeout | null = null;
+  private ticking = false;
 
   constructor(
     private readonly store: AgentStore,
@@ -59,6 +60,17 @@ export class WakeScheduler {
   }
 
   async tick(now: Date): Promise<number> {
+    // A slow delivery must not let the next tick start on top of this one.
+    if (this.ticking) return 0;
+    this.ticking = true;
+    try {
+      return await this.fireDue(now);
+    } finally {
+      this.ticking = false;
+    }
+  }
+
+  private async fireDue(now: Date): Promise<number> {
     let fired = 0;
     for (const wake of this.store.listScheduledWakes()) {
       if (!wake.enabled) continue;

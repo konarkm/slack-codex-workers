@@ -19,7 +19,9 @@ export interface InboxItem {
   priority: InputPriority;
   text: string;
   imagePaths: string[];
-  status: "queued" | "delivered";
+  // in_flight: handed to the runtime, not yet confirmed consumed by a finished turn.
+  status: "queued" | "in_flight" | "delivered" | "failed";
+  attempts: number;
   createdAt: string;
   deliveredAt: string | null;
 }
@@ -76,6 +78,7 @@ interface InboxRow {
   text: string;
   image_paths_json: string;
   status: string;
+  attempts: number;
   created_at: string;
   delivered_at: string | null;
 }
@@ -157,6 +160,9 @@ export class AgentStore {
         PRIMARY KEY(agent, channel_id, thread_ts)
       );
     `);
+    if (!(this.db.prepare("PRAGMA table_info(inbox)").all() as Array<{ name: string }>).some((column) => column.name === "attempts")) {
+      this.db.exec("ALTER TABLE inbox ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0");
+    }
   }
 
   close(): void {
@@ -216,11 +222,36 @@ export class AgentStore {
     return rows.map(mapInboxRow);
   }
 
-  markDelivered(ids: number[]): void {
-    if (ids.length === 0) return;
-    const statement = this.db.prepare("UPDATE inbox SET status = 'delivered', delivered_at = ? WHERE id = ?");
+  markInFlight(ids: number[]): void {
+    const statement = this.db.prepare("UPDATE inbox SET status = 'in_flight', attempts = attempts + 1 WHERE id = ?");
+    for (const id of ids) statement.run(id);
+  }
+
+  // The runtime finished the turns that consumed this input.
+  markInFlightDelivered(agent: string): void {
+    this.db.prepare("UPDATE inbox SET status = 'delivered', delivered_at = ? WHERE agent = ? AND status = 'in_flight'").run(new Date().toISOString(), agent);
+  }
+
+  // The runtime died or failed before confirming this input; it goes back in the queue, up to maxAttempts deliveries.
+  // Returns the rows given up on.
+  requeueInFlight(agent: string, maxAttempts: number): InboxItem[] {
+    const abandoned = (this.db.prepare("SELECT * FROM inbox WHERE agent = ? AND status = 'in_flight' AND attempts >= ?").all(agent, maxAttempts) as unknown as InboxRow[]).map(mapInboxRow);
+    this.db.prepare("UPDATE inbox SET status = 'failed' WHERE agent = ? AND status = 'in_flight' AND attempts >= ?").run(agent, maxAttempts);
+    this.db.prepare("UPDATE inbox SET status = 'queued' WHERE agent = ? AND status = 'in_flight'").run(agent);
+    return abandoned;
+  }
+
+  // Marks a source event as handled without delivering it (operator commands), so a redelivery is ignored.
+  recordHandled(agent: string, sourceKey: string, text: string): boolean {
     const now = new Date().toISOString();
-    for (const id of ids) statement.run(now, id);
+    return (
+      this.db
+        .prepare(
+          `INSERT INTO inbox (agent, source_key, wake, priority, text, image_paths_json, status, created_at, delivered_at)
+           VALUES (?, ?, 0, 'later', ?, '[]', 'delivered', ?, ?) ON CONFLICT(agent, source_key) DO NOTHING`,
+        )
+        .run(agent, sourceKey, text, now, now).changes > 0
+    );
   }
 
   createScheduledWake(wake: Pick<ScheduledWake, "id" | "agent" | "trigger" | "note">): ScheduledWake {
@@ -285,9 +316,10 @@ export class AgentStore {
     return (this.db.prepare("SELECT * FROM webhook_sources ORDER BY source").all() as unknown as WebhookSourceRow[]).map(mapWebhookSource);
   }
 
-  updateWebhookSource(source: string, patch: { enabled?: boolean; routeToken?: string }): WebhookSource | null {
+  // Only the agent that created a source may change it.
+  updateWebhookSource(source: string, ownerAgent: string, patch: { enabled?: boolean; routeToken?: string }): WebhookSource | null {
     const current = this.getWebhookSource(source);
-    if (!current) return null;
+    if (!current || current.ownerAgent !== ownerAgent) return null;
     this.db
       .prepare("UPDATE webhook_sources SET enabled = ?, route_token = ?, updated_at = ? WHERE source = ?")
       .run((patch.enabled ?? current.enabled) ? 1 : 0, patch.routeToken ?? current.routeToken, new Date().toISOString(), source);
@@ -335,6 +367,10 @@ export class AgentStore {
         .prepare("INSERT OR IGNORE INTO webhook_events (source, event, dedupe_key, received_at) VALUES (?, ?, ?, ?)")
         .run(source, event, dedupeKey, new Date().toISOString()).changes > 0
     );
+  }
+
+  forgetWebhookEvent(source: string, event: string, dedupeKey: string): void {
+    this.db.prepare("DELETE FROM webhook_events WHERE source = ? AND event = ? AND dedupe_key = ?").run(source, event, dedupeKey);
   }
 
   recordThreadParticipation(agent: string, channelId: string, threadTs: string): void {
@@ -391,6 +427,7 @@ function mapInboxRow(row: InboxRow): InboxItem {
     text: row.text,
     imagePaths: JSON.parse(row.image_paths_json) as string[],
     status: row.status as InboxItem["status"],
+    attempts: row.attempts,
     createdAt: row.created_at,
     deliveredAt: row.delivered_at,
   };

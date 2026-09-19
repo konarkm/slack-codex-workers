@@ -27,6 +27,11 @@ export function toSourceRecord(source: WebhookSource): WebhookSourceRecord {
   return { id: source.source, teamId: "", source: source.source, routeToken: source.routeToken, handlerPath: source.handlerPath, enabled: source.enabled, createdAt: source.createdAt, updatedAt: source.updatedAt };
 }
 
+// For single-line header values: no brackets, and no line breaks that could start a forged header line.
+function escapeLine(value: string): string {
+  return escapeText(value).replace(/[\r\n]+/g, " ");
+}
+
 function escapeText(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
@@ -89,6 +94,7 @@ export class WebhookWakes {
       const subscriptions = this.store.listWebhookSubscriptions({ source: source.source }).filter((candidate) => matchesSubscription(candidate, event.event, fields));
       if (subscriptions.length === 0) continue;
       const payloadPath = await this.writePayload(source.source, event.event, event.payload ?? input.parsedJson ?? input.rawBody);
+      let failures = 0;
       for (const subscription of subscriptions) {
         try {
           await this.deliver(subscription.agent, {
@@ -97,8 +103,14 @@ export class WebhookWakes {
           });
           woken += 1;
         } catch (error) {
+          failures += 1;
           logError("webhook wake not delivered", { agent: subscription.agent, source: source.source, error: error instanceof Error ? error.message : String(error) });
         }
+      }
+      if (failures === subscriptions.length) {
+        // Nobody got it. Forget the event so the sender's retry is not deduplicated away.
+        this.store.forgetWebhookEvent(source.source, event.event, event.dedupeKey);
+        return { status: 503, body: { ok: false, error: "no subscriber could be reached; retry" } };
       }
     }
     return { status: 202, body: { ok: true, events: created, wakes: woken } };
@@ -117,8 +129,8 @@ export function renderWebhookWake(subscription: WebhookSubscription, event: stri
   const lines = [
     `<webhook-event source="${escapeText(subscription.source)}" event="${escapeText(event)}" subscription="${subscription.id}">`,
     `Received: ${receivedAt}`,
-    ...(summary ? [`Summary: ${escapeText(summary)}`] : []),
-    ...Object.entries(fields).map(([key, value]) => `Field ${escapeText(key)}: ${escapeText(value)}`),
+    ...(summary ? [`Summary: ${escapeLine(summary)}`] : []),
+    ...Object.entries(fields).map(([key, value]) => `Field ${escapeLine(key)}: ${escapeLine(value)}`),
     `Payload file (on the bridge machine): ${payloadPath}`,
     "Your note to yourself when you subscribed:",
     escapeText(subscription.note),
@@ -189,19 +201,19 @@ export function buildWebhookTools(agent: string, store: AgentStore, webhooks: We
     }),
     defineTool({
       name: "rotate_webhook_url",
-      description: "Replace a webhook source's secret URL. The old URL stops working immediately.",
+      description: "Replace the secret URL of a webhook source you created. The old URL stops working immediately.",
       shape: { source: z.string().min(1) },
       handler: async (args) => {
-        const updated = store.updateWebhookSource(args.source.toLowerCase(), { routeToken: randomBytes(18).toString("hex") });
-        if (!updated) throw new Error(`Webhook source ${args.source} does not exist.`);
+        const updated = store.updateWebhookSource(args.source.toLowerCase(), agent, { routeToken: randomBytes(18).toString("hex") });
+        if (!updated) throw new Error(`Webhook source ${args.source} does not exist or belongs to another agent.`);
         return `rotated. url=${webhooks.routeUrl(updated)}`;
       },
     }),
     defineTool({
       name: "disable_webhook_source",
-      description: "Stop accepting requests for a webhook source.",
+      description: "Stop accepting requests for a webhook source you created.",
       shape: { source: z.string().min(1) },
-      handler: async (args) => (store.updateWebhookSource(args.source.toLowerCase(), { enabled: false }) ? "disabled" : "no such source"),
+      handler: async (args) => (store.updateWebhookSource(args.source.toLowerCase(), agent, { enabled: false }) ? "disabled" : "no such source of yours"),
     }),
   ];
 }

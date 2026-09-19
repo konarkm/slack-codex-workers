@@ -43,7 +43,9 @@ This creates the app from a manifest (scopes, events, Socket Mode, agent surface
 
 ## How a message reaches an agent
 
-Every message the agent's app can see is stored in the agent's inbox, once, keyed by its Slack coordinates. A message that matches the agent's wake rules wakes it. Any other message waits in the inbox and is delivered with the next wake, marked as context. Nothing is dropped.
+Every message the agent's app can see is stored in the agent's inbox, once, keyed by its Slack coordinates. A message that matches the agent's wake rules wakes it. Any other message waits in the inbox and is delivered with the next wake, marked as context. Nothing is dropped on the way in.
+
+Input counts as delivered only when the agent finishes the turn that took it. If the harness dies, a turn fails, or the saved session cannot be resumed (the bridge then starts a new one), the input goes back in the queue and is delivered again, so an agent can see a message twice but does not miss one. After three deliveries that end in failure the bridge gives up on that input and records why; `.status` shows it.
 
 Messages arrive as tagged sections. The bridge writes the header fields; the content is escaped so it cannot imitate one:
 
@@ -62,7 +64,8 @@ Content:
 - The reply target is computed by the bridge: under the message in channels, flat under an existing thread root, in the flow of a DM.
 - A mention in a thread the agent has not seen brings the most recent earlier messages in a `<thread-context>` section, with `included`, `total`, and `truncated` attributes.
 - A message that arrives mid-turn is delivered into the running turn with a note to keep working and take it into account.
-- Another agent wakes an agent only by mentioning it. After `AGENT_WAKE_BUDGET` consecutive agent-to-agent wakes in one thread, further ones arrive as context until a human posts in that thread.
+- Another agent wakes an agent by mentioning it, or by sending it a DM. After `AGENT_WAKE_BUDGET` consecutive agent-to-agent wakes in one thread (or one DM, or one channel's top level), further ones arrive as context until a human posts there.
+- Slack events are handled one at a time per agent, in the order Slack sent them. Slack sends a mention twice (as a message and as a mention); the agent gets it once.
 
 ## How an agent speaks
 
@@ -70,7 +73,7 @@ Only through tools: `send_message`, `react`, `upload_files`, `edit_message`, `de
 
 Other tools: `read_history`, `list_channels`, `list_people`, `join_channel`, `open_dm`, `get_message_link`, `get_current_time`, and `schedule_wake` / `list_wakes` / `cancel_wake` for interval and cron wakes the agent sets for itself.
 
-Inbound webhooks: `create_webhook_source` makes a secret URL and a handler file that turns an outside system's requests into named events; `subscribe_webhook` wakes the agent on matching events with its own note. Payloads are written to disk and the wake carries the path. The listener binds `127.0.0.1:3014` by default (`WEBHOOK_PORT`, `WEBHOOK_BIND_HOST`, `WEBHOOK_PUBLIC_BASE_URL`; `WEBHOOK_PORT=off` disables it). Handler files run as trusted code in the bridge and should verify the sender's signature.
+Inbound webhooks: `create_webhook_source` makes a secret URL and a handler file that turns an outside system's requests into named events; `subscribe_webhook` wakes the agent on matching events with its own note. Payloads are written to disk and the wake carries the path. The listener binds `127.0.0.1:3014` by default (`WEBHOOK_PORT`, `WEBHOOK_BIND_HOST`, `WEBHOOK_PUBLIC_BASE_URL`; `WEBHOOK_PORT=off` disables it). Handler files run as trusted code in the bridge and should verify the sender's signature. Only the agent that created a source can rotate or disable it, and only agents running on the bridge machine get the webhook tools, since handlers and payloads live on its disk.
 
 Where the app is declared as a Slack agent, the thread shows Slack's working indicator while the agent's turn runs, and Slack's stop button interrupts the turn.
 

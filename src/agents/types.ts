@@ -61,7 +61,8 @@ export interface ActivityItem {
 }
 
 export interface RuntimeEvents {
-  onSessionChanged(sessionId: string): void | Promise<void>;
+  // null when the provider session is gone and the next input will start a new one.
+  onSessionChanged(sessionId: string | null): void | Promise<void>;
   onStateChanged(state: RuntimeState): void | Promise<void>;
   onTurnCompleted(event: { status: TurnStatus; finalText: string; error: string | null }): void | Promise<void>;
   onActivity(item: ActivityItem): void | Promise<void>;

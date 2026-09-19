@@ -43,6 +43,8 @@ interface Seat {
   // Threads currently showing this agent as working.
   statusThreads: Map<string, { channelId: string; threadTs: string }>;
   lastState: RuntimeState;
+  // Slack delivers events concurrently, and a mention twice. Handling them one at a time keeps order and makes the dedupe check reliable.
+  intake: Promise<void>;
 }
 
 const OPERATOR_COMMANDS = new Set([".status", ".stop", ".compact", ".reset"]);
@@ -52,6 +54,7 @@ export class AgentHub {
   private readonly store: AgentStore;
   private readonly seats = new Map<string, Seat>();
   private readonly agentWakeCounts = new Map<string, number>();
+  private registeredAgents = new Set<string>();
   private readonly scheduler: WakeScheduler;
   private readonly webhookWakes: WebhookWakes | null;
   private webhookServer: WebhookIngressServer | null = null;
@@ -64,10 +67,17 @@ export class AgentHub {
   ) {
     this.store = new AgentStore(config.databasePath);
     const deliverWake = async (agent: string, item: { sourceKey: string; text: string }): Promise<void> => {
-      // A wake for an agent that is not running stays due and fires once the agent is back.
+      if (!this.registeredAgents.has(agent)) throw new Error(`agent ${agent} is not in the registry`);
+      const input = { ...item, wake: true, priority: "later" as const, imagePaths: [] };
       const seat = this.seats.get(agent);
-      if (!seat) throw new Error(`agent ${agent} is not running`);
-      await seat.mind.receive({ ...item, wake: true, priority: "later", imagePaths: [] });
+      // The inbox is the durable step. An agent that is down finds the wake waiting when it starts.
+      if (!seat) {
+        this.store.enqueue({ ...input, agent });
+        return;
+      }
+      await seat.mind.receive(input).catch((error) => {
+        logWarn("wake queued; the agent could not take it yet", { agent, error: errorMessage(error) });
+      });
     };
     this.scheduler = new WakeScheduler(this.store, deliverWake);
     this.webhookWakes = config.webhooks
@@ -78,6 +88,7 @@ export class AgentHub {
   async start(): Promise<void> {
     const specs = loadAgentRegistry(this.config.agentsFile, this.config.agentsRoot);
     if (specs.length === 0) throw new Error(`No agents defined in ${this.config.agentsFile}`);
+    this.registeredAgents = new Set(specs.map((spec) => spec.name));
     const results = await Promise.allSettled(specs.map((spec) => this.startSeat(spec)));
     results.forEach((result, index) => {
       if (result.status === "rejected") logError("agent failed to start", { agent: specs[index]!.name, error: errorMessage(result.reason) });
@@ -116,8 +127,11 @@ export class AgentHub {
     if (spec.host.kind === "local") fs.mkdirSync(spec.cwd, { recursive: true });
 
     const slack = this.createSlack(spec, botToken, appToken);
-    const seat: Seat = { spec, slack, mind: null as unknown as AgentMind, statusThreads: new Map(), lastState: "down" };
-    slack.onMessage((message) => this.handleInbound(seat, message));
+    const seat: Seat = { spec, slack, mind: null as unknown as AgentMind, statusThreads: new Map(), lastState: "down", intake: Promise.resolve() };
+    slack.onMessage((message) => {
+      seat.intake = seat.intake.then(() => this.handleInbound(seat, message));
+      return seat.intake;
+    });
     slack.onStopRequested(async () => {
       logInfo("stop requested from Slack", { agent: spec.name });
       await seat.mind.interrupt();
@@ -126,7 +140,8 @@ export class AgentHub {
 
     const tools = [
       ...buildWakeTools(spec.name, this.store, this.config.timezone),
-      ...(this.webhookWakes ? buildWebhookTools(spec.name, this.store, this.webhookWakes) : []),
+      // Handler files and payloads live on the bridge machine, so only agents that share its disk get the webhook tools.
+      ...(this.webhookWakes && spec.host.kind === "local" ? buildWebhookTools(spec.name, this.store, this.webhookWakes) : []),
       ...buildSlackTools({
       slack,
       noteVisibleAction: () => seat.mind.noteVisibleAction(),
@@ -176,9 +191,13 @@ export class AgentHub {
       const participant = message.threadTs ? this.store.isThreadParticipant(spec.name, message.channelId, message.threadTs) : false;
       let decision = decideWake(message, identity.botUserId, spec.wake, participant);
 
-      const budgetKey = `${spec.name}:${message.channelId}:${threadRoot}`;
+      // Threads are budgeted one by one; DMs and top-level messages share their conversation's budget, since each is its own root.
+      const channelPrefix = `${spec.name}:${message.channelId}:`;
+      const budgetKey = `${channelPrefix}${message.threadTs ?? "top"}`;
       if (!message.botId) {
-        this.agentWakeCounts.delete(budgetKey);
+        for (const existing of this.agentWakeCounts.keys()) {
+          if (existing === budgetKey || (!message.threadTs && existing.startsWith(channelPrefix))) this.agentWakeCounts.delete(existing);
+        }
       } else if (decision.wake) {
         const count = (this.agentWakeCounts.get(budgetKey) ?? 0) + 1;
         this.agentWakeCounts.set(budgetKey, count);
@@ -272,6 +291,8 @@ export class AgentHub {
     if (message.channelType !== "im" || !message.userId || !OPERATOR_COMMANDS.has(command)) return false;
     if (!this.config.adminUserIds.includes(message.userId)) return false;
     const { mind, spec, slack } = seat;
+    // A redelivered command must not run twice.
+    if (!this.store.recordHandled(spec.name, sourceKey(message), message.text)) return true;
     let reply: string;
     if (command === ".status") {
       const state = this.store.getAgentState(spec.name);

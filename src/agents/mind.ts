@@ -2,6 +2,9 @@ import { logError, logInfo } from "../logger.js";
 import type { AgentStore, InboxItem, NewInboxItem } from "./agentStore.js";
 import type { AgentRuntime, AgentSpec, AgentTool, InputPriority, RuntimeEvents, RuntimeOptions, RuntimeState, TurnStatus } from "./types.js";
 
+// How many times one input is handed to the runtime before the bridge gives up on it.
+const MAX_DELIVERY_ATTEMPTS = 3;
+
 export type RuntimeFactory = (options: RuntimeOptions) => AgentRuntime;
 
 export interface MindObserver {
@@ -25,6 +28,8 @@ export class AgentMind {
   private runtime: AgentRuntime | null = null;
   private pumping: Promise<void> | null = null;
   private pumpAgain = false;
+  private pumpActive = false;
+  private wasRunning = false;
   private visibleActionSinceWake = false;
   private noticeSentForWake = false;
   private awaitingVisibleAction = false;
@@ -41,6 +46,8 @@ export class AgentMind {
   ) {}
 
   async start(): Promise<void> {
+    // Input handed to a runtime that never confirmed it (a crash) goes back in the queue.
+    this.requeueUnconfirmed("the bridge restarted");
     this.ensureRuntime();
     await this.pump();
   }
@@ -79,6 +86,8 @@ export class AgentMind {
   }
 
   async compact(): Promise<void> {
+    // Compaction is a turn of its own; it owes nobody a visible action.
+    this.awaitingVisibleAction = false;
     await this.ensureRuntime().compact();
   }
 
@@ -96,14 +105,26 @@ export class AgentMind {
         this.store.setAgentSession(this.spec.name, sessionId);
       },
       onStateChanged: async (state) => {
+        const finishedWork = this.wasRunning && state === "idle";
+        this.wasRunning = state === "running";
+        // Input counts as delivered only once the runtime has worked through everything it was given.
+        if (finishedWork) this.store.markInFlightDelivered(this.spec.name);
+        if (state === "down") this.requeueUnconfirmed("the runtime went down");
         await this.observer.onStateChanged?.(this.spec.name, state);
         // Not awaited: this fires inside deliver(), which the pump itself is awaiting.
-        if (state !== "running") void this.pump().catch(() => {});
+        if (state !== "running" && !this.retryTimer) void this.pump().catch(() => {});
       },
       onTurnCompleted: async (event) => {
         this.store.setAgentError(this.spec.name, event.status === "failed" ? event.error : null);
+        if (event.status === "failed") {
+          // Unknown whether the agent saw this input; deliver it again after a pause rather than lose it.
+          this.requeueUnconfirmed(event.error ?? "the turn failed");
+          this.scheduleRetry();
+        }
         await this.observer.onTurnCompleted?.(this.spec.name, event);
-        await this.afterTurn(event.status);
+        await this.afterTurn(event.status).catch((error) => {
+          logError("silent-turn notice not delivered", { agent: this.spec.name, error: error instanceof Error ? error.message : String(error) });
+        });
       },
       onActivity: () => {},
       onProblem: (message) => {
@@ -137,11 +158,21 @@ export class AgentMind {
     await this.ensureRuntime().deliver({ text: SILENT_TURN_NOTICE, imagePaths: [], priority: "next" });
   }
 
+  private requeueUnconfirmed(reason: string): void {
+    const abandoned = this.store.requeueInFlight(this.spec.name, MAX_DELIVERY_ATTEMPTS);
+    if (abandoned.length === 0) return;
+    const message = `Gave up on ${abandoned.length} input(s) after ${MAX_DELIVERY_ATTEMPTS} deliveries (${reason}): ${abandoned.map((item) => item.sourceKey).join(", ")}`;
+    logError(message, { agent: this.spec.name });
+    this.store.setAgentError(this.spec.name, message);
+  }
+
   private pump(): Promise<void> {
-    if (this.pumping) {
+    // The flag is set before any work starts, so a call made from inside a delivery never starts a second pump.
+    if (this.pumpActive) {
       this.pumpAgain = true;
-      return this.pumping;
+      return this.pumping ?? Promise.resolve();
     }
+    this.pumpActive = true;
     this.pumping = (async () => {
       try {
         do {
@@ -149,6 +180,7 @@ export class AgentMind {
           await this.deliverQueued();
         } while (this.pumpAgain);
       } finally {
+        this.pumpActive = false;
         this.pumping = null;
       }
     })();
@@ -185,7 +217,7 @@ export class AgentMind {
       throw error;
     }
     this.retryDelayMs = 5_000;
-    this.store.markDelivered(queued.map((item) => item.id));
+    this.store.markInFlight(queued.map((item) => item.id));
     this.visibleActionSinceWake = false;
     this.noticeSentForWake = false;
     this.awaitingVisibleAction = true;

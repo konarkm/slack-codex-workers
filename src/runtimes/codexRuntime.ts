@@ -30,6 +30,9 @@ export class CodexRuntime implements AgentRuntime {
   private currentState: RuntimeState = "down";
   private lastAgentText = "";
   private starting: Promise<void> | null = null;
+  // Turn ids already seen to complete, so a late turn/start response cannot mark a finished turn as running.
+  private readonly completedTurnIds = new Set<string>();
+  private resumeFailures = 0;
   private chain: Promise<void> = Promise.resolve();
 
   constructor(
@@ -76,20 +79,32 @@ export class CodexRuntime implements AgentRuntime {
         await this.rpc!.request("turn/steer", { threadId: this.threadId, expectedTurnId: this.activeTurnId, input: items });
         return;
       } catch (error) {
-        // The turn ended between our last notification and this call; start a new one.
+        // A timeout leaves the outcome unknown; sending the input again as a new turn could make the agent answer twice.
+        if (classifyCodexError(error) === "transient") throw error;
+        // Otherwise the turn ended between our last notification and this call; start a new one.
         logInfo("codex steer fell through to a new turn", { agent: this.options.spec.name, error: errorMessage(error) });
         this.activeTurnId = null;
       }
     }
-    const raw = await this.rpc!.request("turn/start", {
-      threadId: this.threadId,
-      input: items,
-      approvalPolicy: "never",
-      sandboxPolicy: { type: "dangerFullAccess" },
-      model: this.options.spec.model ?? undefined,
-      effort: this.options.spec.effort ?? undefined,
-    });
-    this.activeTurnId = turnResponseSchema.parse(raw).turn.id;
+    let startedId: string;
+    try {
+      const raw = await this.rpc!.request("turn/start", {
+        threadId: this.threadId,
+        input: items,
+        approvalPolicy: "never",
+        sandboxPolicy: { type: "dangerFullAccess" },
+        model: this.options.spec.model ?? undefined,
+        effort: this.options.spec.effort ?? undefined,
+      });
+      startedId = turnResponseSchema.parse(raw).turn.id;
+    } catch (error) {
+      // If a turn/started notification arrived while the request was failing, the turn is running and the input was taken.
+      if (this.activeTurnId) return;
+      throw error;
+    }
+    // A fast turn can finish before this response is handled.
+    if (this.completedTurnIds.has(startedId)) return;
+    this.activeTurnId = startedId;
     await this.setState("running");
   }
 
@@ -131,7 +146,14 @@ export class CodexRuntime implements AgentRuntime {
     });
     await rpc.start();
     this.rpc = rpc;
-    await this.openThread(rpc);
+    try {
+      await this.openThread(rpc);
+    } catch (error) {
+      // Leave nothing half-started behind; the next attempt spawns a fresh app-server.
+      this.rpc = null;
+      await rpc.stop().catch(() => {});
+      throw error;
+    }
     await this.setState("idle");
   }
 
@@ -140,11 +162,16 @@ export class CodexRuntime implements AgentRuntime {
     if (this.threadId) {
       try {
         await rpc.request("thread/resume", { threadId: this.threadId });
+        this.resumeFailures = 0;
         logInfo("codex thread resumed", { agent: spec.name, threadId: this.threadId });
         return;
       } catch (error) {
-        if (classifyCodexError(error) !== "session_missing") throw error;
-        logError("codex thread is gone; starting a new one", { agent: spec.name, threadId: this.threadId });
+        this.resumeFailures += 1;
+        // Codex words this failure differently across versions, so repeated failures of any kind also give up on the thread.
+        if (classifyCodexError(error) !== "session_missing" && this.resumeFailures < 3) throw error;
+        logError("codex thread cannot be resumed; starting a new one", { agent: spec.name, threadId: this.threadId, error: errorMessage(error) });
+        await events.onProblem(`Codex thread ${this.threadId} could not be resumed (${errorMessage(error)}). A new thread was started.`);
+        this.resumeFailures = 0;
       }
     }
     const raw = await rpc.request("thread/start", {
@@ -199,6 +226,10 @@ export class CodexRuntime implements AgentRuntime {
     if (event.method === "turn/completed") {
       const turn = params.turn as { id?: string; status?: string; error?: { message?: string } | null } | undefined;
       if (turn?.id && this.activeTurnId && turn.id !== this.activeTurnId) return;
+      if (turn?.id) {
+        this.completedTurnIds.add(turn.id);
+        if (this.completedTurnIds.size > 50) this.completedTurnIds.delete(this.completedTurnIds.values().next().value!);
+      }
       this.activeTurnId = null;
       const status: TurnStatus = turn?.status === "completed" ? "completed" : turn?.status === "interrupted" ? "interrupted" : "failed";
       const finalText = this.lastAgentText;

@@ -52,9 +52,10 @@ export function mentionsUser(text: string, userId: string): boolean {
 // Decides whether a message wakes the agent or only adds to what it knows. Nothing is dropped either way.
 export function decideWake(message: SlackInbound, ownUserId: string, policy: WakePolicy, isThreadParticipant: boolean): WakeDecision {
   const mentioned = mentionsUser(message.text, ownUserId);
-  // Other bots wake an agent only by naming it, so ambient chatter between agents cannot wake anyone.
-  if (message.botId) return { reason: mentioned ? "mention" : "ambient", wake: mentioned && policy.mentions };
+  // A DM is addressed to the agent whoever wrote it, another agent included.
   if (message.channelType === "im") return { reason: "direct_message", wake: policy.directMessages };
+  // Elsewhere, other bots wake an agent only by naming it, so ambient chatter between agents cannot wake anyone.
+  if (message.botId) return { reason: mentioned ? "mention" : "ambient", wake: mentioned && policy.mentions };
   if (mentioned) return { reason: "mention", wake: policy.mentions };
   if (message.threadTs && isThreadParticipant) return { reason: "thread_reply", wake: policy.participatingThreads || policy.ambient };
   return { reason: "ambient", wake: policy.ambient };
@@ -68,7 +69,7 @@ export function replyTarget(message: SlackInbound): { channel: string; threadTs:
 
 function describeWhere(channelType: SlackChannelType, channelName: string | null, channelId: string, threadTs: string | null): string {
   const place =
-    channelType === "im" ? `direct message (${channelId})` : channelType === "mpim" ? `group DM (${channelId})` : `#${channelName ?? "unknown"} (${channelId})`;
+    channelType === "im" ? `direct message (${channelId})` : channelType === "mpim" ? `group DM (${channelId})` : `#${sanitizeHeader(channelName ?? "unknown")} (${channelId})`;
   return threadTs ? `${place}, in thread ${threadTs}` : `${place}, top level`;
 }
 
@@ -101,6 +102,12 @@ export function renderSlackText(text: string, ownUserId: string, names: Map<stri
   return resolved.replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
 
+// Header values come from Slack profiles, channel names, and file names, all of which people control.
+// Without brackets or line breaks they cannot start a header line or a section of their own.
+export function sanitizeHeader(value: string): string {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replace(/[\r\n]+/g, " ");
+}
+
 function escapeAttribute(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
@@ -111,7 +118,7 @@ function clip(text: string): string {
 
 function renderThreadContext(context: ThreadContext): string {
   const included = context.messages.length;
-  const lines = context.messages.map((item, index) => `[${index + 1}] ${item.author} (ts ${item.ts}): ${item.text}`);
+  const lines = context.messages.map((item, index) => `[${index + 1}] ${sanitizeHeader(item.author)} (ts ${item.ts}): ${item.text.replace(/[\r\n]+/g, " ⏎ ")}`);
   return [
     `<thread-context included="${included}" total="${context.total}" truncated="${included < context.total}">`,
     ...lines,
@@ -124,7 +131,7 @@ export function renderEnvelope(input: EnvelopeInput): string {
   const target = replyTarget(message);
   const wakeAttribute = decision.wake ? WAKE_REASON_TEXT[decision.reason] : "none";
   const fields = [
-    `From: ${author.name} (${author.id}, ${author.kind})`,
+    `From: ${sanitizeHeader(author.name)} (${author.id}, ${author.kind})`,
     `Where: ${describeWhere(message.channelType, input.channelName, message.channelId, message.threadTs)}`,
     `Time: ${formatTime(message.ts, input.timezone)}`,
     `Message ts: ${message.ts}`,
@@ -133,7 +140,7 @@ export function renderEnvelope(input: EnvelopeInput): string {
   if (decision.budgetExhausted) {
     fields.push("Note: this mention did not wake you. Agents have been waking each other in this thread without a human; a human message resets that.");
   }
-  const attachments = [...input.fileNotes, ...(input.imageCount > 0 ? [`${input.imageCount} image${input.imageCount === 1 ? "" : "s"} attached to this input`] : [])];
+  const attachments = [...input.fileNotes.map(sanitizeHeader), ...(input.imageCount > 0 ? [`${input.imageCount} image${input.imageCount === 1 ? "" : "s"} attached to this input`] : [])];
   if (attachments.length > 0) fields.push(`Files: ${attachments.join("; ")}`);
   const sections: string[] = [];
   if (input.threadContext && input.threadContext.messages.length > 0) sections.push(renderThreadContext(input.threadContext));
@@ -163,6 +170,7 @@ export function buildThreadContext(
   };
 }
 
+// Channel and ts identify a message. The team id is left out: the two event types Slack sends for one mention disagree on it.
 export function sourceKey(message: SlackInbound): string {
-  return `slack:${message.teamId}:${message.channelId}:${message.ts}`;
+  return `slack:${message.channelId}:${message.ts}`;
 }

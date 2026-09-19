@@ -102,7 +102,7 @@ export class AgentSlackClient {
     };
     this.app.event("message", async ({ event }) => handle(event as RawMessageEvent));
     // Fires even where the app is not yet a member (the mention that invites it). Members get the same message twice; the inbox dedupes by source key.
-    this.app.event("app_mention", async ({ event }) => handle({ ...(event as RawMessageEvent), channel_type: "channel" }));
+    this.app.event("app_mention", async ({ event }) => handle(event as RawMessageEvent));
   }
 
   onStopRequested(handler: () => Promise<void>): void {
@@ -110,10 +110,11 @@ export class AgentSlackClient {
   }
 
   async start(): Promise<SlackIdentity> {
-    await this.app.start();
+    // Identity first: events start flowing the moment the socket opens, and handling them needs to know who we are.
     const auth = await this.app.client.auth.test({ token: this.botToken });
     if (!auth.team_id || !auth.user_id || !auth.bot_id) throw new Error(`Slack auth.test for ${this.agentName} returned no bot identity`);
     this.identityValue = { teamId: auth.team_id, teamName: auth.team ?? null, botUserId: auth.user_id, botId: auth.bot_id, appId: (auth as { app_id?: string }).app_id ?? null };
+    await this.app.start();
     logInfo("slack agent connected", { agent: this.agentName, botUserId: auth.user_id, team: auth.team });
     return this.identityValue;
   }
@@ -127,7 +128,8 @@ export class AgentSlackClient {
     if (!raw.channel || !raw.ts) return null;
     const identity = this.identity();
     if (raw.bot_id === identity.botId || raw.user === identity.botUserId) return null;
-    const channelType = raw.channel_type;
+    // app_mention events carry no channel type; ask Slack rather than guess, so a DM is never treated as a channel.
+    const channelType = raw.channel_type ?? (await this.getConversation(raw.channel).then((info) => info.type).catch(() => undefined));
     if (channelType !== "channel" && channelType !== "group" && channelType !== "im" && channelType !== "mpim") return null;
     const files = (raw.files ?? [])
       .filter((file) => file.id && file.url_private_download)
