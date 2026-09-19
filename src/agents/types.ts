@@ -6,22 +6,17 @@ export type AgentHost =
   | { kind: "local" }
   | { kind: "ssh"; target: string };
 
-// What wakes the agent's mind. Everything else it can see is still delivered, as context.
+// How an agent gets woken. Every message in a conversation the agent is part of reaches its inbox either way;
+// this only decides which ones interrupt it.
 export interface WakePolicy {
-  mentions: boolean;
-  directMessages: boolean;
-  // Replies in threads the agent has already spoken in.
-  participatingThreads: boolean;
-  // Every message in channels the agent is a member of.
-  ambient: boolean;
+  // true: a judgment model reads each message the way a person would and decides whether it is for this agent, @ or no @.
+  // false: only plain rules apply (the agent's name appears, a DM, a thread it is already in).
+  natural: boolean;
+  // How sure the judgment has to be (0 to 1) before the agent is woken. Lower means it jumps in more readily.
+  threshold: number;
 }
 
-export const DEFAULT_WAKE_POLICY: WakePolicy = {
-  mentions: true,
-  directMessages: true,
-  participatingThreads: true,
-  ambient: false,
-};
+export const DEFAULT_WAKE_POLICY: WakePolicy = { natural: true, threshold: 0.5 };
 
 export interface AgentSpec {
   name: string;
@@ -33,9 +28,8 @@ export interface AgentSpec {
   // The agent's home directory on its host.
   cwd: string;
   wake: WakePolicy;
-  // Names of the env vars holding this agent's Slack app credentials.
-  slackBotTokenEnv: string;
-  slackAppTokenEnv: string;
+  // Emoji name (":brain:") or image URL shown beside the agent's messages. All agents post through one shared Slack app.
+  icon: string | null;
   instructionsPath: string | null;
   // Load the operator's user-level harness config (settings, MCP servers, cloud connectors) into this agent.
   inheritUserConfig: boolean;

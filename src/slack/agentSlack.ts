@@ -6,7 +6,22 @@ import type { ValidatedSlackUploadFile } from "./uploads.js";
 
 export type SlackChannelType = "channel" | "group" | "im" | "mpim";
 
-// A Slack message as one agent's app saw it.
+// How one agent appears when it posts through the shared app.
+export interface SlackPersona {
+  username: string;
+  // Emoji name (":brain:") or image URL.
+  icon: string | null;
+}
+
+function personaFields(persona?: SlackPersona | null): Record<string, string> {
+  if (!persona) return {};
+  const fields: Record<string, string> = { username: persona.username };
+  if (persona.icon && /^https?:\/\//.test(persona.icon)) fields.icon_url = persona.icon;
+  else if (persona.icon) fields.icon_emoji = `:${persona.icon.replaceAll(":", "")}:`;
+  return fields;
+}
+
+// A Slack message as the workspace app saw it.
 export interface SlackInbound {
   teamId: string;
   channelId: string;
@@ -24,6 +39,8 @@ export interface SlackInbound {
   unavailableFiles: string[];
   // Set when this is an edit of an earlier message; ts is then the edited message's ts.
   editedAt: string | null;
+  // Set when one of this bridge's own agents wrote the message (the bridge relays it to the others itself).
+  agentAuthor?: string | null;
 }
 
 export interface SlackIdentity {
@@ -39,6 +56,8 @@ export interface SlackHistoryMessage {
   threadTs: string | null;
   userId: string | null;
   botId: string | null;
+  // The name a bot message was posted under, which for the shared app is the agent that wrote it.
+  username: string | null;
   text: string;
   replyCount: number;
   fileNames: string[];
@@ -68,6 +87,7 @@ interface RawMessageEvent {
   thread_ts?: string;
   user?: string;
   bot_id?: string;
+  username?: string;
   text?: string;
   team?: string;
   files?: Array<{ id?: string; name?: string; mimetype?: string; url_private_download?: string }>;
@@ -103,7 +123,7 @@ export function supplementaryText(raw: Pick<RawMessageEvent, "attachments" | "bl
 
 const DELIVERABLE_SUBTYPES = new Set([undefined, "file_share", "bot_message", "thread_broadcast", "me_message", "message_changed"]);
 
-// One named agent's presence in Slack: its own app, its own bot user, its own socket.
+// The workspace's one Slack app. Every agent hears through it and speaks through it under its own name and icon.
 export class AgentSlackClient {
   private readonly app: App;
   private identityValue: SlackIdentity | null = null;
@@ -137,8 +157,12 @@ export class AgentSlackClient {
     this.app.event("app_mention", async ({ event }) => handle(event as RawMessageEvent));
   }
 
-  onStopRequested(handler: () => Promise<void>): void {
-    (this.app.event as (name: string, listener: () => Promise<void>) => void)("agent_session_stopped", handler);
+  // Slack's stop button on a working indicator. The event names the thread, which tells the bridge which agent to stop.
+  onStopRequested(handler: (where: { channelId: string | null; threadTs: string | null }) => Promise<void>): void {
+    (this.app.event as (name: string, listener: (args: { event: { channel?: string; channel_id?: string; thread_ts?: string } }) => Promise<void>) => void)(
+      "agent_session_stopped",
+      async ({ event }) => handler({ channelId: event.channel ?? event.channel_id ?? null, threadTs: event.thread_ts ?? null }),
+    );
   }
 
   // Who this app is. Called before connect(), so everything that handles events exists before events can arrive.
@@ -250,8 +274,8 @@ export class AgentSlackClient {
     return info;
   }
 
-  async postMessage(args: { channelId: string; text: string; threadTs?: string | null; broadcast?: boolean }): Promise<{ ts: string; permalink: string | null }> {
-    const base = { token: this.botToken, channel: args.channelId, text: normalizeSlackMrkdwn(args.text), mrkdwn: true };
+  async postMessage(args: { channelId: string; text: string; threadTs?: string | null; broadcast?: boolean; persona?: SlackPersona | null }): Promise<{ ts: string; permalink: string | null }> {
+    const base = { token: this.botToken, channel: args.channelId, text: normalizeSlackMrkdwn(args.text), mrkdwn: true, ...personaFields(args.persona) };
     const response = await this.app.client.chat.postMessage(
       args.threadTs ? { ...base, thread_ts: args.threadTs, reply_broadcast: Boolean(args.broadcast) } : base,
     );
@@ -292,6 +316,7 @@ export class AgentSlackClient {
       threadTs: message.thread_ts ?? null,
       userId: message.bot_id ? null : (message.user ?? null),
       botId: message.bot_id ?? null,
+      username: message.username ?? null,
       text: message.text ?? "",
       replyCount: message.reply_count ?? 0,
       fileNames: (message.files ?? []).map((file) => file.name ?? file.id ?? "file"),
@@ -358,9 +383,9 @@ export class AgentSlackClient {
   }
 
   // Presence, not speech: shows the agent as working in a thread. Best effort; apps without the agent surface reject it.
-  async setThreadStatus(channelId: string, threadTs: string, status: "processing" | "active"): Promise<void> {
+  async setThreadStatus(channelId: string, threadTs: string, status: "processing" | "active", persona?: SlackPersona | null): Promise<void> {
     try {
-      await this.app.client.apiCall("agents.sessions.setStatus", { token: this.botToken, channel_id: channelId, thread_ts: threadTs, status });
+      await this.app.client.apiCall("agents.sessions.setStatus", { token: this.botToken, channel_id: channelId, thread_ts: threadTs, status, ...personaFields(persona) });
     } catch {
       // The app may not be declared as an agent; presence is optional.
     }

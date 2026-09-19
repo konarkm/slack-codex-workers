@@ -6,7 +6,7 @@ import { WebhookWakes, buildWebhookTools } from "../../src/agents/webhookWakes.j
 
 const store = new AgentStore(":memory:");
 const wakes = new WebhookWakes(store, { storageDir: "/tmp/x", webhookPath: "/webhooks", publicBaseUrl: null }, async () => {});
-const defs = [...buildWakeTools("ada", store, "UTC"), ...buildWebhookTools("ada", store, wakes), ...buildSlackTools({ slack: {} as never, noteVisibleAction() {}, recordThreadParticipation() {}, uploadConfig: {} as never, timezone: "UTC", canUploadLocalFiles: true })];
+const defs = [...buildWakeTools("ada", store, "UTC"), ...buildWebhookTools("ada", store, wakes), ...buildSlackTools({ slack: {} as never, persona: { username: "ada", icon: null }, afterSend() {}, noteVisibleAction() {}, recordThreadParticipation() {}, uploadConfig: {} as never, timezone: "UTC", canUploadLocalFiles: true })];
 console.log("defined", defs.length, defs.map((d) => d.name).join(","));
 const only = process.argv[2] ? process.argv[2].split(",") : null;
 const server = createSdkMcpServer({ name: "workspace", tools: defs.filter((d) => !only || only.includes(d.name)).map((d) => tool(d.name, d.description, d.shape, async () => ({ content: [{ type: "text", text: "ok" }] }), { alwaysLoad: true })) });

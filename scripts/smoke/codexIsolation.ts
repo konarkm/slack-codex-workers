@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { CodexRpcClient } from "../../src/codex/rpcClient.js";
-import { codexDenyArgs } from "../../src/runtimes/codexRuntime.js";
+import { codexDenyArgs, configuredCodexServers } from "../../src/runtimes/codexRuntime.js";
 
 const isolated = process.argv[2] !== "inherited";
 const home = path.join(os.homedir(), ".slack-agents", "homes", "codex-smoke", ".codex-home");
@@ -14,7 +14,7 @@ if (isolated) {
   if (!fs.existsSync(path.join(home, "auth.json"))) fs.symlinkSync(path.join(os.homedir(), ".codex", "auth.json"), path.join(home, "auth.json"));
 }
 const rpc = new CodexRpcClient("codex", process.cwd(), { name: "slack-agents", title: "Slack Agents", version: "0.2.0" }, () =>
-  spawn("codex", ["app-server", ...codexDenyArgs(process.argv.slice(3))], { env: { ...process.env, ...(isolated ? { CODEX_HOME: home } : {}) }, stdio: ["pipe", "pipe", "pipe"] }),
+  spawn("codex", ["app-server", ...codexDenyArgs(process.argv.slice(3), isolated ? [] : configuredCodexServers(path.join(os.homedir(), ".codex")))], { env: { ...process.env, ...(isolated ? { CODEX_HOME: home } : {}) }, stdio: ["pipe", "pipe", "pipe"] }),
 );
 await rpc.start();
 const account = await rpc.request<{ account?: { type?: string } }>("account/read", {});

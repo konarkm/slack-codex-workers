@@ -131,7 +131,7 @@ export class CodexRuntime implements AgentRuntime {
   private async startInner(): Promise<void> {
     const { spec } = this.options;
     const rpc = this.createRpc?.() ?? new CodexRpcClient(this.codexBin, spec.cwd, CLIENT_INFO, () =>
-      spawnOnHost({ host: spec.host, command: this.codexBin, args: ["app-server", ...codexDenyArgs(spec.inheritUserConfig ? spec.denyTools : [...spec.denyTools, `mcp__${CODEX_APPS_SERVER}`])], cwd: spec.cwd, env: this.isolatedHomeEnv() }),
+      spawnOnHost({ host: spec.host, command: this.codexBin, args: ["app-server", ...this.denyArgs()], cwd: spec.cwd, env: this.isolatedHomeEnv() }),
     );
     rpc.on("notification", (event) => {
       this.chain = this.chain.then(() => this.handleNotification(event)).catch((error) => {
@@ -211,6 +211,15 @@ export class CodexRuntime implements AgentRuntime {
     const link = path.join(home, "auth.json");
     if (!fs.existsSync(link)) fs.symlinkSync(path.join(operatorHome, "auth.json"), link);
     return { CODEX_HOME: home };
+  }
+
+  private denyArgs(): string[] {
+    const { spec } = this.options;
+    // An isolated agent has no configured servers; the app connectors follow the login, so they are always switched off for it.
+    if (!spec.inheritUserConfig) return codexDenyArgs([`mcp__${CODEX_APPS_SERVER}`], []);
+    // On another machine the config cannot be read from here, so only the app connectors can be denied safely.
+    const configured = spec.host.kind === "local" ? configuredCodexServers(process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex")) : [];
+    return codexDenyArgs(spec.denyTools, configured);
   }
 
   private threadSettings(): Record<string, unknown> {
@@ -322,9 +331,22 @@ export class CodexRuntime implements AgentRuntime {
 // Codex has no per-tool deny list, so a denied MCP server is switched off for the agent's whole app-server process.
 // The ChatGPT app connectors (Slack, mail, payments, and the rest) follow the login, not the config, and come as one
 // built-in server; denying it turns the feature off.
-export function codexDenyArgs(denyTools: string[]): string[] {
+// Codex refuses to start if an override names a server its config does not define, so only configured servers are named.
+export function codexDenyArgs(denyTools: string[], configuredServers: string[]): string[] {
   const servers = denyTools.map((entry) => /^mcp__([A-Za-z0-9_-]+)$/.exec(entry)?.[1]).filter((name): name is string => Boolean(name));
-  return servers.flatMap((name) => ["-c", name === CODEX_APPS_SERVER ? "features.apps=false" : `mcp_servers.${name}.enabled=false`]);
+  return servers.flatMap((name) =>
+    name === CODEX_APPS_SERVER ? ["-c", "features.apps=false"] : configuredServers.includes(name) ? ["-c", `mcp_servers.${name}.enabled=false`] : [],
+  );
+}
+
+// The MCP servers a Codex home defines, read from its config file's table headers.
+export function configuredCodexServers(codexHome: string): string[] {
+  try {
+    const config = fs.readFileSync(path.join(codexHome, "config.toml"), "utf8");
+    return [...config.matchAll(/^\[mcp_servers\.(?:"([^"]+)"|([A-Za-z0-9_-]+))\]/gm)].map((match) => match[1] ?? match[2]!);
+  } catch {
+    return [];
+  }
 }
 
 // Codex reports these conditions only as English error text.

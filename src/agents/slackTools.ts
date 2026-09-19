@@ -1,11 +1,15 @@
 import { z } from "zod";
-import type { AgentSlackClient, SlackHistoryMessage } from "../slack/agentSlack.js";
+import type { AgentSlackClient, SlackHistoryMessage, SlackPersona } from "../slack/agentSlack.js";
 import { validateSlackUploadFiles } from "../slack/uploads.js";
-import { renderSlackText } from "./envelope.js";
+import { renderSlackText, sanitizeHeader } from "./envelope.js";
 import type { AgentTool } from "./types.js";
 
 export interface SlackToolContext {
   slack: AgentSlackClient;
+  // The name and icon this agent posts under; all agents share one Slack app.
+  persona: SlackPersona;
+  // Called after the agent posts, so the bridge can let the other agents hear it.
+  afterSend(sent: { channelId: string; threadTs: string | null; ts: string; text: string }): void;
   // The agent did something people can see (or explicitly chose not to).
   noteVisibleAction(): void;
   recordThreadParticipation(channelId: string, threadTs: string): void;
@@ -22,14 +26,17 @@ function defineTool<Shape extends z.ZodRawShape>(tool: AgentTool<Shape>): AgentT
 const channel = z.string().min(1).describe("Conversation id (C…, G…, or D…), as given in an envelope's reply target.");
 const messageTs = z.string().min(1).describe("A message ts, e.g. 1726700000.000100.");
 
-async function renderHistory(slack: AgentSlackClient, messages: SlackHistoryMessage[]): Promise<string> {
+async function renderHistory(slack: AgentSlackClient, ownName: string, messages: SlackHistoryMessage[]): Promise<string> {
   const own = slack.identity();
   const lines: string[] = [];
   for (const message of messages) {
     const names = new Map<string, string>();
     for (const match of message.text.matchAll(/<@([A-Z0-9]+)/g)) names.set(match[1]!, (await slack.getPerson(match[1]!)).name);
-    const author = message.userId === own.botUserId || message.botId === own.botId ? "you" : message.userId ? (await slack.getPerson(message.userId)).name : `app ${message.botId ?? "unknown"}`;
-    const extras = [message.replyCount > 0 ? `${message.replyCount} replies` : null, message.fileNames.length > 0 ? `files: ${message.fileNames.join(", ")}` : null].filter(Boolean);
+    const author =
+      message.botId === own.botId
+        ? message.username === ownName ? "you" : sanitizeHeader(`${message.username ?? "the bridge"} (agent)`)
+        : message.userId ? sanitizeHeader((await slack.getPerson(message.userId)).name) : `app ${message.botId ?? "unknown"}`;
+    const extras = [message.replyCount > 0 ? `${message.replyCount} replies` : null, message.fileNames.length > 0 ? `files: ${message.fileNames.map(sanitizeHeader).join(", ")}` : null].filter(Boolean);
     lines.push(`[ts ${message.ts}] ${author}${extras.length > 0 ? ` (${extras.join("; ")})` : ""}: ${renderSlackText(message.text, own.botUserId, names)}`);
   }
   return lines.length > 0 ? lines.join("\n") : "(no messages)";
@@ -42,7 +49,7 @@ export function buildSlackTools(ctx: SlackToolContext): AgentTool[] {
     defineTool({
       name: "send_message",
       description:
-        "Send a Slack message as yourself. This is the only way anyone sees what you say; your turn output is not shown to anyone. Pass thread_ts to reply inside a thread (the envelope's reply target gives the right values). Mention a person or another agent with <@USERID>; mentioning an agent wakes it.",
+        "Send a Slack message as yourself. This is the only way anyone sees what you say; your turn output is not shown to anyone. Pass thread_ts to reply inside a thread (the envelope's reply target gives the right values). To get another agent's attention, say its name. To notify a person, mention them with <@USERID>.",
       shape: {
         channel,
         text: z.string().min(1).describe("Slack mrkdwn or plain text."),
@@ -50,9 +57,10 @@ export function buildSlackTools(ctx: SlackToolContext): AgentTool[] {
         broadcast: z.boolean().optional().describe("Also show a threaded reply in the channel. Use sparingly."),
       },
       handler: async (args) => {
-        const result = await slack.postMessage({ channelId: args.channel, text: args.text, threadTs: args.thread_ts ?? null, broadcast: args.broadcast });
+        const result = await slack.postMessage({ channelId: args.channel, text: args.text, threadTs: args.thread_ts ?? null, broadcast: args.broadcast, persona: ctx.persona });
         ctx.noteVisibleAction();
         ctx.recordThreadParticipation(args.channel, args.thread_ts ?? result.ts);
+        ctx.afterSend({ channelId: args.channel, threadTs: args.thread_ts ?? null, ts: result.ts, text: args.text });
         return `sent. ts=${result.ts}${result.permalink ? ` permalink=${result.permalink}` : ""}`;
       },
     }),
@@ -115,7 +123,7 @@ export function buildSlackTools(ctx: SlackToolContext): AgentTool[] {
         before: z.string().optional().describe("Only messages older than this ts."),
       },
       handler: async (args) =>
-        renderHistory(slack, await slack.readHistory({ channelId: args.channel, threadTs: args.thread_ts ?? null, limit: args.limit ?? 30, before: args.before ?? null })),
+        renderHistory(slack, ctx.persona.username, await slack.readHistory({ channelId: args.channel, threadTs: args.thread_ts ?? null, limit: args.limit ?? 30, before: args.before ?? null })),
     }),
     defineTool({
       name: "list_channels",
@@ -128,13 +136,13 @@ export function buildSlackTools(ctx: SlackToolContext): AgentTool[] {
     }),
     defineTool({
       name: "list_people",
-      description: "List the people and agents in the workspace with their user ids, so you can mention or DM them.",
+      description: "List the people and apps in the Slack workspace with their user ids, so you can mention or DM them. Your fellow agents are listed by list_agents, not here.",
       shape: {},
       handler: async () => {
         const own = slack.identity();
         const people = await slack.listPeople();
         return people
-          .map((person) => `${person.name} (${person.id}) · ${person.id === own.botUserId ? "you" : person.isBot ? "agent/app" : "human"}${person.title ? ` · ${person.title}` : ""}`)
+          .map((person) => `${person.name} (${person.id}) · ${person.id === own.botUserId ? "the app you and the other agents post through" : person.isBot ? "app" : "human"}${person.title ? ` · ${person.title}` : ""}`)
           .join("\n");
       },
     }),

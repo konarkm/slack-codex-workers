@@ -1,12 +1,16 @@
 import type { SlackChannelType, SlackHistoryMessage, SlackInbound } from "../slack/agentSlack.js";
 import type { WakePolicy } from "./types.js";
 
-export type WakeReason = "direct_message" | "mention" | "thread_reply" | "ambient";
+export type WakeReason = "addressed" | "default" | "none";
 
 export interface WakeDecision {
-  reason: WakeReason;
   wake: boolean;
-  // Set when the message would have woken the agent but the agent-to-agent budget for this thread is spent.
+  // addressed: judged to be for this agent. default: a person's message was for nobody in particular, and this agent is the one who answers those.
+  reason: WakeReason;
+  // How sure the judgment was that the message is for this agent.
+  probability: number | null;
+  source: "jev" | "rules";
+  // Set when the message would have woken the agent but the agent-to-agent budget for this conversation is spent.
   budgetExhausted?: boolean;
 }
 
@@ -27,7 +31,8 @@ export interface EnvelopeInput {
   channelName: string | null;
   author: EnvelopeAuthor;
   decision: WakeDecision;
-  ownUserId: string;
+  // The shared app's bot user id; a literal @ of it means "the agents".
+  appUserId: string;
   // Display names for user ids mentioned in the text.
   names: Map<string, string>;
   fileNotes: string[];
@@ -38,27 +43,8 @@ export interface EnvelopeInput {
 
 const MAX_BODY_CHARS = 16_000;
 
-const WAKE_REASON_TEXT: Record<WakeReason, string> = {
-  direct_message: "direct-message",
-  mention: "mention",
-  thread_reply: "thread-reply",
-  ambient: "channel-message",
-};
-
 export function mentionsUser(text: string, userId: string): boolean {
   return text.includes(`<@${userId}>`) || text.includes(`<@${userId}|`);
-}
-
-// Decides whether a message wakes the agent or only adds to what it knows. Nothing is dropped either way.
-export function decideWake(message: SlackInbound, ownUserId: string, policy: WakePolicy, isThreadParticipant: boolean): WakeDecision {
-  const mentioned = mentionsUser(message.text, ownUserId);
-  // A DM is addressed to the agent whoever wrote it, another agent included.
-  if (message.channelType === "im") return { reason: "direct_message", wake: policy.directMessages };
-  // Elsewhere, other bots wake an agent only by naming it, so ambient chatter between agents cannot wake anyone.
-  if (message.botId) return { reason: mentioned ? "mention" : "ambient", wake: mentioned && policy.mentions };
-  if (mentioned) return { reason: "mention", wake: policy.mentions };
-  if (message.threadTs && isThreadParticipant) return { reason: "thread_reply", wake: policy.participatingThreads || policy.ambient };
-  return { reason: "ambient", wake: policy.ambient };
 }
 
 export function replyTarget(message: SlackInbound): { channel: string; threadTs: string | null } {
@@ -93,7 +79,7 @@ export function formatTime(ts: string, timezone: string): string {
 // Resolve those references into plain words, then escape whatever brackets remain so content cannot forge a section boundary.
 export function renderSlackText(text: string, ownUserId: string, names: Map<string, string>): string {
   const resolved = text
-    .replace(/<@([A-Z0-9]+)(?:\|[^>]*)?>/g, (_match, id: string) => (id === ownUserId ? `@you (${id})` : `@${names.get(id) ?? "unknown"} (${id})`))
+    .replace(/<@([A-Z0-9]+)(?:\|[^>]*)?>/g, (_match, id: string) => (id === ownUserId ? `@agents (${id})` : `@${names.get(id) ?? "unknown"} (${id})`))
     .replace(/<#([A-Z0-9]+)(?:\|([^>]*))?>/g, (_match, id: string, name?: string) => `#${name || "channel"} (${id})`)
     .replace(/<!(here|channel|everyone)(?:\|[^>]*)?>/g, (_match, word: string) => `@${word}`)
     .replace(/<!subteam\^([A-Z0-9]+)(?:\|([^>]*))?>/g, (_match, id: string, name?: string) => `${name || "@group"} (${id})`)
@@ -129,7 +115,7 @@ function renderThreadContext(context: ThreadContext): string {
 export function renderEnvelope(input: EnvelopeInput): string {
   const { message, decision, author } = input;
   const target = replyTarget(message);
-  const wakeAttribute = decision.wake ? WAKE_REASON_TEXT[decision.reason] : "none";
+  const wakeAttribute = decision.wake ? decision.reason : "none";
   const fields = [
     `From: ${sanitizeHeader(author.name)} (${author.id}, ${author.kind})`,
     `Where: ${describeWhere(message.channelType, input.channelName, message.channelId, message.threadTs)}`,
@@ -137,6 +123,7 @@ export function renderEnvelope(input: EnvelopeInput): string {
     `Message ts: ${message.ts}${message.editedAt ? " (this is an edit of a message you may have seen; the content below is the new version)" : ""}`,
     `Reply target: channel=${target.channel}${target.threadTs ? ` thread_ts=${target.threadTs}` : ""}`,
   ];
+  if (decision.wake && decision.reason === "default") fields.push("Note: this was not clearly for any one agent; you are the one who picks those up.");
   if (decision.budgetExhausted) {
     fields.push("Note: this did not wake you. Agents have been waking each other here without a person; a person's message, or half an hour of quiet, resets that.");
   }
@@ -149,7 +136,7 @@ export function renderEnvelope(input: EnvelopeInput): string {
       `<slack-message wake="${escapeAttribute(wakeAttribute)}">`,
       ...fields,
       "Content:",
-      clip(renderSlackText(message.text, input.ownUserId, input.names)) || "(no text)",
+      clip(renderSlackText(message.text, input.appUserId, input.names)) || "(no text)",
       "</slack-message>",
     ].join("\n"),
   );

@@ -13,8 +13,7 @@ const spec: AgentSpec = {
   host: { kind: "local" },
   cwd: "/tmp",
   wake: DEFAULT_WAKE_POLICY,
-  slackBotTokenEnv: "",
-  slackAppTokenEnv: "",
+  icon: null,
   instructionsPath: null,
   inheritUserConfig: false,
   denyTools: [],
@@ -192,12 +191,12 @@ describe("CodexRuntime", () => {
   });
 
   it("turns denied servers into process-level overrides, and the app connectors into a feature switch", () => {
-    expect(codexDenyArgs(["mcp__composio", "mcp__codex_apps", "Bash(rm *)", "mcp__claude_ai_Slack"])).toEqual([
+    // claude_ai_Slack is not a server this Codex home defines; naming it would stop Codex from starting.
+    expect(codexDenyArgs(["mcp__composio", "mcp__codex_apps", "Bash(rm *)", "mcp__claude_ai_Slack"], ["composio", "things"])).toEqual([
       "-c", "mcp_servers.composio.enabled=false",
       "-c", "features.apps=false",
-      "-c", "mcp_servers.claude_ai_Slack.enabled=false",
     ]);
-    expect(codexDenyArgs([])).toEqual([]);
+    expect(codexDenyArgs([], ["composio"])).toEqual([]);
   });
 
   it("sends instructions and policy again when resuming a thread", async () => {

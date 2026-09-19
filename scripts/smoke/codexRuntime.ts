@@ -16,8 +16,7 @@ const spec: AgentSpec = {
   host: sshTarget ? { kind: "ssh", target: sshTarget } : { kind: "local" },
   cwd,
   wake: DEFAULT_WAKE_POLICY,
-  slackBotTokenEnv: "",
-  slackAppTokenEnv: "",
+  icon: null,
   instructionsPath: null,
   inheritUserConfig: false,
   // A smoke test gets no operator setup at all: its stub tools must be the only way out.

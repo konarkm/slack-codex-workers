@@ -3,11 +3,14 @@ import { config as loadDotEnv } from "dotenv";
 import { logError, logInfo } from "../logger.js";
 import { AgentHub } from "./hub.js";
 import { loadHubConfig } from "./hubConfig.js";
+import { JevJudge, RuleJudge } from "./judge.js";
 
 loadDotEnv({ quiet: true });
 
 async function main(): Promise<void> {
-  const hub = new AgentHub(loadHubConfig());
+  const apiKey = process.env.TYPESAFE_API_KEY?.trim();
+  if (!apiKey) logInfo("TYPESAFE_API_KEY is not set; agents wake on plain rules (their name, a DM, a thread they are in)");
+  const hub = new AgentHub(loadHubConfig(), apiKey ? new JevJudge({ apiKey, model: process.env.TYPESAFE_MODEL?.trim() || undefined }) : new RuleJudge());
   let stopping = false;
   const shutdown = async (signal: string): Promise<void> => {
     if (stopping) return;
