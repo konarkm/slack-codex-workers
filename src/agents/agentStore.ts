@@ -24,6 +24,19 @@ export interface InboxItem {
   deliveredAt: string | null;
 }
 
+export type WakeTrigger = { kind: "interval"; minutes: number } | { kind: "cron"; schedule: string; timezone: string };
+
+export interface ScheduledWake {
+  id: string;
+  agent: string;
+  trigger: WakeTrigger;
+  // What the agent told itself to do when this fires.
+  note: string;
+  enabled: boolean;
+  createdAt: string;
+  lastFiredAt: string | null;
+}
+
 export interface NewInboxItem {
   agent: string;
   sourceKey: string;
@@ -81,6 +94,15 @@ export class AgentStore {
         thread_ts TEXT NOT NULL,
         created_at TEXT NOT NULL,
         PRIMARY KEY(agent, channel_id, thread_ts)
+      );
+      CREATE TABLE IF NOT EXISTS scheduled_wakes (
+        id TEXT PRIMARY KEY,
+        agent TEXT NOT NULL,
+        trigger_json TEXT NOT NULL,
+        note TEXT NOT NULL,
+        enabled INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        last_fired_at TEXT
       );
       CREATE TABLE IF NOT EXISTS thread_seen (
         agent TEXT NOT NULL,
@@ -153,6 +175,46 @@ export class AgentStore {
     const statement = this.db.prepare("UPDATE inbox SET status = 'delivered', delivered_at = ? WHERE id = ?");
     const now = new Date().toISOString();
     for (const id of ids) statement.run(now, id);
+  }
+
+  createScheduledWake(wake: Pick<ScheduledWake, "id" | "agent" | "trigger" | "note">): ScheduledWake {
+    const createdAt = new Date().toISOString();
+    this.db
+      .prepare("INSERT INTO scheduled_wakes (id, agent, trigger_json, note, enabled, created_at) VALUES (?, ?, ?, ?, 1, ?)")
+      .run(wake.id, wake.agent, JSON.stringify(wake.trigger), wake.note, createdAt);
+    return { ...wake, enabled: true, createdAt, lastFiredAt: null };
+  }
+
+  listScheduledWakes(agent?: string): ScheduledWake[] {
+    const rows = (agent
+      ? this.db.prepare("SELECT * FROM scheduled_wakes WHERE agent = ? ORDER BY created_at").all(agent)
+      : this.db.prepare("SELECT * FROM scheduled_wakes ORDER BY created_at").all()) as unknown as Array<{
+      id: string;
+      agent: string;
+      trigger_json: string;
+      note: string;
+      enabled: number;
+      created_at: string;
+      last_fired_at: string | null;
+    }>;
+    return rows.map((row) => ({
+      id: row.id,
+      agent: row.agent,
+      trigger: JSON.parse(row.trigger_json) as WakeTrigger,
+      note: row.note,
+      enabled: row.enabled === 1,
+      createdAt: row.created_at,
+      lastFiredAt: row.last_fired_at,
+    }));
+  }
+
+  markScheduledWakeFired(id: string, firedAt: string): void {
+    this.db.prepare("UPDATE scheduled_wakes SET last_fired_at = ? WHERE id = ?").run(firedAt, id);
+  }
+
+  // Returns false when the wake does not exist or belongs to another agent.
+  disableScheduledWake(agent: string, id: string): boolean {
+    return this.db.prepare("UPDATE scheduled_wakes SET enabled = 0 WHERE id = ? AND agent = ?").run(id, agent).changes > 0;
   }
 
   recordThreadParticipation(agent: string, channelId: string, threadTs: string): void {

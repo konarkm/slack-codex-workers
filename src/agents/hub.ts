@@ -12,6 +12,7 @@ import { AgentMind, type RuntimeFactory } from "./mind.js";
 import { loadAgentRegistry } from "./registry.js";
 import { buildSlackTools } from "./slackTools.js";
 import type { AgentSpec, RuntimeState } from "./types.js";
+import { WakeScheduler, buildWakeTools } from "./wakes.js";
 
 export interface HubConfig extends AttachmentConfig {
   agentsFile: string;
@@ -47,6 +48,7 @@ export class AgentHub {
   private readonly store: AgentStore;
   private readonly seats = new Map<string, Seat>();
   private readonly agentWakeCounts = new Map<string, number>();
+  private readonly scheduler: WakeScheduler;
 
   constructor(
     private readonly config: HubConfig,
@@ -55,6 +57,12 @@ export class AgentHub {
       options.spec.runtime === "claude" ? new ClaudeRuntime(options) : new CodexRuntime(options, config.codexBin),
   ) {
     this.store = new AgentStore(config.databasePath);
+    this.scheduler = new WakeScheduler(this.store, async (agent, item) => {
+      // A wake for an agent that is not running stays due and fires once the agent is back.
+      const seat = this.seats.get(agent);
+      if (!seat) throw new Error(`agent ${agent} is not running`);
+      await seat.mind.receive({ ...item, wake: true, priority: "later", imagePaths: [] });
+    });
   }
 
   async start(): Promise<void> {
@@ -65,10 +73,12 @@ export class AgentHub {
       if (result.status === "rejected") logError("agent failed to start", { agent: specs[index]!.name, error: errorMessage(result.reason) });
     });
     if (this.seats.size === 0) throw new Error("No agent could be started");
+    this.scheduler.start();
     logInfo("agent hub ready", { agents: [...this.seats.keys()] });
   }
 
   async stop(): Promise<void> {
+    this.scheduler.stop();
     await Promise.allSettled([...this.seats.values()].map(async (seat) => {
       await seat.slack.stop();
       await seat.mind.stop();
@@ -92,7 +102,7 @@ export class AgentHub {
     });
     const identity = await slack.start();
 
-    const tools = buildSlackTools({
+    const tools = [...buildWakeTools(spec.name, this.store, this.config.timezone), ...buildSlackTools({
       slack,
       noteVisibleAction: () => seat.mind.noteVisibleAction(),
       recordThreadParticipation: (channelId, threadTs) => this.store.recordThreadParticipation(spec.name, channelId, threadTs),
@@ -104,7 +114,7 @@ export class AgentHub {
       },
       timezone: this.config.timezone,
       canUploadLocalFiles: spec.host.kind === "local",
-    });
+    })];
     const ownInstructions = spec.instructionsPath && fs.existsSync(spec.instructionsPath) ? fs.readFileSync(spec.instructionsPath, "utf8") : null;
     const instructions = buildInstructions({ spec, ownUserId: identity.botUserId, workspaceName: identity.teamName, ownInstructions });
     seat.mind = new AgentMind(spec, this.store, this.createRuntime, instructions, tools, {
