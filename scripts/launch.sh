@@ -16,6 +16,13 @@ if [[ -f "${ROOT_DIR}/.env" ]]; then
 fi
 
 export AGENTS_STATE_ROOT="${AGENTS_STATE_ROOT:-${HOME}/.slack-agents}"
+# Tokens for the deployed workspace live with its state, so the checkout's .env can serve development.
+if [[ -f "${AGENTS_STATE_ROOT}/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${AGENTS_STATE_ROOT}/.env"
+  set +a
+fi
 if [[ ! -f "${AGENTS_FILE:-${AGENTS_STATE_ROOT}/agents.json}" ]]; then
   echo "no agent registry at ${AGENTS_FILE:-${AGENTS_STATE_ROOT}/agents.json}; copy agents.example.json there and edit it" >&2
   exit 1

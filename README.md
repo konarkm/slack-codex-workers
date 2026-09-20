@@ -6,7 +6,7 @@ This is a personal, local-first tool built for one trusted operator. It is not a
 
 ## Trust model
 
-Agents run with approvals off and full access on their host. By default an agent also inherits the operator's user-level harness setup (settings, MCP servers, cloud connectors), minus a deny list of connectors that would let it speak as the operator or move money. Anyone who can message an agent can direct a process with shell access, and most of the operator's connected accounts, on that machine. Slack is the interface, not a permission boundary: use this only in a workspace where every member is trusted with that. Set `inheritUserConfig: false` on an agent to confine it to the bridge's tools.
+Agents run with approvals off and full access on their host. By default an agent gets only the bridge's tools and its own home directory's config. An agent with `inheritUserConfig: true` also loads the operator's user-level harness setup (settings, MCP servers, cloud connectors), minus a deny list of connectors that would let it speak as the operator or move money; a deny list cannot cover every path (a browser or scripting connector can act as the operator too), so opt an agent in only when its job needs it. Anyone who can message an agent can direct a process with shell access on that machine. Slack is the interface, not a permission boundary: use this only in a workspace where every member is trusted with that.
 
 Webhook URLs are bearer secrets, handler files run as trusted code inside the bridge, and accepted payloads are stored on disk under the state root.
 
@@ -50,7 +50,7 @@ What this gives up: agents have no `@` handle, no separate DM row, and no Slack 
 | `wake` | `natural` (default true): the judgment model decides whether a message is for this agent. With it off, only plain rules apply. `threshold` (default 0.5): how sure the judgment must be; lower means the agent jumps in more readily. |
 | `instructions` | Path to the agent's own standing instructions, appended to the base instructions. |
 | `denyTools` | Harness tool specs the agent never gets, such as a whole MCP server (`mcp__server`). Deny rules hold even with approvals off. Default: connectors that speak as the operator (their own Slack, iMessage), connector hubs that include those (Composio, and Codex's built-in ChatGPT app connectors, which follow the login rather than the config), and connectors that move money. For Codex, only servers defined in `config.toml` and the app connectors can be denied, and a denied server is off for the agent's whole app-server. Set `[]` to lift it. |
-| `inheritUserConfig` | Default on: the agent loads the operator's user-level settings, MCP servers, and connectors. Set it to `false` to confine an agent to the bridge's tools and its own home directory's config; a Codex agent then runs with its own Codex home holding only the login, with the app connectors off. |
+| `inheritUserConfig` | Default off: the agent gets the bridge's tools and its own home directory's config; a Codex agent runs with its own Codex home holding only the login, with the app connectors off. Set it to `true` to load the operator's user-level settings, MCP servers, and connectors into the agent. |
 
 ## How a message reaches an agent
 

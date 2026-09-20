@@ -19,7 +19,7 @@ const agentSchema = z.object({
   cwd: z.string().min(1).optional(),
   wake: z.object({ natural: z.boolean().optional(), threshold: z.number().min(0).max(1).optional() }).optional(),
   instructions: z.string().min(1).optional(),
-  inheritUserConfig: z.boolean().default(true),
+  inheritUserConfig: z.boolean().default(false),
   denyTools: z.array(z.string().min(1)).optional(),
   createdBy: z.string().min(1).optional(),
 });
