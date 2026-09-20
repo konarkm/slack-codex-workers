@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AgentHub, decideWakes, type HubConfig } from "../agents/hub.js";
 import { RuleJudge, type JudgeInput, type Verdict, type WakeJudge } from "../agents/judge.js";
 import { DEFAULT_DENY_TOOLS, type AgentRuntime, type AgentSpec, type RuntimeInput, type RuntimeOptions, type RuntimeState } from "../agents/types.js";
-import type { AgentSlackClient, SlackInbound, SlackPersona } from "../slack/agentSlack.js";
+import type { AgentSlackClient, SlackInbound, SlackPersona, SlackReaction } from "../slack/agentSlack.js";
 
 class FakeRuntime implements AgentRuntime {
   delivered: RuntimeInput[] = [];
@@ -51,9 +51,12 @@ class FakeRuntime implements AgentRuntime {
 class FakeSlack {
   handler: ((message: SlackInbound) => Promise<void>) | null = null;
   stopHandler: ((where: { channelId: string | null; threadTs: string | null }) => Promise<void>) | null = null;
+  reactionHandler: ((reaction: SlackReaction) => Promise<void>) | null = null;
   posted: Array<{ channelId: string; text: string; threadTs?: string | null; persona?: SlackPersona | null }> = [];
   statuses: Array<{ channelId: string; threadTs: string; status: string; persona?: string }> = [];
   history: Array<{ ts: string; threadTs: string | null; userId: string | null; botId: string | null; username: string | null; text: string; replyCount: number; fileNames: string[] }> = [];
+  titles: Array<{ channelId: string; threadTs: string; title: string }> = [];
+  searches: Array<{ query: string; actionToken: string }> = [];
   conversationLookups = 0;
   identity() {
     return { teamId: "T1", teamName: "Test", botUserId: "UAPP", botId: "BAPP", appId: null };
@@ -61,8 +64,25 @@ class FakeSlack {
   onMessage(handler: (message: SlackInbound) => Promise<void>) {
     this.handler = handler;
   }
+  onReaction(handler: (reaction: SlackReaction) => Promise<void>) {
+    this.reactionHandler = handler;
+  }
   onStopRequested(handler: (where: { channelId: string | null; threadTs: string | null }) => Promise<void>) {
     this.stopHandler = handler;
+  }
+  async lookupMessage(_channelId: string, ts: string) {
+    // What the agents posted through this fake is what a reaction can land on.
+    const index = this.posted.findIndex((_post, i) => `17267000${String(90 + i + 1).padStart(2, "0")}.000900` === ts);
+    const post = this.posted[index];
+    if (!post) return null;
+    return { ts, threadTs: post.threadTs ?? null, userId: null, botId: "BAPP", username: post.persona?.username ?? null, text: post.text, replyCount: 0, fileNames: [] };
+  }
+  async renameSession(channelId: string, threadTs: string, title: string) {
+    this.titles.push({ channelId, threadTs, title });
+  }
+  async searchContext(args: { query: string; actionToken: string }) {
+    this.searches.push(args);
+    return [{ kind: "message" as const, title: "#general", text: "the deploy key lives in 1password", permalink: null, channelId: "C1", ts: "1726600000.000100", authorId: "UHUMAN", authorName: "Konark" }];
   }
   async identify() {
     return this.identity();
@@ -370,6 +390,49 @@ describe("AgentHub", () => {
     judge.next = { for: ["ada"] };
     await slack.handler!(inbound({ channelId: "D2", channelType: "im", ts: "1726700004.000100", userId: "USOMEONE", text: ".status" }));
     expect(delivered("ada")).toHaveLength(1);
+  });
+
+  it("hears a reaction on an agent's own message: an acknowledgement as context, a question as a wake", async () => {
+    await startHub(TEAM);
+    judge.next = { for: ["ada"] };
+    await slack.handler!(inbound({ text: "ada is the deploy done" }));
+    await runtimes.get("ada")!.tool("send_message").handler({ channel: "C1", text: "yes, deployed at noon", thread_ts: "1726700000.000100" } as never);
+    await runtimes.get("ada")!.finishTurn();
+    const posted = "1726700091.000900";
+    // A thumbs-up: for ada, but only an acknowledgement.
+    judge.next = { for: ["ada"], bareAck: 0.9 };
+    await slack.reactionHandler!({ channelId: "C1", itemTs: posted, emoji: "+1", userId: "UHUMAN", eventTs: "1726700010.000100" });
+    expect(delivered("ada")).toHaveLength(1);
+    // An x: something is wrong; ada should look.
+    judge.next = { for: ["ada"], bareAck: 0.05 };
+    await slack.reactionHandler!({ channelId: "C1", itemTs: posted, emoji: "x", userId: "UHUMAN", eventTs: "1726700011.000100" });
+    expect(delivered("ada")).toHaveLength(2);
+    const text = delivered("ada")[1]!.text;
+    expect(text).toContain('<slack-reaction wake="none"');
+    expect(text).toContain("Reaction: :+1:");
+    expect(text).toContain('<slack-reaction wake="addressed"');
+    expect(text).toContain("Reaction: :x:");
+    expect(text).toContain("On your message (ts 1726700091.000900): yes, deployed at noon");
+    expect(text).toContain("Reply target: channel=C1 thread_ts=1726700000.000100");
+    // The same reaction, delivered twice by Slack, is heard once; a reaction on nobody's message is ignored.
+    await slack.reactionHandler!({ channelId: "C1", itemTs: posted, emoji: "x", userId: "UHUMAN", eventTs: "1726700011.000100" });
+    await slack.reactionHandler!({ channelId: "C1", itemTs: "1726700000.000100", emoji: "x", userId: "UHUMAN", eventTs: "1726700012.000100" });
+    expect(delivered("ada")).toHaveLength(2);
+  });
+
+  it("lets an agent title a thread, and search as the person who last addressed the app", async () => {
+    await startHub(TEAM);
+    judge.next = { for: ["ada"] };
+    await slack.handler!(inbound({ channelId: "D1", channelType: "im", text: "ada where is the deploy key" }));
+    const ada = runtimes.get("ada")!;
+    await ada.tool("name_thread").handler({ channel: "D1", thread_ts: "1726700000.000100", title: "Deploy key" } as never);
+    expect(slack.titles).toEqual([{ channelId: "D1", threadTs: "1726700000.000100", title: "Deploy key" }]);
+    // No token yet: Slack only attaches one to @-mentions and DMs the app saw as such.
+    expect(await ada.tool("search_workspace").handler({ query: "deploy key" } as never)).toContain("no search token");
+    await slack.handler!(inbound({ channelId: "D1", channelType: "im", ts: "1726700001.000100", text: "<@UAPP> where is the deploy key", actionToken: "tok-1" }));
+    const result = await ada.tool("search_workspace").handler({ query: "deploy key" } as never);
+    expect(slack.searches).toEqual([{ query: "deploy key", actionToken: "tok-1", channelId: null, includeFiles: false, limit: 10 }]);
+    expect(result).toContain("Konark: the deploy key lives in 1password");
   });
 
   it("tells the operators, as the bridge, when it gives up on someone's message", async () => {

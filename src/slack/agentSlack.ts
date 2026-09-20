@@ -41,6 +41,29 @@ export interface SlackInbound {
   editedAt: string | null;
   // Set when one of this bridge's own agents wrote the message (the bridge relays it to the others itself).
   agentAuthor?: string | null;
+  // Slack attaches this when the app is @-mentioned or DMed. It lets a bot-token search run as that person.
+  actionToken?: string | null;
+}
+
+// Someone reacted to a message. Only reactions on messages the app posted are handed on.
+export interface SlackReaction {
+  channelId: string;
+  // The message reacted to.
+  itemTs: string;
+  emoji: string;
+  userId: string;
+  eventTs: string;
+}
+
+export interface SlackSearchHit {
+  kind: "message" | "file" | "channel" | "user";
+  title: string;
+  text: string;
+  permalink: string | null;
+  channelId: string | null;
+  ts: string | null;
+  authorId: string | null;
+  authorName: string | null;
 }
 
 export interface SlackIdentity {
@@ -90,6 +113,7 @@ interface RawMessageEvent {
   username?: string;
   text?: string;
   team?: string;
+  action_token?: string;
   files?: Array<{ id?: string; name?: string; mimetype?: string; url_private_download?: string }>;
   attachments?: Array<{ fallback?: string; text?: string; pretext?: string; title?: string; author_name?: string; from_url?: string }>;
   blocks?: unknown[];
@@ -155,6 +179,15 @@ export class AgentSlackClient {
     this.app.event("message", async ({ event }) => handle(event as RawMessageEvent));
     // Fires even where the app is not yet a member (the mention that invites it). Members get the same message twice; the inbox dedupes by source key.
     this.app.event("app_mention", async ({ event }) => handle(event as RawMessageEvent));
+  }
+
+  // A reaction on a message. Reactions by the app itself, and on anything but messages, are not passed on.
+  onReaction(handler: (reaction: SlackReaction) => Promise<void>): void {
+    this.app.event("reaction_added", async ({ event }) => {
+      if (event.item.type !== "message" || !event.item.channel || !event.item.ts) return;
+      if (event.user === this.identity().botUserId) return;
+      await handler({ channelId: event.item.channel, itemTs: event.item.ts, emoji: event.reaction, userId: event.user, eventTs: event.event_ts });
+    });
   }
 
   // Slack's stop button on a working indicator. The event names the thread, which tells the bridge which agent to stop.
@@ -223,6 +256,24 @@ export class AgentSlackClient {
       files,
       unavailableFiles,
       editedAt,
+      actionToken: raw.action_token ?? event.action_token ?? null,
+    };
+  }
+
+  // One message by its coordinates, whether it is a top-level message or a reply. Null when Slack has no such message.
+  async lookupMessage(channelId: string, ts: string): Promise<SlackHistoryMessage | null> {
+    const response = await this.app.client.conversations.replies({ token: this.botToken, channel: channelId, ts, limit: 1, inclusive: true });
+    const found = ((response.messages ?? []) as RawMessageEvent[]).find((message) => message.ts === ts);
+    if (!found) return null;
+    return {
+      ts,
+      threadTs: found.thread_ts ?? null,
+      userId: found.bot_id ? null : (found.user ?? null),
+      botId: found.bot_id ?? null,
+      username: found.username ?? null,
+      text: found.text ?? "",
+      replyCount: 0,
+      fileNames: (found.files ?? []).map((file) => file.name ?? file.id ?? "file"),
     };
   }
 
@@ -389,6 +440,37 @@ export class AgentSlackClient {
     } catch {
       // The app may not be declared as an agent; presence is optional.
     }
+  }
+
+  // Titles a thread. In the app's DM, a titled thread shows as a named session in the person's sidebar.
+  async renameSession(channelId: string, threadTs: string, title: string): Promise<void> {
+    await this.app.client.apiCall("agents.sessions.rename", { token: this.botToken, channel_id: channelId, thread_ts: threadTs, title });
+  }
+
+  // Searches the workspace as the person whose message carried the action token, so it sees only what they can see.
+  async searchContext(args: { query: string; actionToken: string; channelId?: string | null; includeFiles: boolean; limit: number }): Promise<SlackSearchHit[]> {
+    const response = (await this.app.client.apiCall("assistant.search.context", {
+      token: this.botToken,
+      query: args.query,
+      action_token: args.actionToken,
+      channel_types: "public_channel,private_channel,mpim,im",
+      content_types: args.includeFiles ? "messages,files" : "messages",
+      context_channel_id: args.channelId ?? undefined,
+      limit: args.limit,
+    })) as {
+      results?: {
+        messages?: Array<{ channel_id?: string; message_ts?: string; author_user_id?: string; author_name?: string; content?: string; permalink?: string; channel_name?: string }>;
+        files?: Array<{ title?: string; name?: string; permalink?: string; channel_id?: string; author_user_id?: string; author_name?: string; content?: string }>;
+      };
+    };
+    const hits: SlackSearchHit[] = [];
+    for (const item of response.results?.messages ?? []) {
+      hits.push({ kind: "message", title: item.channel_name ? `#${item.channel_name}` : (item.channel_id ?? "message"), text: item.content ?? "", permalink: item.permalink ?? null, channelId: item.channel_id ?? null, ts: item.message_ts ?? null, authorId: item.author_user_id ?? null, authorName: item.author_name ?? null });
+    }
+    for (const item of response.results?.files ?? []) {
+      hits.push({ kind: "file", title: item.title ?? item.name ?? "file", text: item.content ?? "", permalink: item.permalink ?? null, channelId: item.channel_id ?? null, ts: null, authorId: item.author_user_id ?? null, authorName: item.author_name ?? null });
+    }
+    return hits;
   }
 
   botTokenForDownloads(): string {

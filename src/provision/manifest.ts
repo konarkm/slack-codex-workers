@@ -25,10 +25,14 @@ const BOT_SCOPES = [
   "mpim:write",
   "reactions:read",
   "reactions:write",
+  // Lets agents search the workspace (assistant.search.context) with the bot token.
+  "search:read.files",
+  "search:read.public",
+  "search:read.users",
   "users:read",
 ];
 
-const BOT_EVENTS = ["app_mention", "message.channels", "message.groups", "message.im", "message.mpim", "member_joined_channel"];
+const BOT_EVENTS = ["app_mention", "message.channels", "message.groups", "message.im", "message.mpim", "member_joined_channel", "reaction_added"];
 
 // One Slack app for the whole team of agents. Slack gives an app a single bot user, so the agents are personas of it:
 // each posts under its own name and icon, and the bridge works out who a message is for.

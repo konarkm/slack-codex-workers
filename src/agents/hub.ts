@@ -4,11 +4,11 @@ import { z } from "zod";
 import { logError, logInfo, logWarn } from "../logger.js";
 import { ClaudeRuntime } from "../runtimes/claudeRuntime.js";
 import { CodexRuntime } from "../runtimes/codexRuntime.js";
-import { AgentSlackClient, type SlackHistoryMessage, type SlackInbound, type SlackPersona } from "../slack/agentSlack.js";
+import { AgentSlackClient, type SlackHistoryMessage, type SlackInbound, type SlackPersona, type SlackReaction } from "../slack/agentSlack.js";
 import { prepareSlackAttachments, type AttachmentConfig } from "../slack/attachments.js";
 import { WebhookIngressServer, type WebhookServerConfig } from "../webhooks/server.js";
 import { AgentStore } from "./agentStore.js";
-import { buildThreadContext, mentionsUser, renderEnvelope, renderSlackText, sourceKey, type EnvelopeAuthor, type ThreadContext, type WakeDecision } from "./envelope.js";
+import { buildThreadContext, mentionsUser, renderEnvelope, renderReactionEnvelope, renderSlackText, sourceKey, type EnvelopeAuthor, type ThreadContext, type WakeDecision } from "./envelope.js";
 import { buildInstructions } from "./instructions.js";
 import { RuleJudge, type JudgeInput, type JudgeMessage, type Verdict, type WakeJudge } from "./judge.js";
 import { AgentMind, type RuntimeFactory } from "./mind.js";
@@ -55,6 +55,10 @@ const BARE_ACK_THRESHOLD = 0.7;
 const RECENT_MESSAGES = 8;
 
 const OPERATOR_COMMANDS = new Set([".status", ".stop", ".compact", ".reset"]);
+// Reactions that only acknowledge. With the judgment model away, these do not wake the agent; anything else does.
+const ACK_REACTIONS = new Set(["+1", "thumbsup", "white_check_mark", "heavy_check_mark", "ballot_box_with_check", "ok_hand", "ok", "heart", "tada", "pray", "raised_hands", "clap", "100", "fire", "rocket"]);
+// The most recent search token Slack handed the app is kept under this key.
+const ANY_CONVERSATION = "*";
 
 export function personaOf(spec: AgentSpec): SlackPersona {
   return { username: spec.name, icon: spec.icon };
@@ -91,6 +95,8 @@ export class AgentHub {
   private readonly seats = new Map<string, Seat>();
   private readonly agentWakeCounts = new Map<string, { count: number; lastAt: number }>();
   private readonly recent = new Map<string, JudgeMessage[]>();
+  // Search tokens Slack attaches to @-mentions and DMs, by conversation. Slack does not say how long they last.
+  private readonly actionTokens = new Map<string, { token: string; at: number }>();
   private readonly scheduler: WakeScheduler;
   private readonly webhookWakes: WebhookWakes | null;
   private readonly ruleJudge = new RuleJudge();
@@ -143,6 +149,10 @@ export class AgentHub {
       // Operator commands skip the line: a stop must not wait behind a large download.
       if (await this.handleOperatorCommand(message)) return;
       this.intake = this.intake.then(() => this.handleInbound(message));
+      return this.intake;
+    });
+    slack.onReaction(async (reaction) => {
+      this.intake = this.intake.then(() => this.handleReaction(reaction));
       return this.intake;
     });
     slack.onStopRequested(async (where) => {
@@ -218,6 +228,7 @@ export class AgentHub {
         },
         timezone: this.config.timezone,
         canUploadLocalFiles: spec.host.kind === "local",
+        actionTokenFor: (channelId) => (channelId ? this.actionTokens.get(channelId) : undefined)?.token ?? this.actionTokens.get(ANY_CONVERSATION)?.token ?? null,
       }),
     ];
     const ownInstructions = spec.instructionsPath && fs.existsSync(spec.instructionsPath) ? fs.readFileSync(spec.instructionsPath, "utf8") : null;
@@ -321,6 +332,11 @@ export class AgentHub {
   async handleInbound(message: SlackInbound): Promise<void> {
     const slack = this.requireSlack();
     try {
+      if (message.actionToken) {
+        const entry = { token: message.actionToken, at: Date.now() };
+        this.actionTokens.set(message.channelId, entry);
+        this.actionTokens.set(ANY_CONVERSATION, entry);
+      }
       const key = sourceKey(message);
       const listeners = [...this.seats.values()].filter((seat) => seat.spec.name !== message.agentAuthor && !this.store.hasSource(seat.spec.name, key));
       if (listeners.length === 0) return;
@@ -446,6 +462,68 @@ export class AgentHub {
       }
     } catch (error) {
       logError("inbound handling failed", { channelId: message.channelId, ts: message.ts, error: errorMessage(error) });
+    }
+  }
+
+  // A reaction on an agent's own message reaches that agent. A plain acknowledgement is delivered as context; anything that
+  // asks something of the agent wakes it. The judgment model decides which; without it, a short list of acknowledgement emoji does.
+  async handleReaction(reaction: SlackReaction): Promise<void> {
+    const slack = this.requireSlack();
+    try {
+      const target = await slack.lookupMessage(reaction.channelId, reaction.itemTs);
+      if (!target || target.botId !== slack.identity().botId || !target.username) return;
+      const seat = this.seats.get(target.username);
+      if (!seat) return;
+      const key = `slack:${reaction.channelId}:${reaction.itemTs}:reaction:${reaction.emoji}:${reaction.userId}:${reaction.eventTs}`;
+      if (this.store.hasSource(seat.spec.name, key)) return;
+
+      const person = await slack.getPerson(reaction.userId);
+      const author: EnvelopeAuthor = { id: person.id, name: person.name, kind: person.isBot ? "app" : "human" };
+      const conversation = await slack.getConversation(reaction.channelId).catch(() => null);
+      const channelType = conversation?.type ?? (reaction.channelId.startsWith("D") ? "im" : "channel");
+      const threadRoot = target.threadTs ?? reaction.itemTs;
+      const conversationKey = `${reaction.channelId}:${target.threadTs ?? "top"}`;
+      const excerpt = renderSlackText(target.text, slack.identity().botUserId, new Map()).replace(/[\r\n]+/g, " ").slice(0, 200);
+      const judgeMessage: JudgeMessage = { from: `${author.name} (${author.kind})`, text: `(reacted :${reaction.emoji}: to ${seat.spec.name}'s message "${excerpt}")` };
+
+      let wake: boolean;
+      if (seat.spec.wake.natural) {
+        const verdict = await this.judge.judge({
+          conversation: {
+            kind: channelType === "im" ? "direct message with the agents" : channelType === "mpim" ? "group DM" : channelType === "group" ? "private channel" : "channel",
+            name: conversation?.name ?? null,
+            inThread: Boolean(target.threadTs),
+          },
+          agents: [{ name: seat.spec.name, role: seat.spec.title, inThisConversation: true, working: seat.mind.state() === "running" }],
+          recent: [...(this.recent.get(conversationKey) ?? [])],
+          message: judgeMessage,
+          authorKind: author.kind,
+        });
+        wake = verdict.source === "jev" ? (verdict.needs.get(seat.spec.name) ?? 0) >= seat.spec.wake.threshold && verdict.bareAck < BARE_ACK_THRESHOLD : !ACK_REACTIONS.has(reaction.emoji);
+      } else {
+        wake = !ACK_REACTIONS.has(reaction.emoji);
+      }
+      this.remember(conversationKey, judgeMessage);
+
+      const text = renderReactionEnvelope({
+        reaction,
+        channelType,
+        channelName: conversation?.name ?? null,
+        author,
+        wake,
+        target: { threadTs: target.threadTs, text: target.text },
+        appUserId: slack.identity().botUserId,
+        timezone: this.config.timezone,
+      });
+      if (wake) {
+        seat.statusThreads.set(`${reaction.channelId}:${threadRoot}`, { channelId: reaction.channelId, threadTs: threadRoot });
+        void slack.setThreadStatus(reaction.channelId, threadRoot, "processing", personaOf(seat.spec));
+      }
+      await seat.mind
+        .receive({ sourceKey: key, wake, priority: wake ? "next" : "later", text, imagePaths: [] })
+        .catch((error) => logWarn("input queued; the agent could not take it yet", { agent: seat.spec.name, error: errorMessage(error) }));
+    } catch (error) {
+      logError("reaction handling failed", { channelId: reaction.channelId, ts: reaction.itemTs, error: errorMessage(error) });
     }
   }
 

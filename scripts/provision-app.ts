@@ -1,5 +1,6 @@
 // Creates the one Slack app the whole team of agents speaks through. Done once per workspace; adding agents needs no Slack setup.
 // Usage: tsx scripts/provision-app.ts [--name "Agents"] [--no-agent-view] [--dry-run]
+//        tsx scripts/provision-app.ts --update <app id>   # pushes the current manifest to an existing app
 // Needs an app configuration token for the target workspace (api.slack.com/apps → "Your App Configuration Tokens"):
 //   SLACK_CONFIG_TOKEN, and optionally SLACK_CONFIG_REFRESH_TOKEN so the 12-hour token can be rotated.
 import fs from "node:fs";
@@ -38,6 +39,19 @@ if (refreshToken) {
   token = rotated.token;
 }
 if (!token) throw new Error("Set SLACK_CONFIG_TOKEN (and SLACK_CONFIG_REFRESH_TOKEN) first.");
+
+const updateIndex = args.indexOf("--update");
+if (updateIndex >= 0) {
+  const appId = args[updateIndex + 1];
+  if (!appId) throw new Error("--update needs the app id");
+  const updated = (await web.apiCall("apps.manifest.update", { token, app_id: appId, manifest: JSON.stringify(manifest) })) as { permissions_updated?: boolean };
+  console.log(
+    updated.permissions_updated
+      ? `Updated ${appId}. Its scopes changed, so it must be reinstalled once: https://api.slack.com/apps/${appId}/install-on-team (the bot token stays the same).`
+      : `Updated ${appId}. No new scopes; a restart of the bridge picks up the change.`,
+  );
+  process.exit(0);
+}
 
 const created = (await web.apiCall("apps.manifest.create", { token, manifest: JSON.stringify(manifest) })) as {
   app_id?: string;

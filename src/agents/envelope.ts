@@ -1,4 +1,4 @@
-import type { SlackChannelType, SlackHistoryMessage, SlackInbound } from "../slack/agentSlack.js";
+import type { SlackChannelType, SlackHistoryMessage, SlackInbound, SlackReaction } from "../slack/agentSlack.js";
 import type { WakePolicy } from "./types.js";
 
 export type WakeReason = "addressed" | "default" | "none";
@@ -141,6 +141,35 @@ export function renderEnvelope(input: EnvelopeInput): string {
     ].join("\n"),
   );
   return sections.join("\n\n");
+}
+
+export interface ReactionEnvelopeInput {
+  reaction: SlackReaction;
+  channelType: SlackChannelType;
+  channelName: string | null;
+  author: EnvelopeAuthor;
+  wake: boolean;
+  // The agent's own message that was reacted to.
+  target: { threadTs: string | null; text: string };
+  appUserId: string;
+  timezone: string;
+}
+
+// A reaction on one of the agent's own messages. Short: the emoji, who, and what it was on.
+export function renderReactionEnvelope(input: ReactionEnvelopeInput): string {
+  const { reaction, author } = input;
+  const threadTs = input.target.threadTs ?? (input.channelType === "im" ? null : reaction.itemTs);
+  const excerpt = renderSlackText(input.target.text, input.appUserId, new Map()).replace(/[\r\n]+/g, " ⏎ ");
+  return [
+    `<slack-reaction wake="${input.wake ? "addressed" : "none"}">`,
+    `From: ${sanitizeHeader(author.name)} (${author.id}, ${author.kind})`,
+    `Where: ${describeWhere(input.channelType, input.channelName, reaction.channelId, input.target.threadTs)}`,
+    `Time: ${formatTime(reaction.eventTs, input.timezone)}`,
+    `Reaction: :${sanitizeHeader(reaction.emoji)}:`,
+    `On your message (ts ${reaction.itemTs}): ${excerpt.length > 300 ? `${excerpt.slice(0, 300)}…` : excerpt || "(no text)"}`,
+    `Reply target: channel=${reaction.channelId}${threadTs ? ` thread_ts=${threadTs}` : ""}`,
+    "</slack-reaction>",
+  ].join("\n");
 }
 
 export function buildThreadContext(

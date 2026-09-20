@@ -17,6 +17,8 @@ export interface SlackToolContext {
   timezone: string;
   // False when the agent's files live on another machine than the bridge.
   canUploadLocalFiles: boolean;
+  // The freshest search token Slack has given the app, preferring one from the given conversation. Null when there is none.
+  actionTokenFor(channelId: string | null): string | null;
 }
 
 function defineTool<Shape extends z.ZodRawShape>(tool: AgentTool<Shape>): AgentTool {
@@ -91,6 +93,48 @@ export function buildSlackTools(ctx: SlackToolContext): AgentTool[] {
       handler: async () => {
         ctx.noteVisibleAction();
         return "dismissed";
+      },
+    }),
+    defineTool({
+      name: "name_thread",
+      description:
+        "Give a thread a title. In the app's direct message with a person, titled threads appear in their sidebar as named sessions, so title the thread when you start a piece of work there. Works in channels too.",
+      shape: { channel, thread_ts: messageTs.describe("The thread's root ts."), title: z.string().min(1).max(200) },
+      handler: async (args) => {
+        await slack.renameSession(args.channel, args.thread_ts, args.title);
+        return "titled";
+      },
+    }),
+    defineTool({
+      name: "search_workspace",
+      description:
+        "Search the workspace's messages and files, as the person who last addressed the app, seeing only what they can see. Slack allows this for a while after someone @-mentions the app or DMs it; when no such token is at hand, the result says so and you should ask the person to @-mention the app in their next message.",
+      shape: {
+        query: z.string().min(1).describe("What to look for, in plain words or keywords."),
+        channel: z.string().optional().describe("Limit the search to this conversation."),
+        include_files: z.boolean().optional().describe("Also search files. Default false."),
+        limit: z.number().int().min(1).max(20).optional().describe("Results to return, at most 20."),
+      },
+      handler: async (args) => {
+        const actionToken = ctx.actionTokenFor(args.channel ?? null);
+        if (!actionToken) return "no search token: Slack grants one only when someone @-mentions the app or DMs it. Ask the person to @-mention the app in their next message, then search again.";
+        let hits;
+        try {
+          hits = await slack.searchContext({ query: args.query, actionToken, channelId: args.channel ?? null, includeFiles: Boolean(args.include_files), limit: args.limit ?? 10 });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (message.includes("invalid_action_token") || message.includes("action_token")) return "the search token has expired. Ask the person to @-mention the app in their next message, then search again.";
+          throw error;
+        }
+        if (hits.length === 0) return "no results";
+        const own = slack.identity();
+        const lines: string[] = [];
+        for (const hit of hits) {
+          const author = sanitizeHeader(hit.authorName ?? (hit.authorId ? (await slack.getPerson(hit.authorId)).name : "unknown"));
+          const where = [hit.kind, sanitizeHeader(hit.title), hit.channelId ? `channel=${hit.channelId}` : null, hit.ts ? `ts=${hit.ts}` : null].filter(Boolean).join(" ");
+          lines.push(`[${where}] ${author}: ${renderSlackText(hit.text, own.botUserId, new Map()).replace(/[\r\n]+/g, " ⏎ ").slice(0, 600)}${hit.permalink ? ` (${hit.permalink})` : ""}`);
+        }
+        return lines.join("\n");
       },
     }),
     defineTool({

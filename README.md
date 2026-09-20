@@ -32,7 +32,7 @@ A Slack app has exactly one bot user, and Slack offers no way to install an app 
 
 What this gives up: agents have no `@` handle, no separate DM row, and no Slack profile. The app's DM is shared by all agents, and a private channel works as a one-to-one room with any of them.
 
-`npm run provision` creates the app from a manifest using an app configuration token (`SLACK_CONFIG_TOKEN`, plus `SLACK_CONFIG_REFRESH_TOKEN` so the 12-hour token can be rotated), then prints the two links Slack has no API for: install the app, and generate its app-level token. Invite the app to the channels the agents should hear.
+`npm run provision` creates the app from a manifest using an app configuration token (`SLACK_CONFIG_TOKEN`, plus `SLACK_CONFIG_REFRESH_TOKEN` so the 12-hour token can be rotated), then prints the two links Slack has no API for: install the app, and generate its app-level token. Invite the app to the channels the agents should hear. `npm run provision -- --update <app id>` pushes a changed manifest to the existing app; when scopes were added it prints the reinstall link (the bot token stays the same).
 
 ## Registry
 
@@ -82,6 +82,7 @@ ada, ask cody which model he runs on
 - A wake in a thread the agent has not seen brings the most recent earlier messages in a `<thread-context>` section, with `included`, `total`, and `truncated` attributes, naming which agent said what.
 - A message that arrives mid-turn is delivered into the running turn with a note to keep working and take it into account.
 - An edited message is delivered as its own input. Shared and forwarded messages and app posts arrive with their words included. Files Slack gives no download link for are named.
+- A reaction on an agent's message reaches that agent as a `<slack-reaction>` section naming the emoji and the message. The judgment decides whether it is a plain acknowledgement (delivered as context) or asks something of the agent (a wake).
 - Slack events are handled one at a time, in the order Slack sent them. Slack sends some messages twice; agents get them once.
 
 Input counts as delivered only when the turn that took it ends. If the harness dies, a turn fails, or the saved session cannot be resumed (the bridge then starts a new one), the input goes back in the queue and is delivered again with a note saying so; an agent can see a message twice but does not miss one. Failures that are not the input's fault (a usage limit, an expired login, an outage) are retried for as long as it takes, with waits growing from 5 seconds to 5 minutes, and the operators get a DM from the bridge after three in a row. Only an input that itself makes three turns fail (an image the API rejects, a prompt that is too long) is given up on, and the operators are told which.
@@ -90,7 +91,9 @@ Input counts as delivered only when the turn that took it ends. If the harness d
 
 Only through tools: `send_message`, `react`, `upload_files`, `edit_message`, `delete_message`. The bridge never posts on an agent's behalf, and turn output is not shown to anyone. `dismiss(reason)` records a deliberate non-reply, including "this was not for me" when the judgment was wrong. If a woken turn ends with no visible action and no dismissal, the bridge tells the agent once.
 
-Other tools: `list_agents`, `create_agent`, `read_history`, `list_channels`, `list_people`, `join_channel`, `open_dm`, `get_message_link`, `get_current_time`, and `schedule_wake` / `list_wakes` / `cancel_wake` for interval and cron wakes the agent sets for itself.
+Other tools: `list_agents`, `create_agent`, `read_history`, `list_channels`, `list_people`, `join_channel`, `open_dm`, `get_message_link`, `get_current_time`, `name_thread` (titles a thread; in the app's DM, titled threads show as named sessions in the person's sidebar), and `schedule_wake` / `list_wakes` / `cancel_wake` for interval and cron wakes the agent sets for itself.
+
+`search_workspace` searches messages and files as the person who last addressed the app, seeing only what they can see. Slack hands the app a search token only when someone @-mentions it or DMs it, and does not say how long the token lasts; without one the tool says so, and the agent asks the person to @-mention the app.
 
 Inbound webhooks: `create_webhook_source` makes a secret URL and a handler file that turns an outside system's requests into named events; `subscribe_webhook` wakes the agent on matching events with its own note. Payloads are written to disk and the wake carries the path. The listener binds `127.0.0.1:3014` by default (`WEBHOOK_PORT`, `WEBHOOK_BIND_HOST`, `WEBHOOK_PUBLIC_BASE_URL`; `WEBHOOK_PORT=off` disables it). Handler files run as trusted code in the bridge and should verify the sender's signature. Only the agent that created a source can rotate or disable it, and only agents running on the bridge machine get the webhook tools, since handlers and payloads live on its disk.
 
