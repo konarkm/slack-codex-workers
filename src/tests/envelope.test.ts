@@ -81,20 +81,24 @@ describe("renderEnvelope", () => {
     expect(text.trimEnd().endsWith("</slack-message>")).toBe(true);
   });
 
-  it("marks context-only messages and spent agent budgets", () => {
-    const context = renderEnvelope({ ...base, message: message(), decision: background });
-    expect(context).toContain('<slack-message wake="none">');
-    const spent = renderEnvelope({ ...base, message: message(), decision: { ...background, budgetExhausted: true } });
-    expect(spent).toContain("did not wake you");
+  it("marks a message that did not wake the agent", () => {
+    expect(renderEnvelope({ ...base, message: message(), decision: background })).toContain('<slack-message wake="none">');
   });
 
   it("puts unseen thread history before the message and says how much is missing", () => {
     const history = [1, 2, 3, 4].map((n) => ({ ts: `1726600000.00000${n}`, threadTs: "1726600000.000001", userId: "U2", botId: null, username: null, text: `m${n}`, replyCount: 0, fileNames: [] }));
-    const threadContext = buildThreadContext(history, "1726600000.000004", 2, () => "Priya (U2)", (value) => value);
-    expect(threadContext).toEqual({ total: 3, messages: [{ author: "Priya (U2)", ts: "1726600000.000002", text: "m2" }, { author: "Priya (U2)", ts: "1726600000.000003", text: "m3" }] });
+    const threadContext = buildThreadContext("thread", history, null, "1726600000.000004", 2, () => "Priya (U2)", (value) => value);
+    expect(threadContext).toEqual({ kind: "thread", total: 3, messages: [{ author: "Priya (U2)", ts: "1726600000.000002", text: "m2" }, { author: "Priya (U2)", ts: "1726600000.000003", text: "m3" }] });
     const text = renderEnvelope({ ...base, message: message({ threadTs: "1726600000.000001" }), decision: addressed, threadContext });
     expect(text).toContain('<thread-context included="2" total="3" truncated="true">');
     expect(text.indexOf("<thread-context")).toBeLessThan(text.indexOf("<slack-message"));
+  });
+
+  it("brings only what came after the agent's last-read marker, and names channel catch-up as such", () => {
+    const history = [1, 2, 3, 4].map((n) => ({ ts: `1726600000.00000${n}`, threadTs: null, userId: "U2", botId: null, username: null, text: `m${n}`, replyCount: 0, fileNames: [] }));
+    const missed = buildThreadContext("channel", history, "1726600000.000002", "1726600000.000004", 12, () => "Priya (U2)", (value) => value);
+    expect(missed.messages.map((item) => item.text)).toEqual(["m3"]);
+    expect(renderEnvelope({ ...base, message: message(), decision: addressed, threadContext: missed })).toContain('<channel-context included="1" total="1" truncated="false">');
   });
 
   it("keeps a hostile file name, display name, or channel name from forging a second section", () => {

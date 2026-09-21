@@ -118,14 +118,13 @@ class FakeSlack {
 // A judge the test scripts: whoever is named in `for` is the one the message is for.
 class ScriptedJudge implements WakeJudge {
   inputs: JudgeInput[] = [];
-  next: { for?: string[]; stop?: string[]; bareAck?: number; urgency?: Verdict["urgency"] } = {};
+  next: { for?: string[]; stop?: string[]; urgency?: Verdict["urgency"] } = {};
   async judge(input: JudgeInput): Promise<Verdict> {
     this.inputs.push(input);
     const script = this.next;
     return {
       needs: new Map(input.agents.map((agent) => [agent.name, script.for?.includes(agent.name) ? 0.95 : 0.03])),
       stop: new Map(input.agents.filter((agent) => agent.working).map((agent) => [agent.name, script.stop?.includes(agent.name) ? 0.95 : 0.01])),
-      bareAck: script.bareAck ?? 0.02,
       urgency: script.urgency ?? "next",
       source: "jev",
     };
@@ -194,20 +193,28 @@ afterEach(async () => {
 const TEAM = [{ name: "ada", runtime: "claude", title: "manager", icon: ":brain:" }, { name: "cody", runtime: "codex", title: "builder" }];
 
 describe("AgentHub", () => {
-  it("wakes the agent a plainly worded message is for, and gives the others the same message as background", async () => {
+  it("gives a message only to the agent it is said to; another agent catches up on what it missed when it is brought in", async () => {
     await startHub(TEAM);
     judge.next = { for: ["cody"] };
     await slack.handler!(inbound({ text: "can you fix the deploy script" }));
     expect(delivered("cody")).toHaveLength(1);
     expect(delivered("cody")[0]!.text).toContain('wake="addressed"');
     expect(delivered("ada")).toHaveLength(0);
-    // ada hears about it the next time something wakes her.
+    // Nothing went into ada's context. Brought in, she is handed what the channel said since she last looked.
+    const said = (ts: string, text: string) => ({ ts, threadTs: null, userId: "UHUMAN", botId: null, username: null, text, replyCount: 0, fileNames: [] });
+    slack.history = [said("1726700000.000100", "can you fix the deploy script")];
     judge.next = { for: ["ada"] };
     await slack.handler!(inbound({ ts: "1726700001.000100", text: "ada what do you make of that" }));
+    expect(delivered("ada")).toHaveLength(1);
     const text = delivered("ada")[0]!.text;
+    expect(text).toContain('<channel-context included="1" total="1" truncated="false">');
     expect(text).toContain("can you fix the deploy script");
-    expect(text).toContain('wake="none"');
     expect(text).toContain("what do you make of that");
+    // She is not handed the same catch-up twice.
+    await runtimes.get("ada")!.finishTurn();
+    slack.history.push(said("1726700001.000100", "ada what do you make of that"));
+    await slack.handler!(inbound({ ts: "1726700002.000100", text: "ada and now?" }));
+    expect(delivered("ada").at(-1)!.text).not.toContain("-context");
   });
 
   it("tells the judge who is in the room, what they do, and what was just said", async () => {
@@ -267,14 +274,14 @@ describe("AgentHub", () => {
     expect(judge.inputs.at(-1)!.agents.map((agent) => agent.name)).toEqual(["cody"]);
   });
 
-  it("wakes nobody for a bare acknowledgement between agents", async () => {
+  it("leaves it to the agent, never the judge, whether an acknowledgement needs anything", async () => {
     await startHub(TEAM);
     judge.next = { for: ["ada"] };
     await slack.handler!(inbound({ text: "ada hi" }));
-    judge.next = { for: ["cody"], bareAck: 0.95 };
+    judge.next = { for: ["cody"] };
     await runtimes.get("ada")!.tool("send_message").handler({ channel: "C1", text: "thanks cody", thread_ts: "1726700000.000100" } as never);
     await flush();
-    expect(delivered("cody")).toHaveLength(0);
+    expect(delivered("cody")).toHaveLength(1);
   });
 
   it("stops agents waking each other after the budget, until a person speaks", async () => {
@@ -288,10 +295,13 @@ describe("AgentHub", () => {
     await say(3);
     await flush();
     expect(delivered("cody")).toHaveLength(2);
-    await slack.handler!(inbound({ ts: "1726700005.000100", threadTs: "1726700000.000100", text: "cody carry on" }));
+    // Round 3 stayed in Slack. When a person brings cody back in, it arrives as something he missed.
+    slack.history = [{ ts: "1726700093.000900", threadTs: "1726700000.000100", userId: null, botId: "BAPP", username: "ada", text: "cody, round 3", replyCount: 0, fileNames: [] }];
+    await slack.handler!(inbound({ ts: "1726700099.000100", threadTs: "1726700000.000100", text: "cody carry on" }));
     const last = delivered("cody").at(-1)!.text;
+    expect(last).toContain("<thread-context");
+    expect(last).toContain("ada (agent)");
     expect(last).toContain("round 3");
-    expect(last).toContain("did not wake you");
     await say(4);
     await flush();
     expect(delivered("cody")).toHaveLength(4);
@@ -392,30 +402,28 @@ describe("AgentHub", () => {
     expect(delivered("ada")).toHaveLength(1);
   });
 
-  it("hears a reaction on an agent's own message: an acknowledgement as context, a question as a wake", async () => {
+  it("always brings a reaction on an agent's own message to that agent, once", async () => {
     await startHub(TEAM);
     judge.next = { for: ["ada"] };
     await slack.handler!(inbound({ text: "ada is the deploy done" }));
     await runtimes.get("ada")!.tool("send_message").handler({ channel: "C1", text: "yes, deployed at noon", thread_ts: "1726700000.000100" } as never);
     await runtimes.get("ada")!.finishTurn();
+    await flush();
     const posted = "1726700091.000900";
-    // A thumbs-up: for ada, but only an acknowledgement.
-    judge.next = { for: ["ada"], bareAck: 0.9 };
+    const asked = judge.inputs.length;
+    // Even a thumbs-up: what it means is for ada, who knows what she said, to decide.
     await slack.reactionHandler!({ channelId: "C1", itemTs: posted, emoji: "+1", userId: "UHUMAN", eventTs: "1726700010.000100" });
-    expect(delivered("ada")).toHaveLength(1);
-    // An x: something is wrong; ada should look.
-    judge.next = { for: ["ada"], bareAck: 0.05 };
-    await slack.reactionHandler!({ channelId: "C1", itemTs: posted, emoji: "x", userId: "UHUMAN", eventTs: "1726700011.000100" });
     expect(delivered("ada")).toHaveLength(2);
     const text = delivered("ada")[1]!.text;
-    expect(text).toContain('<slack-reaction wake="none"');
-    expect(text).toContain("Reaction: :+1:");
     expect(text).toContain('<slack-reaction wake="addressed"');
-    expect(text).toContain("Reaction: :x:");
+    expect(text).toContain("Reaction: :+1:");
     expect(text).toContain("On your message (ts 1726700091.000900): yes, deployed at noon");
     expect(text).toContain("Reply target: channel=C1 thread_ts=1726700000.000100");
-    // The same reaction, delivered twice by Slack, is heard once; a reaction on nobody's message is ignored.
-    await slack.reactionHandler!({ channelId: "C1", itemTs: posted, emoji: "x", userId: "UHUMAN", eventTs: "1726700011.000100" });
+    // Nobody is asked who a reaction is for; it is for whoever wrote the message.
+    expect(judge.inputs).toHaveLength(asked);
+    expect(delivered("cody")).toHaveLength(0);
+    // The same reaction, delivered twice by Slack, is heard once; a reaction on a person's message is ignored.
+    await slack.reactionHandler!({ channelId: "C1", itemTs: posted, emoji: "+1", userId: "UHUMAN", eventTs: "1726700010.000100" });
     await slack.reactionHandler!({ channelId: "C1", itemTs: "1726700000.000100", emoji: "x", userId: "UHUMAN", eventTs: "1726700012.000100" });
     expect(delivered("ada")).toHaveLength(2);
   });
@@ -458,7 +466,7 @@ describe("decideWakes", () => {
     name, title: null, icon: null, runtime: "claude", model: null, effort: null, host: { kind: "local" }, cwd: "/tmp",
     wake: { natural: true, threshold: 0.5, ...wake }, instructionsPath: null, inheritUserConfig: false, denyTools: DEFAULT_DENY_TOOLS,
   });
-  const verdict = (needs: Record<string, number>, source: Verdict["source"] = "jev"): Verdict => ({ needs: new Map(Object.entries(needs)), stop: new Map(), bareAck: 0, urgency: "next", source });
+  const verdict = (needs: Record<string, number>, source: Verdict["source"] = "jev"): Verdict => ({ needs: new Map(Object.entries(needs)), stop: new Map(), urgency: "next", source });
   const context = { authorKind: "human" as const, authorAgent: null, isDirectMessage: false, appMentioned: false, defaultAgent: "ada" };
 
   it("uses each agent's own threshold", () => {

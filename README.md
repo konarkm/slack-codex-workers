@@ -54,15 +54,18 @@ What this gives up: agents have no `@` handle, no separate DM row, and no Slack 
 
 ## How a message reaches an agent
 
-Every message the app can see goes into the inbox of every agent, once, keyed by its Slack coordinates. Nothing is dropped on the way in. What varies is who gets woken.
+A message goes to the agents it is said to, and to nobody else. The bridge decides who; it never decides whether a message deserves a reply. That is the agent's call, because the agent has the context. A wasted turn in which an agent reads a thank-you and does nothing is cheap; an agent that was spoken to and never woke is not.
 
-For each message the bridge makes one request to a System One model (TypeSafe's Jev), giving it the message, the last few messages in that conversation, and the agents with their roles and whether each is already part of the exchange. It asks, all at once: for each agent, should this agent be interrupted to read it; for each agent that is working, is this telling it to stop; is this only an acknowledgement; how urgent is it. A typical request takes about 130 ms and costs a few thousandths of a cent.
+For each message the bridge makes one request to a System One model (TypeSafe's Jev), giving it the message, the recent messages in that conversation, and the agents with their roles and whether each is already part of the exchange. It asks, all at once: for each agent, is this said to that agent; if it is an open ask with nobody named, which one agent's role fits best; for each agent that is working, is this telling it to stop; how urgent is it. A typical request takes about 130 ms and costs a few thousandths of a cent.
 
-- An agent is woken when the judgment for it reaches its `threshold`. Everyone else gets the message as context, delivered with whatever next wakes them.
+- An agent is woken when the judgment for it reaches its `threshold`. Names are not required: a reply in an exchange the agent is part of is said to that agent. After a restart the bridge reads the conversation's recent messages back from Slack, so the judgment sees what a person scrolling the channel would see, threads included.
+- An open ask ("can someone…") goes to the one agent whose role fits best, not to every agent that plausibly could.
+- A woken agent gets the message together with what it missed in that thread, or on that channel's main line, since it last looked (the first time, the latest messages). Agents that were not woken get nothing; like people, they catch up when something pulls them in, and `read_history` reads further back.
 - A person's DM, or a literal `@` of the app, that is for nobody in particular wakes the default agent. A person is never left with nobody listening.
 - A person telling a working agent to stop, in plain words, interrupts it. The message is still delivered, so the agent knows why.
 - If the model cannot be reached, plain rules take over for that message: the agent's name appears in it, or it continues a thread or DM the agent is part of.
-- What an agent posts reaches the other agents through the bridge, attributed to it, and is judged the same way. A bare acknowledgement between agents wakes nobody. As a backstop, after `AGENT_WAKE_BUDGET` consecutive agent-to-agent wakes in one conversation, further ones arrive as context until a person posts there or half an hour passes. People and other apps are never limited.
+- What an agent posts is judged the same way, so agents address each other by name. As a backstop against loops, after `AGENT_WAKE_BUDGET` consecutive agent-to-agent wakes in one conversation, further ones wake nobody until a person posts there or half an hour passes. People and other apps are never limited.
+- A reaction on an agent's own message always reaches that agent, as a `<slack-reaction>` section naming the emoji and the message.
 
 Messages arrive as tagged sections. The bridge writes the header fields, and sanitizes every value in them; the content is escaped so it cannot imitate one:
 
@@ -79,10 +82,9 @@ ada, ask cody which model he runs on
 ```
 
 - The reply target is computed by the bridge: under the message in channels, flat under an existing thread root, in the flow of a DM.
-- A wake in a thread the agent has not seen brings the most recent earlier messages in a `<thread-context>` section, with `included`, `total`, and `truncated` attributes, naming which agent said what.
+- What the agent missed arrives in a `<thread-context>` or `<channel-context>` section before the message, with `included`, `total`, and `truncated` attributes, naming which agent said what.
 - A message that arrives mid-turn is delivered into the running turn with a note to keep working and take it into account.
 - An edited message is delivered as its own input. Shared and forwarded messages and app posts arrive with their words included. Files Slack gives no download link for are named.
-- A reaction on an agent's message reaches that agent as a `<slack-reaction>` section naming the emoji and the message. The judgment decides whether it is a plain acknowledgement (delivered as context) or asks something of the agent (a wake).
 - Slack events are handled one at a time, in the order Slack sent them. Slack sends some messages twice; agents get them once.
 
 Input counts as delivered only when the turn that took it ends. If the harness dies, a turn fails, or the saved session cannot be resumed (the bridge then starts a new one), the input goes back in the queue and is delivered again with a note saying so; an agent can see a message twice but does not miss one. Failures that are not the input's fault (a usage limit, an expired login, an outage) are retried for as long as it takes, with waits growing from 5 seconds to 5 minutes, and the operators get a DM from the bridge after three in a row. Only an input that itself makes three turns fail (an image the API rejects, a prompt that is too long) is given up on, and the operators are told which.

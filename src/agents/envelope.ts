@@ -10,8 +10,6 @@ export interface WakeDecision {
   // How sure the judgment was that the message is for this agent.
   probability: number | null;
   source: "jev" | "rules";
-  // Set when the message would have woken the agent but the agent-to-agent budget for this conversation is spent.
-  budgetExhausted?: boolean;
 }
 
 export interface EnvelopeAuthor {
@@ -20,8 +18,10 @@ export interface EnvelopeAuthor {
   kind: "human" | "agent" | "app";
 }
 
+// What the agent missed in the conversation it is being woken in: the thread, or the channel's main line.
 export interface ThreadContext {
-  // Earlier messages in the thread, oldest first.
+  kind: "thread" | "channel";
+  // Earlier messages the agent has not been given, oldest first.
   messages: Array<{ author: string; ts: string; text: string }>;
   total: number;
 }
@@ -105,11 +105,8 @@ function clip(text: string): string {
 function renderThreadContext(context: ThreadContext): string {
   const included = context.messages.length;
   const lines = context.messages.map((item, index) => `[${index + 1}] ${sanitizeHeader(item.author)} (ts ${item.ts}): ${item.text.replace(/[\r\n]+/g, " ⏎ ")}`);
-  return [
-    `<thread-context included="${included}" total="${context.total}" truncated="${included < context.total}">`,
-    ...lines,
-    "</thread-context>",
-  ].join("\n");
+  const tag = `${context.kind}-context`;
+  return [`<${tag} included="${included}" total="${context.total}" truncated="${included < context.total}">`, ...lines, `</${tag}>`].join("\n");
 }
 
 export function renderEnvelope(input: EnvelopeInput): string {
@@ -124,9 +121,6 @@ export function renderEnvelope(input: EnvelopeInput): string {
     `Reply target: channel=${target.channel}${target.threadTs ? ` thread_ts=${target.threadTs}` : ""}`,
   ];
   if (decision.wake && decision.reason === "default") fields.push("Note: this was not clearly for any one agent; you are the one who picks those up.");
-  if (decision.budgetExhausted) {
-    fields.push("Note: this did not wake you. Agents have been waking each other here without a person; a person's message, or half an hour of quiet, resets that.");
-  }
   const attachments = [...input.fileNotes.map(sanitizeHeader), ...(input.imageCount > 0 ? [`${input.imageCount} image${input.imageCount === 1 ? "" : "s"} attached to this input`] : [])];
   if (attachments.length > 0) fields.push(`Files: ${attachments.join("; ")}`);
   const sections: string[] = [];
@@ -173,14 +167,18 @@ export function renderReactionEnvelope(input: ReactionEnvelopeInput): string {
 }
 
 export function buildThreadContext(
+  kind: ThreadContext["kind"],
   history: SlackHistoryMessage[],
+  // Only messages after this point (the agent's last-read marker) and before the trigger are missed ones.
+  afterTs: string | null,
   triggerTs: string,
   limit: number,
   describeAuthor: (message: SlackHistoryMessage) => string,
   renderText: (text: string) => string,
 ): ThreadContext {
-  const earlier = history.filter((item) => item.ts < triggerTs);
+  const earlier = history.filter((item) => item.ts < triggerTs && (!afterTs || item.ts > afterTs));
   return {
+    kind,
     total: earlier.length,
     messages: earlier.slice(-limit).map((item) => ({ author: describeAuthor(item), ts: item.ts, text: renderText(item.text) })),
   };

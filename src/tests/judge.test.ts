@@ -21,20 +21,29 @@ function fakeFetch(respond: (body: any) => { status?: number; json?: unknown } |
 }
 
 describe("JevJudge", () => {
-  it("asks one request per message: a question per agent, a stop question only for working agents, plus acknowledgement and urgency", async () => {
+  it("asks one request per message: a question per agent, a stop question only for working agents, who takes an open ask, and urgency", async () => {
     const { impl, calls } = fakeFetch(() => ({
-      json: { answers: { needs_0: { type: "noul", noul: 0.04 }, needs_1: { type: "noul", noul: 0.96 }, stop_1: { type: "noul", noul: 0.01 }, bare_ack: { type: "noul", noul: 0.02 }, urgency: { type: "choice", choice: "now" } } },
+      json: { answers: { needs_0: { type: "noul", noul: 0.04 }, needs_1: { type: "noul", noul: 0.96 }, stop_1: { type: "noul", noul: 0.01 }, open_ask: { type: "choice", choice: "nobody", probabilities: { nobody: 0.9 } }, urgency: { type: "choice", choice: "now" } } },
     }));
     const verdict = await new JevJudge({ apiKey: "k", fetchImpl: impl }).judge(input);
     expect(calls).toHaveLength(1);
     expect(calls[0]!.url).toBe("https://api.typesafe.ai/v1/systemone");
     expect(calls[0]!.headers.Authorization).toBe("Bearer k");
-    expect(Object.keys(calls[0]!.body.questions).sort()).toEqual(["bare_ack", "needs_0", "needs_1", "stop_1", "urgency"]);
+    expect(Object.keys(calls[0]!.body.questions).sort()).toEqual(["needs_0", "needs_1", "open_ask", "stop_1", "urgency"]);
     expect(calls[0]!.body.state.new_message).toEqual(input.message);
     expect(calls[0]!.body.state.agents[1]).toMatchObject({ name: "cody", already_in_this_conversation: true, working_right_now: true });
-    expect(verdict).toMatchObject({ source: "jev", urgency: "now", bareAck: 0.02 });
+    expect(verdict).toMatchObject({ source: "jev", urgency: "now" });
     expect(verdict.needs.get("cody")).toBe(0.96);
     expect(verdict.stop.has("ada")).toBe(false);
+  });
+
+  it("gives an open ask to its one best-fit agent, not to everyone it could plausibly be for", async () => {
+    const { impl } = fakeFetch(() => ({
+      json: { answers: { needs_0: { type: "noul", noul: 0.6 }, needs_1: { type: "noul", noul: 0.65 }, open_ask: { type: "choice", choice: "agent_1", probabilities: { agent_0: 0.02, agent_1: 0.97, nobody: 0.01 } }, urgency: { type: "choice", choice: "next" } } },
+    }));
+    const verdict = await new JevJudge({ apiKey: "k", fetchImpl: impl }).judge({ ...input, message: { from: "Konark (human)", text: "can someone fix the deploy script" } });
+    expect(verdict.needs.get("cody")).toBe(0.97);
+    expect(verdict.needs.get("ada")).toBeLessThan(0.5);
   });
 
   it("falls back to plain rules when the model cannot be reached or answers badly, so messages still wake someone", async () => {

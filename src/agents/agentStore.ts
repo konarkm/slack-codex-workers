@@ -157,11 +157,12 @@ export class AgentStore {
         received_at TEXT NOT NULL,
         PRIMARY KEY(source, event, dedupe_key)
       );
-      CREATE TABLE IF NOT EXISTS thread_seen (
+      CREATE TABLE IF NOT EXISTS conversation_seen (
         agent TEXT NOT NULL,
         channel_id TEXT NOT NULL,
-        thread_ts TEXT NOT NULL,
-        PRIMARY KEY(agent, channel_id, thread_ts)
+        thread_key TEXT NOT NULL,
+        last_ts TEXT NOT NULL,
+        PRIMARY KEY(agent, channel_id, thread_key)
       );
     `);
     if (!(this.db.prepare("PRAGMA table_info(inbox)").all() as Array<{ name: string }>).some((column) => column.name === "attempts")) {
@@ -405,13 +406,24 @@ export class AgentStore {
       .run(agent, channelId, threadTs, new Date().toISOString());
   }
 
-  // A thread is seen once any of its messages has reached the agent, so its history is already in the agent's context.
-  markThreadSeen(agent: string, channelId: string, threadTs: string): void {
-    this.db.prepare("INSERT OR IGNORE INTO thread_seen (agent, channel_id, thread_ts) VALUES (?, ?, ?)").run(agent, channelId, threadTs);
+  // How far the agent has read in a conversation (a thread's root ts, or "top" for the channel's main line). A wake brings
+  // whatever came after this point, the way a person catches up from their last-read marker.
+  markSeen(agent: string, channelId: string, threadKey: string, ts: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO conversation_seen (agent, channel_id, thread_key, last_ts) VALUES (?, ?, ?, ?)
+         ON CONFLICT(agent, channel_id, thread_key) DO UPDATE SET last_ts = excluded.last_ts WHERE excluded.last_ts > conversation_seen.last_ts`,
+      )
+      .run(agent, channelId, threadKey, ts);
   }
 
-  hasSeenThread(agent: string, channelId: string, threadTs: string): boolean {
-    return Boolean(this.db.prepare("SELECT 1 FROM thread_seen WHERE agent = ? AND channel_id = ? AND thread_ts = ?").get(agent, channelId, threadTs));
+  clearSeen(agent: string): void {
+    this.db.prepare("DELETE FROM conversation_seen WHERE agent = ?").run(agent);
+  }
+
+  lastSeen(agent: string, channelId: string, threadKey: string): string | null {
+    const row = this.db.prepare("SELECT last_ts FROM conversation_seen WHERE agent = ? AND channel_id = ? AND thread_key = ?").get(agent, channelId, threadKey) as { last_ts: string } | undefined;
+    return row?.last_ts ?? null;
   }
 
   isThreadParticipant(agent: string, channelId: string, threadTs: string): boolean {
