@@ -304,6 +304,7 @@ describe("AgentMind", () => {
     // The first input carries them (the bridge had no record of what the session knew); the second does not.
     expect(first[0]!.delivered[0]!.text).toContain("old rules");
     expect(first[0]!.delivered.at(-1)!.text).toBe("two");
+    await first[0]!.finishTurn();
     await before.stop();
 
     const second: FakeRuntime[] = [];
