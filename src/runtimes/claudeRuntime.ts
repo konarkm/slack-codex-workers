@@ -75,6 +75,7 @@ export class ClaudeRuntime implements AgentRuntime {
   private currentSessionId: string | null;
   // Messages pushed to the session and not yet reported as consumed by a finished turn: message uuid → input id.
   private readonly unconfirmed = new Map<string, string | null>();
+  private lastRemoteStderr: string | null = null;
   private lastAssistantText = "";
   private stopping = false;
 
@@ -180,7 +181,10 @@ export class ClaudeRuntime implements AgentRuntime {
       signal: spawnOptions.signal,
     });
     child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk: string) => logError("claude remote stderr", { agent: this.options.spec.name, chunk: chunk.trim() }));
+    child.stderr.on("data", (chunk: string) => {
+      this.lastRemoteStderr = chunk.trim().slice(-300);
+      logError("claude remote stderr", { agent: this.options.spec.name, chunk: chunk.trim() });
+    });
     return child;
   }
 
@@ -223,8 +227,11 @@ export class ClaudeRuntime implements AgentRuntime {
       }
     } catch (error) {
       if (!this.stopping) {
-        logError("claude session ended with error", { agent: spec.name, error: error instanceof Error ? error.message : String(error) });
-        await events.onTurnCompleted({ status: "failed", finalText: "", error: error instanceof Error ? error.message : String(error), consumedInputIds: this.takeAllUnconfirmed(), inputFault: false });
+        // On another machine, what ssh or the remote shell said is the real reason ("connect to host … timed out").
+        const reason = [error instanceof Error ? error.message : String(error), this.lastRemoteStderr].filter(Boolean).join(": ");
+        this.lastRemoteStderr = null;
+        logError("claude session ended with error", { agent: spec.name, error: reason });
+        await events.onTurnCompleted({ status: "failed", finalText: "", error: reason, consumedInputIds: this.takeAllUnconfirmed(), inputFault: false });
       }
     } finally {
       if (this.session === session) {

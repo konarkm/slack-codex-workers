@@ -38,7 +38,8 @@ export function spawnOnHost(request: HostSpawnRequest): ChildProcessWithoutNullS
   }
   // A login shell so the remote PATH and agent CLI logins resolve the way they do interactively.
   const remote = `exec "$SHELL" -lc ${shellQuote(buildRemoteCommand(request))}`;
-  return spawn("ssh", ["-T", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=30", request.host.target, remote], {
+  // An unreachable machine must fail in seconds, so the failure reaches an operator while someone is still waiting.
+  return spawn("ssh", ["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", request.host.target, remote], {
     env: process.env,
     stdio: ["pipe", "pipe", "pipe"],
     signal: request.signal,
