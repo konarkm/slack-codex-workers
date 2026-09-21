@@ -116,8 +116,8 @@ export class JevJudge implements WakeJudge {
         type: "noul",
         instructions: `Should the agent named "${agent.name}" be interrupted to read \`new_message\` now? Judge the way an attentive colleague named ${agent.name} would on hearing it in the room: from the words, from who has been talking to whom in \`recent_messages\`, and from each agent's role in \`agents\`.`,
         criteria: {
-          true: `The message asks or tells ${agent.name} something, answers ${agent.name}, continues an exchange ${agent.name} is part of, or is a request that clearly falls to ${agent.name}'s role when nobody else is addressed`,
-          false: `The message is for someone else, only talks about ${agent.name}, or is general chatter ${agent.name} does not need to act on`,
+          true: `The message speaks to ${agent.name}: it asks or tells ${agent.name} something, greets or calls ${agent.name} by name (someone who says hi to a colleague expects an answer, however short or slangy the greeting), answers ${agent.name}, continues an exchange ${agent.name} is part of, or is a request that clearly falls to ${agent.name}'s role when nobody else is addressed`,
+          false: `The message is for someone else, only talks about ${agent.name} in the third person, only thanks ${agent.name}, or is general chatter ${agent.name} does not need to act on`,
         },
       };
       if (agent.working) {
