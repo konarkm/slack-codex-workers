@@ -183,6 +183,9 @@ export class AgentStore {
         PRIMARY KEY(agent, channel_id, thread_key)
       );
     `);
+    if (!(this.db.prepare("PRAGMA table_info(agents)").all() as Array<{ name: string }>).some((column) => column.name === "instructions_hash")) {
+      this.db.exec("ALTER TABLE agents ADD COLUMN instructions_hash TEXT");
+    }
     if (!(this.db.prepare("PRAGMA table_info(inbox)").all() as Array<{ name: string }>).some((column) => column.name === "attempts")) {
       this.db.exec("ALTER TABLE inbox ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0");
     }
@@ -201,6 +204,20 @@ export class AgentStore {
       | undefined;
     if (!row) return null;
     return { name: row.name, sessionId: row.session_id, lastError: row.last_error, updatedAt: row.updated_at };
+  }
+
+  // The standing instructions the agent's session is known to have.
+  instructionsHash(name: string): string | null {
+    return (this.db.prepare("SELECT instructions_hash FROM agents WHERE name = ?").get(name) as { instructions_hash: string | null } | undefined)?.instructions_hash ?? null;
+  }
+
+  setInstructionsHash(name: string, hash: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO agents (name, session_id, last_error, updated_at, instructions_hash) VALUES (?, NULL, NULL, ?, ?)
+         ON CONFLICT(name) DO UPDATE SET instructions_hash = excluded.instructions_hash`,
+      )
+      .run(name, new Date().toISOString(), hash);
   }
 
   setAgentSession(name: string, sessionId: string | null): void {

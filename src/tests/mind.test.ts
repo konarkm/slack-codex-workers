@@ -281,7 +281,37 @@ describe("AgentMind", () => {
     }, "instructions", []);
     await mind.start();
     expect(runtimes[0]!.options.sessionId).toBe("session-1");
-    expect(runtimes[0]!.delivered.map((input) => input.text)).toEqual(["queued before crash"]);
+    expect(runtimes[0]!.delivered).toHaveLength(1);
+    expect(runtimes[0]!.delivered[0]!.text).toContain("queued before crash");
     expect(store.listQueued("ada")).toHaveLength(0);
+  });
+
+  it("hands a running session its standing instructions once when they have changed, since its system prompt is a snapshot", async () => {
+    const store = new AgentStore(":memory:");
+    store.setAgentSession("ada", "session-1");
+    const make = (instructions: string, runtimes: FakeRuntime[]) =>
+      new AgentMind(spec, store, (options) => {
+        const runtime = new FakeRuntime(options);
+        runtimes.push(runtime);
+        return runtime;
+      }, instructions, []);
+    const first: FakeRuntime[] = [];
+    const before = make("old rules", first);
+    await before.start();
+    await before.receive({ sourceKey: "a", wake: true, priority: "next", text: "one", imagePaths: [] });
+    await first[0]!.finishTurn();
+    await before.receive({ sourceKey: "b", wake: true, priority: "next", text: "two", imagePaths: [] });
+    // The first input carries them (the bridge had no record of what the session knew); the second does not.
+    expect(first[0]!.delivered[0]!.text).toContain("old rules");
+    expect(first[0]!.delivered.at(-1)!.text).toBe("two");
+    await before.stop();
+
+    const second: FakeRuntime[] = [];
+    const after = make("new rules", second);
+    await after.start();
+    await after.receive({ sourceKey: "c", wake: true, priority: "next", text: "three", imagePaths: [] });
+    expect(second[0]!.delivered[0]!.text).toContain("Your standing instructions have changed");
+    expect(second[0]!.delivered[0]!.text).toContain("new rules");
+    expect(second[0]!.delivered[0]!.text).toContain("three");
   });
 });
