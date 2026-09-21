@@ -11,7 +11,7 @@ describe("agent tool schemas", () => {
   const tools = [
     ...buildWakeTools("ada", store, "UTC"),
     ...buildWebhookTools("ada", store, webhooks),
-    ...buildSlackTools({ slack: {} as never, persona: { username: "ada", icon: null }, afterSend() {}, noteVisibleAction() {}, recordThreadParticipation() {}, uploadConfig: {} as never, timezone: "UTC", canUploadLocalFiles: true, actionTokenFor: () => null }),
+    ...buildSlackTools({ slack: {} as never, persona: { username: "ada", icon: null }, afterSend() {}, noteVisibleAction() {}, recordThreadParticipation() {}, uploadConfig: {} as never, timezone: "UTC", canUploadLocalFiles: true, latestActionToken: () => null }),
   ];
 
   it("have unique names", () => {

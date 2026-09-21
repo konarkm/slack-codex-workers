@@ -453,7 +453,8 @@ export class AgentSlackClient {
       token: this.botToken,
       query: args.query,
       action_token: args.actionToken,
-      channel_types: "public_channel,private_channel,mpim,im",
+      // A bot token can be granted search over public channels only.
+      channel_types: "public_channel",
       content_types: args.includeFiles ? "messages,files" : "messages",
       context_channel_id: args.channelId ?? undefined,
       sort: args.order === "relevance" ? "score" : "timestamp",

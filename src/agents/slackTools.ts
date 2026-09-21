@@ -17,8 +17,8 @@ export interface SlackToolContext {
   timezone: string;
   // False when the agent's files live on another machine than the bridge.
   canUploadLocalFiles: boolean;
-  // The freshest search token Slack has given the app, preferring one from the given conversation. Null when there is none.
-  actionTokenFor(channelId: string | null): string | null;
+  // The latest search token Slack has given the app. Null when there is none.
+  latestActionToken(): string | null;
 }
 
 function defineTool<Shape extends z.ZodRawShape>(tool: AgentTool<Shape>): AgentTool {
@@ -108,7 +108,7 @@ export function buildSlackTools(ctx: SlackToolContext): AgentTool[] {
     defineTool({
       name: "search_workspace",
       description:
-        "Search the workspace's messages and files, as the person who last addressed the app, seeing only what they can see. Slack allows this for a while after someone @-mentions the app or DMs it; when no such token is at hand, the result says so and you should ask the person to @-mention the app in their next message.",
+        "Search messages in the workspace's public channels, and files, as the person who last addressed the app. Slack allows this for a while after someone @-mentions the app or DMs it; when no such token is at hand, the result says so and you should ask the person to @-mention the app in their next message.",
       shape: {
         query: z.string().min(1).describe("What to look for, in plain words or keywords."),
         channel: z.string().optional().describe("Keep only results from this conversation."),
@@ -117,7 +117,7 @@ export function buildSlackTools(ctx: SlackToolContext): AgentTool[] {
         limit: z.number().int().min(1).max(20).optional().describe("Results to return, at most 20."),
       },
       handler: async (args) => {
-        const actionToken = ctx.actionTokenFor(args.channel ?? null);
+        const actionToken = ctx.latestActionToken();
         if (!actionToken) return "no search token: Slack grants one only when someone @-mentions the app or DMs it. Ask the person to @-mention the app in their next message, then search again.";
         let hits;
         try {
@@ -128,7 +128,7 @@ export function buildSlackTools(ctx: SlackToolContext): AgentTool[] {
           throw error;
         }
         // Slack treats the conversation as a hint for ranking, not a filter, so the filtering is done here.
-        if (args.channel) hits = hits.filter((hit) => hit.channelId === args.channel);
+        if (args.channel) hits = hits.filter((hit) => hit.channelId === args.channel).slice(0, args.limit ?? 10);
         if (hits.length === 0) return "no results";
         const own = slack.identity();
         const names = new Map<string, string>();

@@ -57,8 +57,6 @@ const RECENT_MESSAGES = 8;
 const OPERATOR_COMMANDS = new Set([".status", ".stop", ".compact", ".reset"]);
 // Reactions that only acknowledge. With the judgment model away, these do not wake the agent; anything else does.
 const ACK_REACTIONS = new Set(["+1", "thumbsup", "white_check_mark", "heavy_check_mark", "ballot_box_with_check", "ok_hand", "ok", "heart", "tada", "pray", "raised_hands", "clap", "100", "fire", "rocket"]);
-// The most recent search token Slack handed the app is kept under this key.
-const ANY_CONVERSATION = "*";
 
 export function personaOf(spec: AgentSpec): SlackPersona {
   return { username: spec.name, icon: spec.icon };
@@ -95,8 +93,9 @@ export class AgentHub {
   private readonly seats = new Map<string, Seat>();
   private readonly agentWakeCounts = new Map<string, { count: number; lastAt: number }>();
   private readonly recent = new Map<string, JudgeMessage[]>();
-  // Search tokens Slack attaches to @-mentions and DMs, by conversation. Slack does not say how long they last.
-  private readonly actionTokens = new Map<string, { token: string; at: number }>();
+  // The latest search token Slack attached to an @-mention or DM. A search runs as the person whose message carried it.
+  // Slack does not say how long one lasts.
+  private actionToken: string | null = null;
   private readonly scheduler: WakeScheduler;
   private readonly webhookWakes: WebhookWakes | null;
   private readonly ruleJudge = new RuleJudge();
@@ -228,7 +227,7 @@ export class AgentHub {
         },
         timezone: this.config.timezone,
         canUploadLocalFiles: spec.host.kind === "local",
-        actionTokenFor: (channelId) => (channelId ? this.actionTokens.get(channelId) : undefined)?.token ?? this.actionTokens.get(ANY_CONVERSATION)?.token ?? null,
+        latestActionToken: () => this.actionToken,
       }),
     ];
     const ownInstructions = spec.instructionsPath && fs.existsSync(spec.instructionsPath) ? fs.readFileSync(spec.instructionsPath, "utf8") : null;
@@ -332,11 +331,7 @@ export class AgentHub {
   async handleInbound(message: SlackInbound): Promise<void> {
     const slack = this.requireSlack();
     try {
-      if (message.actionToken) {
-        const entry = { token: message.actionToken, at: Date.now() };
-        this.actionTokens.set(message.channelId, entry);
-        this.actionTokens.set(ANY_CONVERSATION, entry);
-      }
+      if (message.actionToken) this.actionToken = message.actionToken;
       const key = sourceKey(message);
       const listeners = [...this.seats.values()].filter((seat) => seat.spec.name !== message.agentAuthor && !this.store.hasSource(seat.spec.name, key));
       if (listeners.length === 0) return;
@@ -486,6 +481,8 @@ export class AgentHub {
       const excerpt = renderSlackText(target.text, slack.identity().botUserId, new Map()).replace(/[\r\n]+/g, " ").slice(0, 200);
       const judgeMessage: JudgeMessage = { from: `${author.name} (${author.kind})`, text: `(reacted :${reaction.emoji}: to ${seat.spec.name}'s message "${excerpt}")` };
 
+      // Slack names a skin-toned thumbs-up "+1::skin-tone-3".
+      const isAck = ACK_REACTIONS.has(reaction.emoji.split("::")[0]!);
       let wake: boolean;
       if (seat.spec.wake.natural) {
         const verdict = await this.judge.judge({
@@ -499,9 +496,9 @@ export class AgentHub {
           message: judgeMessage,
           authorKind: author.kind,
         });
-        wake = verdict.source === "jev" ? (verdict.needs.get(seat.spec.name) ?? 0) >= seat.spec.wake.threshold && verdict.bareAck < BARE_ACK_THRESHOLD : !ACK_REACTIONS.has(reaction.emoji);
+        wake = verdict.source === "jev" ? (verdict.needs.get(seat.spec.name) ?? 0) >= seat.spec.wake.threshold && verdict.bareAck < BARE_ACK_THRESHOLD : !isAck;
       } else {
-        wake = !ACK_REACTIONS.has(reaction.emoji);
+        wake = !isAck;
       }
       this.remember(conversationKey, judgeMessage);
 
