@@ -111,7 +111,8 @@ export function buildSlackTools(ctx: SlackToolContext): AgentTool[] {
         "Search the workspace's messages and files, as the person who last addressed the app, seeing only what they can see. Slack allows this for a while after someone @-mentions the app or DMs it; when no such token is at hand, the result says so and you should ask the person to @-mention the app in their next message.",
       shape: {
         query: z.string().min(1).describe("What to look for, in plain words or keywords."),
-        channel: z.string().optional().describe("Limit the search to this conversation."),
+        channel: z.string().optional().describe("Keep only results from this conversation."),
+        order: z.enum(["relevance", "newest", "oldest"]).optional().describe("Default relevance. Use newest for questions like \"the last time someone mentioned X\"."),
         include_files: z.boolean().optional().describe("Also search files. Default false."),
         limit: z.number().int().min(1).max(20).optional().describe("Results to return, at most 20."),
       },
@@ -120,19 +121,25 @@ export function buildSlackTools(ctx: SlackToolContext): AgentTool[] {
         if (!actionToken) return "no search token: Slack grants one only when someone @-mentions the app or DMs it. Ask the person to @-mention the app in their next message, then search again.";
         let hits;
         try {
-          hits = await slack.searchContext({ query: args.query, actionToken, channelId: args.channel ?? null, includeFiles: Boolean(args.include_files), limit: args.limit ?? 10 });
+          hits = await slack.searchContext({ query: args.query, actionToken, channelId: args.channel ?? null, order: args.order ?? "relevance", includeFiles: Boolean(args.include_files), limit: args.limit ?? 10 });
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           if (message.includes("invalid_action_token") || message.includes("action_token")) return "the search token has expired. Ask the person to @-mention the app in their next message, then search again.";
           throw error;
         }
+        // Slack treats the conversation as a hint for ranking, not a filter, so the filtering is done here.
+        if (args.channel) hits = hits.filter((hit) => hit.channelId === args.channel);
         if (hits.length === 0) return "no results";
         const own = slack.identity();
+        const names = new Map<string, string>();
+        for (const hit of hits) {
+          for (const match of hit.text.matchAll(/<@([A-Z0-9]+)/g)) if (!names.has(match[1]!)) names.set(match[1]!, (await slack.getPerson(match[1]!)).name);
+        }
         const lines: string[] = [];
         for (const hit of hits) {
           const author = sanitizeHeader(hit.authorName ?? (hit.authorId ? (await slack.getPerson(hit.authorId)).name : "unknown"));
           const where = [hit.kind, sanitizeHeader(hit.title), hit.channelId ? `channel=${hit.channelId}` : null, hit.ts ? `ts=${hit.ts}` : null].filter(Boolean).join(" ");
-          lines.push(`[${where}] ${author}: ${renderSlackText(hit.text, own.botUserId, new Map()).replace(/[\r\n]+/g, " ⏎ ").slice(0, 600)}${hit.permalink ? ` (${hit.permalink})` : ""}`);
+          lines.push(`[${where}] ${author}: ${renderSlackText(hit.text, own.botUserId, names).replace(/[\r\n]+/g, " ⏎ ").slice(0, 600)}${hit.permalink ? ` (${hit.permalink})` : ""}`);
         }
         return lines.join("\n");
       },

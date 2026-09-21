@@ -448,7 +448,7 @@ export class AgentSlackClient {
   }
 
   // Searches the workspace as the person whose message carried the action token, so it sees only what they can see.
-  async searchContext(args: { query: string; actionToken: string; channelId?: string | null; includeFiles: boolean; limit: number }): Promise<SlackSearchHit[]> {
+  async searchContext(args: { query: string; actionToken: string; channelId?: string | null; order: "relevance" | "newest" | "oldest"; includeFiles: boolean; limit: number }): Promise<SlackSearchHit[]> {
     const response = (await this.app.client.apiCall("assistant.search.context", {
       token: this.botToken,
       query: args.query,
@@ -456,7 +456,10 @@ export class AgentSlackClient {
       channel_types: "public_channel,private_channel,mpim,im",
       content_types: args.includeFiles ? "messages,files" : "messages",
       context_channel_id: args.channelId ?? undefined,
-      limit: args.limit,
+      sort: args.order === "relevance" ? "score" : "timestamp",
+      sort_dir: args.order === "oldest" ? "asc" : "desc",
+      // A conversation filter is applied after the fact, so ask for a full page when one is set.
+      limit: args.channelId ? 20 : args.limit,
     })) as {
       results?: {
         messages?: Array<{ channel_id?: string; message_ts?: string; author_user_id?: string; author_name?: string; content?: string; permalink?: string; channel_name?: string }>;

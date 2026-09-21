@@ -431,7 +431,7 @@ describe("AgentHub", () => {
     expect(await ada.tool("search_workspace").handler({ query: "deploy key" } as never)).toContain("no search token");
     await slack.handler!(inbound({ channelId: "D1", channelType: "im", ts: "1726700001.000100", text: "<@UAPP> where is the deploy key", actionToken: "tok-1" }));
     const result = await ada.tool("search_workspace").handler({ query: "deploy key" } as never);
-    expect(slack.searches).toEqual([{ query: "deploy key", actionToken: "tok-1", channelId: null, includeFiles: false, limit: 10 }]);
+    expect(slack.searches).toEqual([{ query: "deploy key", actionToken: "tok-1", channelId: null, order: "relevance", includeFiles: false, limit: 10 }]);
     expect(result).toContain("Konark: the deploy key lives in 1password");
   });
 
