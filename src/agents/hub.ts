@@ -472,6 +472,13 @@ export class AgentHub {
         if (!this.store.hasSource(spec.name, key)) woken.push({ seat, decision });
       }
 
+      // Shown the moment the message is routed, before any downloading or catching up, because that is when the system
+      // has in fact taken it. Slack shows it under the agent's own name.
+      for (const { seat } of woken) {
+        seat.statusThreads.set(`${message.channelId}:${threadRoot}`, { channelId: message.channelId, threadTs: threadRoot });
+        void slack.setThreadStatus(message.channelId, threadRoot, "processing", personaOf(seat.spec));
+      }
+
       let imagePaths: string[] = [];
       let fileNotes: string[] = [];
       if (message.files.length > 0 && woken.length > 0) {
@@ -502,8 +509,6 @@ export class AgentHub {
           threadContext: missed,
           alsoWoken: woken.filter((other) => other.seat !== seat).map((other) => other.seat.spec.name),
         });
-        seat.statusThreads.set(`${message.channelId}:${threadRoot}`, { channelId: message.channelId, threadTs: threadRoot });
-        void slack.setThreadStatus(message.channelId, threadRoot, "processing", personaOf(spec));
         await seat.mind
           .receive({ sourceKey: key, wake: true, priority: verdict.urgency, text, imagePaths })
           .catch((error) => logWarn("input queued; the agent could not take it yet", { agent: spec.name, error: errorMessage(error) }));

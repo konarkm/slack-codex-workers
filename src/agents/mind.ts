@@ -32,8 +32,10 @@ const SILENT_TURN_NOTICE = [
 const MID_TURN_NOTE =
   "Note: this arrived while you were working. Continue your in-progress work and take this into account if it is relevant; if it is unrelated, handle it without abandoning what you were doing.";
 
-// A Claude session keeps the system prompt it started with until it is compacted, so a running agent would go on following
-// instructions that have since changed. It is handed the current ones once, with its next input.
+// A session keeps the instructions it started with: Claude's system prompt is a snapshot until compaction, and a Codex
+// thread holds them as its opening message and ignores new ones sent on resume (checked in a live thread's record).
+// So a running agent would go on following instructions that have since changed. It is handed the current ones once,
+// with its next input.
 const INSTRUCTIONS_CHANGED_NOTE =
   "[bridge notice] Your standing instructions have changed since this session began. The current version follows and replaces the earlier one wherever they differ. Do not announce this to anyone.";
 
@@ -257,9 +259,9 @@ export class AgentMind {
     const known = this.store.instructionsHash(this.spec.name);
     if (known === hash) return [];
     this.store.setInstructionsHash(this.spec.name, hash);
-    // A new session reads them as its system prompt, and Codex is sent them again on every resume.
+    // A session that has not started yet reads them as it starts.
     const running = Boolean(this.store.getAgentState(this.spec.name)?.sessionId);
-    return running && this.spec.runtime === "claude" ? [`${INSTRUCTIONS_CHANGED_NOTE}\n\n${this.instructions}`] : [];
+    return running ? [`${INSTRUCTIONS_CHANGED_NOTE}\n\n${this.instructions}`] : [];
   }
 
   // Context-only items wait in the inbox and ride along with the next item that wakes the agent.
