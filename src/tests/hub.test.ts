@@ -176,7 +176,12 @@ async function startHub(agents: unknown[], overrides: Partial<HubConfig> = {}): 
   await hub.start();
 }
 
-const flush = () => new Promise((resolve) => setTimeout(resolve, 20));
+// Waits for the hub to finish everything it has taken in, rather than sleeping and hoping, which failed on a busy machine.
+const flush = async (): Promise<void> => {
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  await (hub as unknown as { intake: Promise<void> }).intake;
+  await new Promise((resolve) => setTimeout(resolve, 5));
+};
 const delivered = (name: string) => runtimes.get(name)?.delivered ?? [];
 
 beforeEach(() => {
