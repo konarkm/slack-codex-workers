@@ -62,10 +62,14 @@ export class RuleJudge implements WakeJudge {
   }
 }
 
-// A judgment takes about 150 ms, so a failed one is simply asked again before the plain rules take over.
-const ATTEMPTS = 3;
-const ATTEMPT_TIMEOUT_MS = 2_500;
-const RETRY_WAITS_MS = [150, 500];
+// A judgment takes about 150 ms, so a failed one is asked again, with doubling waits, until this much time has gone by.
+// Then the plain rules take over.
+const BUDGET_MS = 3_000;
+const ATTEMPT_TIMEOUT_MS = 800;
+const FIRST_RETRY_WAIT_MS = 100;
+
+// A bad key or a malformed request fails the same way every time.
+class PermanentJudgeError extends Error {}
 
 interface JevAnswer {
   type: string;
@@ -77,7 +81,10 @@ export interface JevOptions {
   apiKey: string;
   model?: string;
   endpoint?: string;
+  // Per attempt.
   timeoutMs?: number;
+  // For all attempts together.
+  budgetMs?: number;
   fetchImpl?: typeof fetch;
 }
 
@@ -91,22 +98,27 @@ export class JevJudge implements WakeJudge {
 
   async judge(input: JudgeInput): Promise<Verdict> {
     const errors: string[] = [];
-    for (let attempt = 0; attempt < ATTEMPTS; attempt += 1) {
+    const deadline = Date.now() + (this.options.budgetMs ?? BUDGET_MS);
+    let wait = FIRST_RETRY_WAIT_MS;
+    while (deadline - Date.now() > 20) {
       try {
-        const verdict = await this.ask(input);
+        const verdict = await this.ask(input, Math.min(this.options.timeoutMs ?? ATTEMPT_TIMEOUT_MS, deadline - Date.now()));
         if (errors.length > 0) logWarn("judgment succeeded after a retry", { errors });
         return verdict;
       } catch (error) {
         errors.push(error instanceof Error ? error.message : String(error));
-        const wait = RETRY_WAITS_MS[attempt];
-        if (wait !== undefined) await new Promise((resolve) => setTimeout(resolve, wait));
+        if (error instanceof PermanentJudgeError) break;
       }
+      const pause = Math.min(wait, deadline - Date.now());
+      if (pause <= 0) break;
+      await new Promise((resolve) => setTimeout(resolve, pause));
+      wait *= 2;
     }
     logWarn("judgment model unavailable; using plain rules for this message", { errors });
     return this.fallback.judge(input);
   }
 
-  private async ask(input: JudgeInput): Promise<Verdict> {
+  private async ask(input: JudgeInput, timeoutMs: number): Promise<Verdict> {
     const questions: Record<string, unknown> = {
       urgency: {
         type: "choice",
@@ -152,7 +164,7 @@ export class JevJudge implements WakeJudge {
       new_message: input.message,
     };
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.options.timeoutMs ?? ATTEMPT_TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     let answers: Record<string, JevAnswer>;
     try {
       const response = await (this.options.fetchImpl ?? fetch)(this.options.endpoint ?? "https://api.typesafe.ai/v1/systemone", {
@@ -161,6 +173,7 @@ export class JevJudge implements WakeJudge {
         body: JSON.stringify({ model: this.options.model ?? "jev-latest", state, questions }),
         signal: controller.signal,
       });
+      if (response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429) throw new PermanentJudgeError(`judgment request rejected with HTTP ${response.status}`);
       if (!response.ok) throw new Error(`judgment request failed with HTTP ${response.status}`);
       answers = ((await response.json()) as { answers: Record<string, JevAnswer> }).answers;
     } finally {

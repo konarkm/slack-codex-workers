@@ -77,6 +77,9 @@ class FakeSlack {
     if (!post) return null;
     return { ts, threadTs: post.threadTs ?? null, userId: null, botId: "BAPP", username: post.persona?.username ?? null, text: post.text, replyCount: 0, fileNames: [] };
   }
+  async lookupFiles() {
+    return [];
+  }
   async renameSession(channelId: string, threadTs: string, title: string) {
     this.titles.push({ channelId, threadTs, title });
   }
@@ -98,7 +101,7 @@ class FakeSlack {
   async getConversation(id: string) {
     this.conversationLookups += 1;
     await new Promise((resolve) => setTimeout(resolve, 5));
-    return { id, name: "general", type: "channel" as const, isMember: true };
+    return { id, name: "general", type: id.startsWith("D") ? ("im" as const) : ("channel" as const), isMember: true };
   }
   async readHistory() {
     return this.history;
@@ -442,13 +445,71 @@ describe("AgentHub", () => {
     await slack.handler!(inbound({ channelId: "D1", channelType: "im", text: "ada where is the deploy key" }));
     const ada = runtimes.get("ada")!;
     await ada.tool("name_thread").handler({ channel: "D1", thread_ts: "1726700000.000100", title: "Deploy key" } as never);
-    expect(slack.titles).toEqual([{ channelId: "D1", threadTs: "1726700000.000100", title: "Deploy key" }]);
+    // The bridge names a new DM session after its agent at once; the agent's own title keeps that prefix.
+    expect(slack.titles).toEqual([
+      { channelId: "D1", threadTs: "1726700000.000100", title: "ada" },
+      { channelId: "D1", threadTs: "1726700000.000100", title: "ada · Deploy key" },
+    ]);
     // No token yet: Slack only attaches one to @-mentions and DMs the app saw as such.
     expect(await ada.tool("search_workspace").handler({ query: "deploy key" } as never)).toContain("no search token");
     await slack.handler!(inbound({ channelId: "D1", channelType: "im", ts: "1726700001.000100", text: "<@UAPP> where is the deploy key", actionToken: "tok-1" }));
     const result = await ada.tool("search_workspace").handler({ query: "deploy key" } as never);
     expect(slack.searches).toEqual([{ query: "deploy key", actionToken: "tok-1", channelId: null, order: "relevance", includeFiles: false, limit: 10 }]);
     expect(result).toContain("Konark: the deploy key lives in 1password");
+  });
+
+  it("gives each DM thread to one agent: only it hears the thread, whoever is named, and no other agent can read or write there", async () => {
+    await startHub(TEAM);
+    judge.next = { for: ["cody"] };
+    await slack.handler!(inbound({ channelId: "D1", channelType: "im", text: "cody can you look at the build" }));
+    expect(delivered("cody")).toHaveLength(1);
+    expect(delivered("cody")[0]!.text).toContain("Reply target: channel=D1 thread_ts=1726700000.000100");
+    // Naming ada inside cody's session does not bring her in.
+    judge.next = { for: ["ada"] };
+    await slack.handler!(inbound({ channelId: "D1", channelType: "im", ts: "1726700001.000100", threadTs: "1726700000.000100", text: "ada what do you think" }));
+    expect(delivered("ada")).toHaveLength(0);
+    expect(delivered("cody")).toHaveLength(2);
+    const ada = runtimes.get("ada") ?? (await (async () => { judge.next = { for: ["ada"] }; await slack.handler!(inbound({ ts: "1726700002.000100", text: "ada hi" })); return runtimes.get("ada")!; })());
+    expect(await ada.tool("read_history").handler({ channel: "D1", thread_ts: "1726700000.000100" } as never)).toContain("cody's session");
+    expect(await ada.tool("send_message").handler({ channel: "D1", thread_ts: "1726700000.000100", text: "hello" } as never)).toContain("cody's session");
+    expect(slack.posted).toHaveLength(0);
+    // A new top-level DM for nobody in particular opens a separate session with the default agent.
+    judge.next = {};
+    await slack.handler!(inbound({ channelId: "D1", channelType: "im", ts: "1726700005.000100", text: "what's on today" }));
+    expect(delivered("ada").at(-1)!.text).toContain("what's on today");
+    expect(delivered("ada").at(-1)!.text).not.toContain("-context");
+    expect(await ada.tool("read_history").handler({ channel: "D1" } as never)).toContain("1726700005.000100");
+    expect(await ada.tool("read_history").handler({ channel: "D1" } as never)).not.toContain("1726700000.000100");
+  });
+
+  it("shows an agent what is new elsewhere as counts, like unread badges, and clears them when asked", async () => {
+    await startHub(TEAM);
+    judge.next = { for: ["cody"] };
+    await slack.handler!(inbound({ text: "cody fix the deploy" }));
+    await slack.handler!(inbound({ ts: "1726700001.000100", threadTs: "1726700000.000100", text: "and the tests" }));
+    await slack.handler!(inbound({ channelId: "D1", channelType: "im", ts: "1726700002.000100", text: "cody, privately: the key is in 1password" }));
+    judge.next = { for: ["ada"] };
+    await slack.handler!(inbound({ channelId: "C2", ts: "1726700003.000100", text: "ada hi" }));
+    const ada = runtimes.get("ada")!;
+    const first = await ada.tool("whats_new").handler({} as never);
+    expect(first).toContain("channel=C1, main line): 1 new");
+    expect(first).toContain("channel=C1 thread_ts=1726700000.000100): 1 new");
+    expect(first).toContain("from Konark");
+    // Where she was just woken is not news to her, and another agent's DM session is none of her business.
+    expect(first).not.toContain("C2");
+    expect(first).not.toContain("D1");
+    expect(await ada.tool("whats_new").handler({} as never)).toBe("nothing new since you last looked");
+  });
+
+  it("catches an agent up on a channel only from the last day", async () => {
+    await startHub(TEAM);
+    const said = (ts: string, text: string) => ({ ts, threadTs: null, userId: "UHUMAN", botId: null, username: null, text, replyCount: 0, fileNames: [] });
+    slack.history = [said("1726500000.000100", "last week's argument"), said("1726699000.000100", "the deploy is red again")];
+    judge.next = { for: ["ada"] };
+    await slack.handler!(inbound({ text: "ada can you look" }));
+    const text = delivered("ada")[0]!.text;
+    expect(text).toContain("the deploy is red again");
+    expect(text).not.toContain("last week's argument");
   });
 
   it("tells the operators, as the bridge, when it gives up on someone's message", async () => {

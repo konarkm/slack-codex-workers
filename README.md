@@ -30,7 +30,7 @@ Settings: `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` (the one Slack app), `TYPESAFE
 
 A Slack app has exactly one bot user, and Slack offers no way to install an app without a person clicking through a consent screen (outside Enterprise plans). An app per agent would mean a click, and an app slot, for every new agent. So all agents share one app: each posts under its own name and icon, and the bridge works out who each message is for. Adding an agent is an entry in `agents.json`; an agent can also create another agent itself with `create_agent`, with no Slack setup at all.
 
-What this gives up: agents have no `@` handle, no separate DM row, and no Slack profile. The app's DM is shared by all agents, and a private channel works as a one-to-one room with any of them.
+What this gives up: agents have no `@` handle, no separate DM row, and no Slack profile. Instead, each thread in the app's DM is a private session with one agent: the first message picks the agent (by name, or the default agent), every later message in that thread goes to that agent whoever it names, the session's title starts with the agent's name, and no other agent can hear, read, or write there.
 
 `npm run provision` creates the app from a manifest using an app configuration token (`SLACK_CONFIG_TOKEN`, plus `SLACK_CONFIG_REFRESH_TOKEN` so the 12-hour token can be rotated), then prints the two links Slack has no API for: install the app, and generate its app-level token. Invite the app to the channels the agents should hear. `npm run provision -- --update <app id>` pushes a changed manifest to the existing app; when scopes were added it prints the reinstall link (the bot token stays the same).
 
@@ -60,8 +60,8 @@ For each message the bridge makes one request to a System One model (TypeSafe's 
 
 - An agent is woken when the judgment for it reaches its `threshold`. Names are not required: a reply in an exchange the agent is part of is said to that agent. After a restart the bridge reads the conversation's recent messages back from Slack, so the judgment sees what a person scrolling the channel would see, threads included.
 - An open ask ("can someone…") wakes every agent. The bridge does not pick a taker: each agent is told who else the message woke, and they settle it between themselves (best role fit takes it and says so; a toss-up goes to the first name alphabetically; if nobody fits, that agent asks the person).
-- A judgment that fails is asked again, up to three times within about a second, before the plain rules take over.
-- A woken agent gets the message together with what it missed in that thread, or on that channel's main line, since it last looked: at most `THREAD_CONTEXT_LIMIT` messages, newest first in priority, a thread's opening message always kept, main-line messages marked when they have a thread under them. The first time, that means the latest messages. Reading the latest page with `read_history` also counts as having looked. Agents that were not woken get nothing; like people, they catch up when something pulls them in, and `read_history` reads further back.
+- A judgment that fails is asked again with doubling waits (800 ms per attempt, 3 s in all) before the plain rules take over. A rejected request (a bad key) is not retried.
+- A woken agent gets the message together with what it missed in that thread, or on that channel's main line, since it last looked: at most `THREAD_CONTEXT_LIMIT` messages, newest first in priority, on a channel's main line nothing older than a day, each caught-up message cut at 1,500 characters with a pointer to `get_message`, a thread's opening message always kept, main-line messages marked when they have a thread under them. The first time, that means the latest messages. Reading the latest page with `read_history` also counts as having looked. Agents that were not woken get nothing; like people, they catch up when something pulls them in, and `read_history` reads further back.
 - A person's DM, or a literal `@` of the app, that is for nobody in particular wakes the default agent. A person is never left with nobody listening.
 - A person telling a working agent to stop, in plain words, interrupts it. The message is still delivered, so the agent knows why.
 - If the model cannot be reached, plain rules take over for that message: the agent's name appears in it, or it continues a thread or DM the agent is part of.
@@ -82,7 +82,7 @@ ada, ask cody which model he runs on
 </slack-message>
 ```
 
-- The reply target is computed by the bridge: under the message in channels, flat under an existing thread root, in the flow of a DM.
+- The reply target is computed by the bridge: under the message, or flat under an existing thread root.
 - What the agent missed arrives in a `<thread-context>` or `<channel-context>` section before the message, with `included`, `total`, and `truncated` attributes, naming which agent said what.
 - A message that arrives mid-turn is delivered into the running turn with a note to keep working and take it into account.
 - An edited message is delivered as its own input. Shared and forwarded messages and app posts arrive with their words included. Files Slack gives no download link for are named.
@@ -94,7 +94,7 @@ Input counts as delivered only when the turn that took it ends. If the harness d
 
 Only through tools: `send_message`, `react`, `upload_files`, `edit_message`, `delete_message`. The bridge never posts on an agent's behalf, and turn output is not shown to anyone. `dismiss(reason)` records a deliberate non-reply, including "this was not for me" when the judgment was wrong. If a woken turn ends with no visible action and no dismissal, the bridge tells the agent once.
 
-Other tools: `list_agents`, `create_agent`, `read_history`, `list_channels`, `list_people`, `join_channel`, `open_dm`, `get_message_link`, `get_current_time`, `name_thread` (titles a thread; in the app's DM, titled threads show as named sessions in the person's sidebar), and `schedule_wake` / `list_wakes` / `cancel_wake` for interval and cron wakes the agent sets for itself.
+Other tools: `list_agents`, `create_agent`, `whats_new` (counts of what has been said since the agent last looked, per conversation, with no content; asking clears them; kept from what the bridge saw while running, for 30 days), `read_history`, `get_message` (one message in full), `get_file` (downloads the files on a message the agent was not woken by), `list_channels`, `list_people`, `join_channel`, `open_dm`, `get_message_link`, `get_current_time`, `name_thread` (titles a thread; in the app's DM, titled threads show as named sessions in the person's sidebar), and `schedule_wake` / `list_wakes` / `cancel_wake` for interval and cron wakes the agent sets for itself.
 
 `search_workspace` searches public channels and files as the person who last addressed the app (Slack grants a bot token search over public channels only). Any agent can use that token, whoever asked, which is one more reason the workspace must be one where everyone is trusted. Slack hands the app a search token only when someone @-mentions it or DMs it, and does not say how long the token lasts; without one the tool says so, and the agent asks the person to @-mention the app.
 

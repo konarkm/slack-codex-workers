@@ -30,8 +30,8 @@ describe("replyTarget", () => {
     expect(replyTarget(message({ threadTs: "1726600000.000001" }))).toEqual({ channel: "C1", threadTs: "1726600000.000001" });
   });
 
-  it("answers in the flow of a DM unless the person chose a thread", () => {
-    expect(replyTarget(message({ channelType: "im", channelId: "D1" }))).toEqual({ channel: "D1", threadTs: null });
+  it("threads a DM reply too, since a DM thread is the person's session with one agent", () => {
+    expect(replyTarget(message({ channelType: "im", channelId: "D1" }))).toEqual({ channel: "D1", threadTs: "1726700000.000100" });
     expect(replyTarget(message({ channelType: "im", channelId: "D1", threadTs: "5.5" }))).toEqual({ channel: "D1", threadTs: "5.5" });
   });
 });
@@ -100,6 +100,13 @@ describe("renderEnvelope", () => {
     const missed = buildThreadContext("channel", history, "1726600000.000002", "1726600000.000004", 12, () => "Priya (U2)", (value) => value);
     expect(missed.messages.map((item) => item.text)).toEqual(["m3"]);
     expect(renderEnvelope({ ...base, message: message(), decision: addressed, threadContext: missed })).toContain('<channel-context included="1" total="1" truncated="false">');
+  });
+
+  it("cuts a long message the agent is only catching up on, and says how to read the rest", () => {
+    const history = [{ ts: "1726600000.000002", threadTs: null, userId: "U2", botId: null, username: null, text: "x".repeat(5000), replyCount: 0, fileNames: [] }];
+    const missed = buildThreadContext("channel", history, null, "1726600000.000004", 12, () => "Priya (U2)", (value) => value);
+    expect(missed.messages[0]!.text.length).toBeLessThan(1700);
+    expect(missed.messages[0]!.text).toContain("cut at 1500 of 5000 characters; get_message with ts 1726600000.000002 reads all of it");
   });
 
   it("keeps a hostile file name, display name, or channel name from forging a second section", () => {

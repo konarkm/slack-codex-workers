@@ -57,18 +57,25 @@ describe("JevJudge", () => {
     expect(calls).toBe(3);
   });
 
+  it("does not retry a request the model rejects outright, such as a bad key", async () => {
+    const rejected = fakeFetch(() => ({ status: 401 }));
+    const verdict = await new JevJudge({ apiKey: "bad", fetchImpl: rejected.impl }).judge(input);
+    expect(verdict.source).toBe("rules");
+    expect(rejected.calls).toHaveLength(1);
+  });
+
   it("falls back to plain rules when the model cannot be reached or answers badly, so messages still wake someone", async () => {
     const down = fakeFetch(() => ({ status: 503 }));
     const named = { ...input, message: { from: "Konark (human)", text: "ada, status?" } };
-    const verdict = await new JevJudge({ apiKey: "k", fetchImpl: down.impl }).judge(named);
+    const verdict = await new JevJudge({ apiKey: "k", fetchImpl: down.impl, budgetMs: 150 }).judge(named);
     expect(verdict.source).toBe("rules");
     expect(verdict.needs.get("ada")).toBeGreaterThan(0.5);
 
     const partial = fakeFetch(() => ({ json: { answers: { needs_0: { type: "noul", noul: 0.9 } } } }));
-    expect((await new JevJudge({ apiKey: "k", fetchImpl: partial.impl }).judge(named)).source).toBe("rules");
+    expect((await new JevJudge({ apiKey: "k", fetchImpl: partial.impl, budgetMs: 150 }).judge(named)).source).toBe("rules");
 
     const hanging = (async (_url: string, init: { signal: AbortSignal }) =>
       new Promise((_resolve, reject) => init.signal.addEventListener("abort", () => reject(new Error("aborted"))))) as unknown as typeof fetch;
-    expect((await new JevJudge({ apiKey: "k", fetchImpl: hanging, timeoutMs: 20 }).judge(named)).source).toBe("rules");
+    expect((await new JevJudge({ apiKey: "k", fetchImpl: hanging, timeoutMs: 20, budgetMs: 150 }).judge(named)).source).toBe("rules");
   });
 });

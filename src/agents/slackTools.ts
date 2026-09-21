@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { AgentSlackClient, SlackHistoryMessage, SlackPersona } from "../slack/agentSlack.js";
+import type { SlackFileRef } from "../types.js";
 import { validateSlackUploadFiles } from "../slack/uploads.js";
 import { renderSlackText, sanitizeHeader } from "./envelope.js";
 import type { AgentTool } from "./types.js";
@@ -17,6 +18,14 @@ export interface SlackToolContext {
   timezone: string;
   // False when the agent's files live on another machine than the bridge.
   canUploadLocalFiles: boolean;
+  // In the app's direct message a thread is one agent's session. These answer for this agent.
+  dm: {
+    ownerOf(channelId: string, threadTs: string): string | null;
+    claim(channelId: string, threadTs: string): void;
+    sessions(channelId: string): string[];
+  };
+  // Downloads a message's files to the bridge's disk and says where they are.
+  fetchFiles(key: string, files: SlackFileRef[]): Promise<{ imagePaths: string[]; fileNotes: string[] }>;
   // The agent read a conversation up to this message, so a later wake there does not hand it the same messages again.
   noteRead(channelId: string, threadKey: string, ts: string): void;
   // The latest search token Slack has given the app. Null when there is none.
@@ -49,6 +58,14 @@ async function renderHistory(slack: AgentSlackClient, ownName: string, messages:
 // The agent's hands in Slack. Everything a person sees from the agent goes through these.
 export function buildSlackTools(ctx: SlackToolContext): AgentTool[] {
   const { slack } = ctx;
+  const me = ctx.persona.username;
+  const isDm = async (channelId: string): Promise<boolean> => (await slack.getConversation(channelId).catch(() => null))?.type === "im";
+  // Null when this agent may read or write in that DM thread; otherwise the reason it may not.
+  const dmRefusal = async (channelId: string, threadRoot: string): Promise<string | null> => {
+    if (!(await isDm(channelId))) return null;
+    const owner = ctx.dm.ownerOf(channelId, threadRoot);
+    return owner && owner !== me ? `that direct-message thread is ${owner}'s session with the person, not yours. If you need something from it, ask ${owner} in a channel.` : null;
+  };
   return [
     defineTool({
       name: "send_message",
@@ -61,7 +78,10 @@ export function buildSlackTools(ctx: SlackToolContext): AgentTool[] {
         broadcast: z.boolean().optional().describe("Also show a threaded reply in the channel. Use sparingly."),
       },
       handler: async (args) => {
+        const refusal = args.thread_ts ? await dmRefusal(args.channel, args.thread_ts) : null;
+        if (refusal) return refusal;
         const result = await slack.postMessage({ channelId: args.channel, text: args.text, threadTs: args.thread_ts ?? null, broadcast: args.broadcast, persona: ctx.persona });
+        if (await isDm(args.channel)) ctx.dm.claim(args.channel, args.thread_ts ?? result.ts);
         ctx.noteVisibleAction();
         ctx.recordThreadParticipation(args.channel, args.thread_ts ?? result.ts);
         ctx.afterSend({ channelId: args.channel, threadTs: args.thread_ts ?? null, ts: result.ts, text: args.text });
@@ -98,13 +118,45 @@ export function buildSlackTools(ctx: SlackToolContext): AgentTool[] {
       },
     }),
     defineTool({
+      name: "get_message",
+      description: "Read one message in full by its ts, for instance one that arrived cut short in a catch-up section.",
+      shape: { channel, ts: messageTs },
+      handler: async (args) => {
+        const message = await slack.lookupMessage(args.channel, args.ts);
+        if (!message) return "no such message";
+        const refusal = await dmRefusal(args.channel, message.threadTs ?? message.ts);
+        return refusal ?? renderHistory(slack, me, [message]);
+      },
+    }),
+    defineTool({
+      name: "get_file",
+      description:
+        "Download the files attached to a message you were not woken by (files on the message that woke you arrive by themselves). Returns where each file is on disk; open it from there. Find the message's ts with read_history, which lists file names.",
+      shape: { channel, ts: messageTs, name: z.string().optional().describe("Only the file with this name. Omit for all of the message's files.") },
+      handler: async (args) => {
+        if (!ctx.canUploadLocalFiles) return "not available on your machine yet: files are downloaded to the bridge's disk, which you do not share.";
+        const message = await slack.lookupMessage(args.channel, args.ts);
+        if (!message) return "no such message";
+        const refusal = await dmRefusal(args.channel, message.threadTs ?? message.ts);
+        if (refusal) return refusal;
+        const files = (await slack.lookupFiles(args.channel, args.ts)).filter((file) => !args.name || file.name === args.name);
+        if (files.length === 0) return args.name ? `that message has no downloadable file named ${args.name}` : "that message has no downloadable files";
+        const fetched = await ctx.fetchFiles(`slack:${args.channel}:${args.ts}`, files);
+        return [...fetched.imagePaths.map((imagePath) => `image at ${imagePath}`), ...fetched.fileNotes].join("\n");
+      },
+    }),
+    defineTool({
       name: "name_thread",
       description:
         "Give a thread a title. In the app's direct message with a person, titled threads appear in their sidebar as named sessions, so title the thread when you start a piece of work there. Works in channels too.",
       shape: { channel, thread_ts: messageTs.describe("The thread's root ts."), title: z.string().min(1).max(200) },
       handler: async (args) => {
-        await slack.renameSession(args.channel, args.thread_ts, args.title);
-        return "titled";
+        const refusal = await dmRefusal(args.channel, args.thread_ts);
+        if (refusal) return refusal;
+        // In the DM the title is how the person tells their sessions with different agents apart.
+        const title = (await isDm(args.channel)) && !args.title.toLowerCase().startsWith(`${me} ·`) ? `${me} · ${args.title}`.slice(0, 200) : args.title;
+        await slack.renameSession(args.channel, args.thread_ts, title);
+        return `titled "${title}"`;
       },
     }),
     defineTool({
@@ -176,6 +228,14 @@ export function buildSlackTools(ctx: SlackToolContext): AgentTool[] {
         before: z.string().optional().describe("Only messages older than this ts."),
       },
       handler: async (args) => {
+        if (await isDm(args.channel)) {
+          if (!args.thread_ts) {
+            const own = ctx.dm.sessions(args.channel);
+            return own.length > 0 ? `In the direct message you can read your own sessions. Pass one as thread_ts: ${own.join(", ")}` : "You have no sessions in this direct message yet.";
+          }
+          const refusal = await dmRefusal(args.channel, args.thread_ts);
+          if (refusal) return refusal;
+        }
         const messages = await slack.readHistory({ channelId: args.channel, threadTs: args.thread_ts ?? null, limit: args.limit ?? 30, before: args.before ?? null });
         const newest = messages.at(-1);
         // Reading the latest page is catching up.

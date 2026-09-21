@@ -157,6 +157,24 @@ export class AgentStore {
         received_at TEXT NOT NULL,
         PRIMARY KEY(source, event, dedupe_key)
       );
+      CREATE TABLE IF NOT EXISTS message_index (
+        channel_id TEXT NOT NULL,
+        channel_type TEXT NOT NULL,
+        thread_key TEXT NOT NULL,
+        ts TEXT NOT NULL,
+        author TEXT NOT NULL,
+        PRIMARY KEY(channel_id, ts)
+      );
+      CREATE TABLE IF NOT EXISTS agent_checks (
+        agent TEXT PRIMARY KEY,
+        last_checked_ts TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS dm_sessions (
+        channel_id TEXT NOT NULL,
+        thread_ts TEXT NOT NULL,
+        agent TEXT NOT NULL,
+        PRIMARY KEY(channel_id, thread_ts)
+      );
       CREATE TABLE IF NOT EXISTS conversation_seen (
         agent TEXT NOT NULL,
         channel_id TEXT NOT NULL,
@@ -417,6 +435,51 @@ export class AgentStore {
       .run(agent, channelId, threadKey, ts);
   }
 
+  // Who said something where and when, with no words kept. It is what lets an agent ask what is new without reading it.
+  indexMessage(entry: { channelId: string; channelType: string; threadKey: string; ts: string; author: string }): void {
+    this.db
+      .prepare("INSERT OR IGNORE INTO message_index (channel_id, channel_type, thread_key, ts, author) VALUES (?, ?, ?, ?, ?)")
+      .run(entry.channelId, entry.channelType, entry.threadKey, entry.ts, entry.author);
+  }
+
+  pruneMessageIndex(olderThanTs: string): void {
+    this.db.prepare("DELETE FROM message_index WHERE ts < ?").run(olderThanTs);
+  }
+
+  // Activity since the agent last asked, or last read that conversation, whichever is later. Asking clears the badges.
+  whatsNew(agent: string, nowTs: string, limit: number): ActivitySummary[] {
+    const lastChecked = (this.db.prepare("SELECT last_checked_ts FROM agent_checks WHERE agent = ?").get(agent) as { last_checked_ts: string } | undefined)?.last_checked_ts ?? "0";
+    const rows = this.db
+      .prepare(
+        `SELECT m.channel_id AS channelId, m.channel_type AS channelType, m.thread_key AS threadKey, COUNT(*) AS count, MAX(m.ts) AS lastTs, GROUP_CONCAT(DISTINCT m.author) AS authors
+         FROM message_index m
+         LEFT JOIN conversation_seen s ON s.agent = ? AND s.channel_id = m.channel_id AND s.thread_key = m.thread_key
+         LEFT JOIN dm_sessions d ON d.channel_id = m.channel_id AND d.thread_ts = m.thread_key
+         WHERE m.author != ? AND m.ts > ? AND m.ts > COALESCE(s.last_ts, '0')
+           AND (m.channel_type != 'im' OR d.agent = ?)
+         GROUP BY m.channel_id, m.thread_key ORDER BY lastTs DESC LIMIT ?`,
+      )
+      .all(agent, agent, lastChecked, agent, limit) as unknown as Array<Omit<ActivitySummary, "authors"> & { authors: string }>;
+    this.db
+      .prepare("INSERT INTO agent_checks (agent, last_checked_ts) VALUES (?, ?) ON CONFLICT(agent) DO UPDATE SET last_checked_ts = excluded.last_checked_ts")
+      .run(agent, nowTs);
+    return rows.map((row) => ({ ...row, count: Number(row.count), authors: row.authors.split(",") }));
+  }
+
+  // A thread in the app's direct message belongs to one agent; the others can neither hear it nor read it.
+  dmOwner(channelId: string, threadTs: string): string | null {
+    return (this.db.prepare("SELECT agent FROM dm_sessions WHERE channel_id = ? AND thread_ts = ?").get(channelId, threadTs) as { agent: string } | undefined)?.agent ?? null;
+  }
+
+  claimDmSession(channelId: string, threadTs: string, agent: string): string {
+    this.db.prepare("INSERT OR IGNORE INTO dm_sessions (channel_id, thread_ts, agent) VALUES (?, ?, ?)").run(channelId, threadTs, agent);
+    return this.dmOwner(channelId, threadTs)!;
+  }
+
+  dmSessions(agent: string, channelId: string): string[] {
+    return (this.db.prepare("SELECT thread_ts FROM dm_sessions WHERE agent = ? AND channel_id = ? ORDER BY thread_ts DESC LIMIT 50").all(agent, channelId) as Array<{ thread_ts: string }>).map((row) => row.thread_ts);
+  }
+
   clearSeen(agent: string): void {
     this.db.prepare("DELETE FROM conversation_seen WHERE agent = ?").run(agent);
   }
@@ -431,6 +494,16 @@ export class AgentStore {
       this.db.prepare("SELECT 1 FROM thread_participation WHERE agent = ? AND channel_id = ? AND thread_ts = ?").get(agent, channelId, threadTs),
     );
   }
+}
+
+export interface ActivitySummary {
+  channelId: string;
+  channelType: string;
+  // A thread's root ts, or "top" for the conversation's main line.
+  threadKey: string;
+  count: number;
+  lastTs: string;
+  authors: string[];
 }
 
 interface WebhookSourceRow {

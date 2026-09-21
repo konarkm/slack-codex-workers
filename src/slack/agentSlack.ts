@@ -277,6 +277,15 @@ export class AgentSlackClient {
     };
   }
 
+  // The downloadable files on one message.
+  async lookupFiles(channelId: string, ts: string): Promise<SlackFileRef[]> {
+    const response = await this.app.client.conversations.replies({ token: this.botToken, channel: channelId, ts, limit: 1, inclusive: true });
+    const found = ((response.messages ?? []) as RawMessageEvent[]).find((message) => message.ts === ts);
+    return (found?.files ?? [])
+      .filter((file) => file.id && file.url_private_download)
+      .map((file) => ({ id: file.id!, name: file.name ?? file.id!, mimetype: file.mimetype ?? "application/octet-stream", urlPrivateDownload: file.url_private_download! }));
+  }
+
   private async resolveBotUser(botId: string): Promise<string | null> {
     if (this.botUsers.has(botId)) return this.botUsers.get(botId)!;
     let userId: string | null = null;

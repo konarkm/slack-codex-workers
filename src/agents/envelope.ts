@@ -44,14 +44,15 @@ export interface EnvelopeInput {
 }
 
 const MAX_BODY_CHARS = 16_000;
+// A message the agent is only catching up on is cut here; one pasted log should not cost every agent that enters the thread.
+const MAX_CATCH_UP_CHARS = 1_500;
 
 export function mentionsUser(text: string, userId: string): boolean {
   return text.includes(`<@${userId}>`) || text.includes(`<@${userId}|`);
 }
 
 export function replyTarget(message: SlackInbound): { channel: string; threadTs: string | null } {
-  // In a DM, answer in the flow unless the person chose a thread. Elsewhere, stay flat under the thread root.
-  if (message.channelType === "im") return { channel: message.channelId, threadTs: message.threadTs };
+  // Stay flat under the thread root. In the app's direct message that thread is the person's session with this one agent.
   return { channel: message.channelId, threadTs: message.threadTs ?? message.ts };
 }
 
@@ -169,6 +170,10 @@ export function renderReactionEnvelope(input: ReactionEnvelopeInput): string {
   ].join("\n");
 }
 
+function clipCatchUp(text: string, ts: string): string {
+  return text.length > MAX_CATCH_UP_CHARS ? `${text.slice(0, MAX_CATCH_UP_CHARS)}… [cut at ${MAX_CATCH_UP_CHARS} of ${text.length} characters; get_message with ts ${ts} reads all of it]` : text;
+}
+
 export function buildThreadContext(
   kind: ThreadContext["kind"],
   history: SlackHistoryMessage[],
@@ -188,7 +193,7 @@ export function buildThreadContext(
     kind,
     total: earlier.length,
     // On a channel's main line, a message with replies is a thread the agent can go and read.
-    messages: included.map((item) => ({ author: describeAuthor(item), ts: item.ts, text: `${renderText(item.text)}${kind === "channel" && item.replyCount > 0 ? ` [thread with ${item.replyCount} ${item.replyCount === 1 ? "reply" : "replies"}]` : ""}` })),
+    messages: included.map((item) => ({ author: describeAuthor(item), ts: item.ts, text: `${clipCatchUp(renderText(item.text), item.ts)}${kind === "channel" && item.replyCount > 0 ? ` [thread with ${item.replyCount} ${item.replyCount === 1 ? "reply" : "replies"}]` : ""}` })),
   };
 }
 

@@ -8,7 +8,7 @@ import { AgentSlackClient, type SlackHistoryMessage, type SlackInbound, type Sla
 import { prepareSlackAttachments, type AttachmentConfig } from "../slack/attachments.js";
 import { WebhookIngressServer, type WebhookServerConfig } from "../webhooks/server.js";
 import { AgentStore } from "./agentStore.js";
-import { buildThreadContext, mentionsUser, renderEnvelope, renderReactionEnvelope, renderSlackText, sourceKey, type EnvelopeAuthor, type ThreadContext, type WakeDecision } from "./envelope.js";
+import { buildThreadContext, formatTime, mentionsUser, renderEnvelope, renderReactionEnvelope, renderSlackText, sourceKey, type EnvelopeAuthor, type ThreadContext, type WakeDecision } from "./envelope.js";
 import { buildInstructions } from "./instructions.js";
 import { RuleJudge, type JudgeInput, type JudgeMessage, type Verdict, type WakeJudge } from "./judge.js";
 import { AgentMind, type RuntimeFactory } from "./mind.js";
@@ -55,8 +55,12 @@ const RECENT_MESSAGES = 8;
 const OPERATOR_COMMANDS = new Set([".status", ".stop", ".compact", ".reset"]);
 // Marks a Slack event as taken in, whoever it woke, so a second copy of it is ignored.
 const INTAKE = "_intake";
-// How far back a first wake in a channel looks along its main line.
+// How far back a wake in a channel looks along its main line: this many messages, and no older than this.
 const CHANNEL_CATCH_UP_MESSAGES = 30;
+const CHANNEL_CATCH_UP_SECONDS = 24 * 60 * 60;
+// The index of who spoke where keeps this much.
+const MESSAGE_INDEX_DAYS = 30;
+const WHATS_NEW_CONVERSATIONS = 15;
 
 export function personaOf(spec: AgentSpec): SlackPersona {
   return { username: spec.name, icon: spec.icon };
@@ -164,6 +168,7 @@ export class AgentHub {
       }
     });
     await slack.identify();
+    this.store.pruneMessageIndex(((Date.now() - MESSAGE_INDEX_DAYS * 86_400_000) / 1000).toFixed(6));
 
     const results = await Promise.allSettled(specs.map((spec) => this.startSeat(spec)));
     results.forEach((result, index) => {
@@ -230,6 +235,12 @@ export class AgentHub {
         canUploadLocalFiles: spec.host.kind === "local",
         latestActionToken: () => this.actionToken,
         noteRead: (channelId, threadKey, ts) => this.store.markSeen(spec.name, channelId, threadKey, ts),
+        dm: {
+          ownerOf: (channelId, threadTs) => this.store.dmOwner(channelId, threadTs),
+          claim: (channelId, threadTs) => void this.store.claimDmSession(channelId, threadTs, spec.name),
+          sessions: (channelId) => this.store.dmSessions(spec.name, channelId),
+        },
+        fetchFiles: (key, files) => prepareSlackAttachments(key, files, [], slack.botTokenForDownloads(), this.config),
       }),
     ];
     const ownInstructions = spec.instructionsPath && fs.existsSync(spec.instructionsPath) ? fs.readFileSync(spec.instructionsPath, "utf8") : null;
@@ -260,6 +271,25 @@ export class AgentHub {
             // An agent at rest has no process running; it still wakes the moment it is addressed, so it is never shown as "down".
             .map((other) => `${other.spec.name}${other.spec.name === seat.spec.name ? " (you)" : ""} · ${other.spec.title ?? "teammate"} · ${other.mind.state() === "running" ? "working right now" : "available, wakes when addressed"}`)
             .join("\n"),
+      }),
+      define({
+        name: "whats_new",
+        description:
+          "What has been said since you last looked, across the conversations you can see: counts only, no content, like unread badges. Asking clears them. The counts come from what the bridge saw while it was running, so treat them as a good hint, not an audit. Most of it will not concern you; read a conversation (read_history) only when your work needs it.",
+        shape: {},
+        handler: async () => {
+          const slack = this.requireSlack();
+          const rows = this.store.whatsNew(seat.spec.name, (Date.now() / 1000).toFixed(6), WHATS_NEW_CONVERSATIONS);
+          if (rows.length === 0) return "nothing new since you last looked";
+          const lines: string[] = [];
+          for (const row of rows) {
+            const conversation = await slack.getConversation(row.channelId).catch(() => null);
+            const place = row.channelType === "im" ? "your direct-message session" : row.channelType === "mpim" ? "group DM" : `#${conversation?.name ?? "unknown"}`;
+            const where = `${place} (channel=${row.channelId}${row.threadKey === "top" ? ", main line" : ` thread_ts=${row.threadKey}`})`;
+            lines.push(`${where}: ${row.count} new, last at ${formatTime(row.lastTs, this.config.timezone)}, from ${row.authors.join(", ")}`);
+          }
+          return lines.join("\n");
+        },
       }),
       define({
         name: "create_agent",
@@ -339,14 +369,23 @@ export class AgentHub {
       const key = sourceKey(message);
       // Slack sends a mention twice, and sends events again after a dropped connection.
       if (this.store.hasSource(INTAKE, key)) return;
-      const listeners = [...this.seats.values()].filter((seat) => seat.spec.name !== message.agentAuthor);
-      if (listeners.length === 0) return;
-
       const identity = slack.identity();
-      const threadKey = message.threadTs ?? "top";
       const threadRoot = message.threadTs ?? message.ts;
+      // In the app's direct message every thread is a session of its own, so a top-level message there opens one.
+      const isDm = message.channelType === "im";
+      const threadKey = isDm ? threadRoot : (message.threadTs ?? "top");
       const conversationKey = `${message.channelId}:${threadKey}`;
       const author = await this.describeAuthor(message);
+      this.store.indexMessage({ channelId: message.channelId, channelType: message.channelType, threadKey, ts: message.ts, author: author.name });
+
+      let listeners = [...this.seats.values()].filter((seat) => seat.spec.name !== message.agentAuthor);
+      // A DM session belongs to one agent. Only it hears what is said there, whoever is named.
+      const sessionOwner = isDm ? this.store.dmOwner(message.channelId, threadRoot) : null;
+      if (sessionOwner && this.seats.has(sessionOwner)) listeners = listeners.filter((seat) => seat.spec.name === sessionOwner);
+      if (listeners.length === 0) {
+        this.store.recordHandled(INTAKE, key, "");
+        return;
+      }
       const names = new Map<string, string>();
       for (const match of message.text.matchAll(/<@([A-Z0-9]+)/g)) {
         if (!names.has(match[1]!)) names.set(match[1]!, (await slack.getPerson(match[1]!)).name);
@@ -383,7 +422,17 @@ export class AgentHub {
         appMentioned: mentionsUser(message.text, identity.botUserId),
         defaultAgent: this.registry?.defaultAgent() ?? null,
       });
-      this.remember(message.channelId, threadKey, judgeInput.message);
+      this.remember(message.channelId, threadKey, judgeInput.message, !isDm);
+
+      if (isDm) {
+        const owner = sessionOwner && decisions.has(sessionOwner) ? sessionOwner : [...decisions.entries()].filter(([, decision]) => decision.wake).sort((a, b) => (b[1].probability ?? 0) - (a[1].probability ?? 0))[0]?.[0];
+        for (const [name, decision] of decisions) decisions.set(name, name === owner ? { ...decision, wake: true, reason: decision.wake ? decision.reason : "addressed" } : { ...decision, wake: false, reason: "none" });
+        if (owner && !sessionOwner) {
+          this.store.claimDmSession(message.channelId, threadRoot, owner);
+          // The title is how the person tells their sessions apart; the agent gives it a real one once it knows the subject.
+          void slack.renameSession(message.channelId, threadRoot, owner).catch(() => {});
+        }
+      }
 
       // The loop breaker is for our own agents talking to each other. People and other apps always get through.
       const channelPrefix = `${message.channelId}:`;
@@ -484,7 +533,7 @@ export class AgentHub {
       const channelType = conversation?.type ?? (reaction.channelId.startsWith("D") ? "im" : "channel");
       const threadRoot = target.threadTs ?? reaction.itemTs;
       const excerpt = renderSlackText(target.text, slack.identity().botUserId, new Map()).replace(/[\r\n]+/g, " ").slice(0, 200);
-      this.remember(reaction.channelId, target.threadTs ?? "top", { from: `${author.name} (${author.kind})`, text: `(reacted :${reaction.emoji}: to ${seat.spec.name}'s message "${excerpt}")` });
+      this.remember(reaction.channelId, channelType === "im" ? threadRoot : (target.threadTs ?? "top"), { from: `${author.name} (${author.kind})`, text: `(reacted :${reaction.emoji}: to ${seat.spec.name}'s message "${excerpt}")` });
 
       const text = renderReactionEnvelope({
         reaction,
@@ -508,7 +557,7 @@ export class AgentHub {
 
   // What the judgment model sees as "what was just said": the conversation itself, and for a channel's main line also
   // what happened in its threads, since that is what a person scrolling the channel has in view.
-  private remember(channelId: string, threadKey: string, message: JudgeMessage): void {
+  private remember(channelId: string, threadKey: string, message: JudgeMessage, showOnMainLine = true): void {
     const push = (conversationKey: string, entry: JudgeMessage): void => {
       const list = this.recent.get(conversationKey) ?? [];
       list.push({ from: entry.from, text: entry.text.slice(0, 600) });
@@ -516,7 +565,7 @@ export class AgentHub {
       if (this.recent.size > 500) this.recent.delete(this.recent.keys().next().value!);
     };
     push(`${channelId}:${threadKey}`, message);
-    if (threadKey !== "top") push(`${channelId}:top`, { from: message.from, text: `(in a thread) ${message.text}` });
+    if (threadKey !== "top" && showOnMainLine) push(`${channelId}:top`, { from: message.from, text: `(in a thread) ${message.text}` });
   }
 
   // After a restart the bridge remembers nothing of a conversation, but Slack does. Read it once, so an un-named reply is
@@ -536,6 +585,8 @@ export class AgentHub {
         return `${person.name} (${person.isBot ? "app" : "human"})`;
       };
       const entries: JudgeMessage[] = [];
+      // A new DM session starts clean; the person's other sessions are other agents' business.
+      if (message.channelType === "im" && !message.threadTs) return;
       if (message.threadTs) {
         const history = await slack.readHistory({ channelId: message.channelId, threadTs: message.threadTs, limit: 50 });
         for (const item of history.filter((earlier) => earlier.ts < message.ts).slice(-RECENT_MESSAGES)) {
@@ -575,10 +626,13 @@ export class AgentHub {
   // since its last-read marker. On its first time here it gets the latest messages, its own included.
   private async fetchMissed(agent: string, message: SlackInbound): Promise<ThreadContext> {
     const slack = this.requireSlack();
+    // A message that opens a DM session has nothing before it that belongs to this agent.
+    if (message.channelType === "im" && !message.threadTs) return { kind: "thread", messages: [], total: 0 };
     const after = this.store.lastSeen(agent, message.channelId, message.threadTs ?? "top");
+    const oldest = (Number(message.ts.split(".")[0]) - CHANNEL_CATCH_UP_SECONDS).toFixed(6);
     const fetched = message.threadTs
       ? await slack.readHistory({ channelId: message.channelId, threadTs: message.threadTs, limit: 200 })
-      : await slack.readHistory({ channelId: message.channelId, limit: CHANNEL_CATCH_UP_MESSAGES, before: message.ts });
+      : (await slack.readHistory({ channelId: message.channelId, limit: CHANNEL_CATCH_UP_MESSAGES, before: message.ts })).filter((item) => item.ts >= oldest);
     const own = slack.identity();
     // Past its marker, the agent already knows what it said itself.
     const history = after ? fetched.filter((item) => !(item.botId === own.botId && item.username === agent)) : fetched;
