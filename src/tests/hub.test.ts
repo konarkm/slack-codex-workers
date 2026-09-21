@@ -217,6 +217,14 @@ describe("AgentHub", () => {
     expect(delivered("ada").at(-1)!.text).not.toContain("-context");
   });
 
+  it("tells each agent who else the same message woke, so they can settle who takes it", async () => {
+    await startHub(TEAM);
+    judge.next = { for: ["ada", "cody"] };
+    await slack.handler!(inbound({ text: "can someone look at the failing build" }));
+    expect(delivered("ada")[0]!.text).toContain("Also woken by this message: cody");
+    expect(delivered("cody")[0]!.text).toContain("Also woken by this message: ada");
+  });
+
   it("tells the judge who is in the room, what they do, and what was just said", async () => {
     await startHub(TEAM);
     await slack.handler!(inbound({ text: "the deploy is failing again" }));

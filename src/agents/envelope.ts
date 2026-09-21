@@ -39,6 +39,8 @@ export interface EnvelopeInput {
   imageCount: number;
   timezone: string;
   threadContext: ThreadContext | null;
+  // Other agents this same message woke, so each can see who else is looking at it.
+  alsoWoken?: string[];
 }
 
 const MAX_BODY_CHARS = 16_000;
@@ -121,6 +123,7 @@ export function renderEnvelope(input: EnvelopeInput): string {
     `Reply target: channel=${target.channel}${target.threadTs ? ` thread_ts=${target.threadTs}` : ""}`,
   ];
   if (decision.wake && decision.reason === "default") fields.push("Note: this was not clearly for any one agent; you are the one who picks those up.");
+  if (input.alsoWoken && input.alsoWoken.length > 0) fields.push(`Also woken by this message: ${input.alsoWoken.map(sanitizeHeader).join(", ")}`);
   const attachments = [...input.fileNotes.map(sanitizeHeader), ...(input.imageCount > 0 ? [`${input.imageCount} image${input.imageCount === 1 ? "" : "s"} attached to this input`] : [])];
   if (attachments.length > 0) fields.push(`Files: ${attachments.join("; ")}`);
   const sections: string[] = [];
@@ -177,10 +180,15 @@ export function buildThreadContext(
   renderText: (text: string) => string,
 ): ThreadContext {
   const earlier = history.filter((item) => item.ts < triggerTs && (!afterTs || item.ts > afterTs));
+  let included = earlier.slice(-limit);
+  // A thread read for the first time keeps its opening message, which says what the thread is about.
+  const root = kind === "thread" ? earlier.find((item) => item.ts === item.threadTs) : undefined;
+  if (root && !included.includes(root)) included = [root, ...earlier.slice(-(limit - 1))];
   return {
     kind,
     total: earlier.length,
-    messages: earlier.slice(-limit).map((item) => ({ author: describeAuthor(item), ts: item.ts, text: renderText(item.text) })),
+    // On a channel's main line, a message with replies is a thread the agent can go and read.
+    messages: included.map((item) => ({ author: describeAuthor(item), ts: item.ts, text: `${renderText(item.text)}${kind === "channel" && item.replyCount > 0 ? ` [thread with ${item.replyCount} ${item.replyCount === 1 ? "reply" : "replies"}]` : ""}` })),
   };
 }
 

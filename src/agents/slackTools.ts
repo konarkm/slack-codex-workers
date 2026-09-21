@@ -17,6 +17,8 @@ export interface SlackToolContext {
   timezone: string;
   // False when the agent's files live on another machine than the bridge.
   canUploadLocalFiles: boolean;
+  // The agent read a conversation up to this message, so a later wake there does not hand it the same messages again.
+  noteRead(channelId: string, threadKey: string, ts: string): void;
   // The latest search token Slack has given the app. Null when there is none.
   latestActionToken(): string | null;
 }
@@ -173,8 +175,13 @@ export function buildSlackTools(ctx: SlackToolContext): AgentTool[] {
         limit: z.number().int().min(1).max(200).optional().describe("Default 30."),
         before: z.string().optional().describe("Only messages older than this ts."),
       },
-      handler: async (args) =>
-        renderHistory(slack, ctx.persona.username, await slack.readHistory({ channelId: args.channel, threadTs: args.thread_ts ?? null, limit: args.limit ?? 30, before: args.before ?? null })),
+      handler: async (args) => {
+        const messages = await slack.readHistory({ channelId: args.channel, threadTs: args.thread_ts ?? null, limit: args.limit ?? 30, before: args.before ?? null });
+        const newest = messages.at(-1);
+        // Reading the latest page is catching up.
+        if (newest && !args.before) ctx.noteRead(args.channel, args.thread_ts ?? "top", newest.ts);
+        return renderHistory(slack, ctx.persona.username, messages);
+      },
     }),
     defineTool({
       name: "list_channels",

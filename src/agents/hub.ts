@@ -229,6 +229,7 @@ export class AgentHub {
         timezone: this.config.timezone,
         canUploadLocalFiles: spec.host.kind === "local",
         latestActionToken: () => this.actionToken,
+        noteRead: (channelId, threadKey, ts) => this.store.markSeen(spec.name, channelId, threadKey, ts),
       }),
     ];
     const ownInstructions = spec.instructionsPath && fs.existsSync(spec.instructionsPath) ? fs.readFileSync(spec.instructionsPath, "utf8") : null;
@@ -450,6 +451,7 @@ export class AgentHub {
           imageCount: imagePaths.length,
           timezone: this.config.timezone,
           threadContext: missed,
+          alsoWoken: woken.filter((other) => other.seat !== seat).map((other) => other.seat.spec.name),
         });
         seat.statusThreads.set(`${message.channelId}:${threadRoot}`, { channelId: message.channelId, threadTs: threadRoot });
         void slack.setThreadStatus(message.channelId, threadRoot, "processing", personaOf(spec));

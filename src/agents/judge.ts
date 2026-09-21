@@ -62,14 +62,15 @@ export class RuleJudge implements WakeJudge {
   }
 }
 
-// When an open ask has a clear taker, nobody else is woken by it.
-const OPEN_ASK_OTHERS_CAP = 0.2;
+// A judgment takes about 150 ms, so a failed one is simply asked again before the plain rules take over.
+const ATTEMPTS = 3;
+const ATTEMPT_TIMEOUT_MS = 2_500;
+const RETRY_WAITS_MS = [150, 500];
 
 interface JevAnswer {
   type: string;
   noul?: number;
   choice?: string;
-  probabilities?: Record<string, number>;
 }
 
 export interface JevOptions {
@@ -89,12 +90,20 @@ export class JevJudge implements WakeJudge {
   constructor(private readonly options: JevOptions) {}
 
   async judge(input: JudgeInput): Promise<Verdict> {
-    try {
-      return await this.ask(input);
-    } catch (error) {
-      logWarn("judgment model unavailable; using plain rules for this message", { error: error instanceof Error ? error.message : String(error) });
-      return this.fallback.judge(input);
+    const errors: string[] = [];
+    for (let attempt = 0; attempt < ATTEMPTS; attempt += 1) {
+      try {
+        const verdict = await this.ask(input);
+        if (errors.length > 0) logWarn("judgment succeeded after a retry", { errors });
+        return verdict;
+      } catch (error) {
+        errors.push(error instanceof Error ? error.message : String(error));
+        const wait = RETRY_WAITS_MS[attempt];
+        if (wait !== undefined) await new Promise((resolve) => setTimeout(resolve, wait));
+      }
     }
+    logWarn("judgment model unavailable; using plain rules for this message", { errors });
+    return this.fallback.judge(input);
   }
 
   private async ask(input: JudgeInput): Promise<Verdict> {
@@ -109,15 +118,15 @@ export class JevJudge implements WakeJudge {
         },
       },
     };
-    // An open ask ("can someone…") is said to nobody in particular. Judged per agent, every agent looks plausible;
-    // asked as one choice, the agents are weighed against each other and the best fit takes it.
+    // An open ask ("can someone…") is said to every agent. Nobody picks a taker here: the agents all hear it and
+    // settle between themselves who takes it, or ask.
     questions.open_ask = {
-      type: "choice",
+      type: "noul",
       instructions:
-        'If `new_message` is an open question or request to the room with nobody named ("can someone", "does anyone know", or a task stated to no one), which agent\'s role in `agents` fits it best? Otherwise answer nobody.',
+        'Is `new_message` an open question or request put to the room with nobody named ("can someone", "does anyone know", or a task stated to no one), of a kind the agents in `agents` exist to pick up?',
       criteria: {
-        ...Object.fromEntries(input.agents.map((agent, index) => [`agent_${index}`, `An open ask with nobody named, and ${agent.name} (${agent.role ?? "teammate"}) is the best fit for it`])),
-        nobody: "The message names or is plainly said to specific people or agents, is addressed to everyone at once, continues an exchange already under way, or is not something any agent should pick up",
+        true: "Nobody is named, it is not a reply in an exchange already under way, and it asks for work or information that an agent on this team could provide",
+        false: "It names or is plainly said to specific people or agents, continues an exchange already under way, or is talk between people (plans, chatter, social questions) that no agent is being asked to handle",
       },
     };
     input.agents.forEach((agent, index) => {
@@ -125,8 +134,8 @@ export class JevJudge implements WakeJudge {
         type: "noul",
         instructions: `Is \`new_message\` said to the agent named "${agent.name}"? Read it the way ${agent.name} would on seeing it in Slack: from the words, from who has been talking to whom in \`recent_messages\`, and from each agent's role in \`agents\`. Judge only who is being spoken to. Do not judge whether the message is important or needs a reply.`,
         criteria: {
-          true: `The message is said to ${agent.name}: it names, greets, or thanks ${agent.name}, asks or tells ${agent.name} something, replies to something ${agent.name} said, continues a back-and-forth ${agent.name} is part of even without naming anyone, says ${agent.name} should do or look at something, or is addressed to everyone or to all the agents`,
-          false: `The message is said to someone else, only reports on or gossips about ${agent.name} without wanting anything from ${agent.name}, or is general talk that is not directed at ${agent.name}`,
+          true: `The message is said to ${agent.name}: it names, greets, or thanks ${agent.name}, asks or tells ${agent.name} something, replies to something ${agent.name} said, continues a back-and-forth ${agent.name} is part of even without naming anyone, says ${agent.name} should do or look at something, or is addressed to all the agents`,
+          false: `The message is said to someone else, only reports on or gossips about ${agent.name} without wanting anything from ${agent.name}, is a social question or plan among people (coffee, lunch, who is around), or is general talk that is not directed at ${agent.name}`,
         },
       };
       if (agent.working) {
@@ -143,7 +152,7 @@ export class JevJudge implements WakeJudge {
       new_message: input.message,
     };
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.options.timeoutMs ?? 4_000);
+    const timer = setTimeout(() => controller.abort(), this.options.timeoutMs ?? ATTEMPT_TIMEOUT_MS);
     let answers: Record<string, JevAnswer>;
     try {
       const response = await (this.options.fetchImpl ?? fetch)(this.options.endpoint ?? "https://api.typesafe.ai/v1/systemone", {
@@ -166,13 +175,8 @@ export class JevJudge implements WakeJudge {
       const stopAnswer = answers[`stop_${index}`]?.noul;
       if (typeof stopAnswer === "number") stop.set(agent.name, stopAnswer);
     });
-    const openAsk = answers.open_ask;
-    const taker = openAsk?.choice?.startsWith("agent_") ? input.agents[Number(openAsk.choice.slice("agent_".length))] : undefined;
-    const takerProbability = taker ? (openAsk?.probabilities?.[openAsk.choice!] ?? 0) : 0;
-    if (taker && takerProbability >= 0.5) {
-      // An open ask goes to its one best fit; "anyone" is not a reason to wake the rest.
-      for (const agent of input.agents) needs.set(agent.name, agent === taker ? Math.max(needs.get(agent.name) ?? 0, takerProbability) : Math.min(needs.get(agent.name) ?? 0, OPEN_ASK_OTHERS_CAP));
-    }
+    const openAsk = answers.open_ask?.noul ?? 0;
+    if (openAsk >= 0.5) for (const agent of input.agents) needs.set(agent.name, Math.max(needs.get(agent.name) ?? 0, openAsk));
     const urgency = answers.urgency?.choice;
     return {
       needs,

@@ -23,7 +23,7 @@ function fakeFetch(respond: (body: any) => { status?: number; json?: unknown } |
 describe("JevJudge", () => {
   it("asks one request per message: a question per agent, a stop question only for working agents, who takes an open ask, and urgency", async () => {
     const { impl, calls } = fakeFetch(() => ({
-      json: { answers: { needs_0: { type: "noul", noul: 0.04 }, needs_1: { type: "noul", noul: 0.96 }, stop_1: { type: "noul", noul: 0.01 }, open_ask: { type: "choice", choice: "nobody", probabilities: { nobody: 0.9 } }, urgency: { type: "choice", choice: "now" } } },
+      json: { answers: { needs_0: { type: "noul", noul: 0.04 }, needs_1: { type: "noul", noul: 0.96 }, stop_1: { type: "noul", noul: 0.01 }, open_ask: { type: "noul", noul: 0.03 }, urgency: { type: "choice", choice: "now" } } },
     }));
     const verdict = await new JevJudge({ apiKey: "k", fetchImpl: impl }).judge(input);
     expect(calls).toHaveLength(1);
@@ -37,13 +37,24 @@ describe("JevJudge", () => {
     expect(verdict.stop.has("ada")).toBe(false);
   });
 
-  it("gives an open ask to its one best-fit agent, not to everyone it could plausibly be for", async () => {
+  it("lets every agent hear an open ask; it does not pick a taker", async () => {
     const { impl } = fakeFetch(() => ({
-      json: { answers: { needs_0: { type: "noul", noul: 0.6 }, needs_1: { type: "noul", noul: 0.65 }, open_ask: { type: "choice", choice: "agent_1", probabilities: { agent_0: 0.02, agent_1: 0.97, nobody: 0.01 } }, urgency: { type: "choice", choice: "next" } } },
+      json: { answers: { needs_0: { type: "noul", noul: 0.2 }, needs_1: { type: "noul", noul: 0.65 }, open_ask: { type: "noul", noul: 0.93 }, urgency: { type: "choice", choice: "next" } } },
     }));
     const verdict = await new JevJudge({ apiKey: "k", fetchImpl: impl }).judge({ ...input, message: { from: "Konark (human)", text: "can someone fix the deploy script" } });
-    expect(verdict.needs.get("cody")).toBe(0.97);
-    expect(verdict.needs.get("ada")).toBeLessThan(0.5);
+    expect(verdict.needs.get("ada")).toBe(0.93);
+    expect(verdict.needs.get("cody")).toBe(0.93);
+  });
+
+  it("asks again before giving up on the model, since a judgment takes a fraction of a second", async () => {
+    let calls = 0;
+    const flaky = fakeFetch(() => {
+      calls += 1;
+      return calls < 3 ? { status: 503 } : { json: { answers: { needs_0: { type: "noul", noul: 0.9 }, needs_1: { type: "noul", noul: 0.1 }, urgency: { type: "choice", choice: "next" } } } };
+    });
+    const verdict = await new JevJudge({ apiKey: "k", fetchImpl: flaky.impl }).judge(input);
+    expect(verdict.source).toBe("jev");
+    expect(calls).toBe(3);
   });
 
   it("falls back to plain rules when the model cannot be reached or answers badly, so messages still wake someone", async () => {
