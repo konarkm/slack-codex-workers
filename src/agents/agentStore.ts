@@ -497,6 +497,15 @@ export class AgentStore {
     return (this.db.prepare("SELECT thread_ts FROM dm_sessions WHERE agent = ? AND channel_id = ? ORDER BY thread_ts DESC LIMIT 50").all(agent, channelId) as Array<{ thread_ts: string }>).map((row) => row.thread_ts);
   }
 
+  // Everything the bridge holds for an agent that is being torn down. Its Slack messages stay in Slack.
+  forgetAgent(name: string): void {
+    for (const table of ["inbox", "conversation_seen", "agent_checks", "dm_sessions", "thread_participation", "scheduled_wakes", "webhook_subscriptions"]) {
+      this.db.prepare(`DELETE FROM ${table} WHERE agent = ?`).run(name);
+    }
+    this.db.prepare("DELETE FROM agents WHERE name = ?").run(name);
+    this.db.prepare("DELETE FROM webhook_sources WHERE owner_agent = ?").run(name);
+  }
+
   clearSeen(agent: string): void {
     this.db.prepare("DELETE FROM conversation_seen WHERE agent = ?").run(agent);
   }

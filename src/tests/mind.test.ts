@@ -16,6 +16,7 @@ const spec: AgentSpec = {
   instructionsPath: null,
   inheritUserConfig: false,
   denyTools: [],
+  retired: false,
 };
 
 class FakeRuntime implements AgentRuntime {

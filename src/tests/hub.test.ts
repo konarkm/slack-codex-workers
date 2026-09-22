@@ -517,6 +517,56 @@ describe("AgentHub", () => {
     expect(text).not.toContain("last week's argument");
   });
 
+  it("lets an agent repurpose, retire, revive, and delete agents, and keeps a retired one from hearing anything", async () => {
+    await startHub(TEAM);
+    judge.next = { for: ["ada"] };
+    await slack.handler!(inbound({ text: "ada hi" }));
+    const ada = runtimes.get("ada")!;
+    // Repurpose cody: new role and instructions, same name; he restarts with them.
+    expect(await ada.tool("update_agent").handler({ name: "cody", title: "release manager", instructions: "You ship releases." } as never)).toContain("running with the change");
+    expect(await ada.tool("list_agents").handler({} as never)).toContain("cody · release manager");
+    expect(runtimes.get("cody")!.options.instructions).toContain("You ship releases.");
+    expect(fs.readFileSync(path.join(dir, "homes", "cody", "AGENT.md"), "utf8")).toContain("You ship releases.");
+    // Retire cody: nothing reaches him, and the roster says so.
+    expect(await ada.tool("retire_agent").handler({ name: "cody", reason: "release done" } as never)).toContain("retired cody");
+    const codyRuntime = runtimes.get("cody")!;
+    judge.next = { for: ["cody"] };
+    await slack.handler!(inbound({ ts: "1726700001.000100", text: "cody are you there" }));
+    expect(codyRuntime.delivered).toHaveLength(0);
+    expect(await ada.tool("list_agents").handler({} as never)).toContain("cody · release manager · codex · retired");
+    expect(JSON.parse(fs.readFileSync(path.join(dir, "agents.json"), "utf8")).agents.find((entry: { name: string }) => entry.name === "cody")).toMatchObject({ retired: true, retiredReason: "release done" });
+    // The last agent listening cannot retire.
+    expect(await ada.tool("retire_agent").handler({ name: "ada", reason: "bored" } as never)).toContain("only agent listening");
+    // Revive cody: he hears again, and his message arrives with the current instructions.
+    expect(await ada.tool("revive_agent").handler({ name: "cody" } as never)).toContain("revived cody");
+    judge.next = { for: ["cody"] };
+    await slack.handler!(inbound({ ts: "1726700002.000100", text: "cody welcome back" }));
+    expect(runtimes.get("cody")!.delivered).toHaveLength(1);
+    // Delete: gone from the roster and the bridge's records; an agent cannot delete itself.
+    expect(await ada.tool("delete_agent").handler({ name: "ada", reason: "x", confirm: true } as never)).toContain("cannot delete yourself");
+    expect(await ada.tool("delete_agent").handler({ name: "cody", reason: "never needed again", confirm: true } as never)).toBe("deleted cody.");
+    expect(fs.existsSync(path.join(dir, "homes", "cody"))).toBe(false);
+    expect(await ada.tool("list_agents").handler({} as never)).not.toContain("cody");
+    await slack.handler!(inbound({ ts: "1726700003.000100", text: "cody?" }));
+    expect(runtimes.get("cody")!.delivered).toHaveLength(1);
+  });
+
+  it("lets an agent retire itself, taking effect when its turn ends", async () => {
+    await startHub(TEAM);
+    judge.next = { for: ["cody"] };
+    await slack.handler!(inbound({ text: "cody wrap up" }));
+    const cody = runtimes.get("cody")!;
+    expect(await cody.tool("retire_agent").handler({ name: "cody", reason: "job done" } as never)).toContain("end of this turn");
+    // Still able to speak during the turn.
+    await cody.tool("send_message").handler({ channel: "C1", text: "signing off", thread_ts: "1726700000.000100" } as never);
+    expect(slack.posted).toHaveLength(1);
+    await cody.finishTurn();
+    await flush();
+    judge.next = { for: ["cody"] };
+    await slack.handler!(inbound({ ts: "1726700001.000100", text: "cody one more thing" }));
+    expect(cody.delivered).toHaveLength(1);
+  });
+
   it("tells the operators, as the bridge, when it gives up on someone's message", async () => {
     await startHub(TEAM);
     judge.next = { for: ["ada"] };
@@ -538,7 +588,7 @@ describe("AgentHub", () => {
 describe("decideWakes", () => {
   const spec = (name: string, wake: Partial<AgentSpec["wake"]> = {}): AgentSpec => ({
     name, title: null, icon: null, runtime: "claude", model: null, effort: null, host: { kind: "local" }, cwd: "/tmp",
-    wake: { natural: true, threshold: 0.5, ...wake }, instructionsPath: null, inheritUserConfig: false, denyTools: DEFAULT_DENY_TOOLS,
+    wake: { natural: true, threshold: 0.5, ...wake }, instructionsPath: null, inheritUserConfig: false, denyTools: DEFAULT_DENY_TOOLS, retired: false,
   });
   const verdict = (needs: Record<string, number>, source: Verdict["source"] = "jev"): Verdict => ({ needs: new Map(Object.entries(needs)), stop: new Map(), urgency: "next", source });
   const context = { authorKind: "human" as const, authorAgent: null, isDirectMessage: false, appMentioned: false, defaultAgent: "ada" };

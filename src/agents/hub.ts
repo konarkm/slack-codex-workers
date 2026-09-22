@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import path from "node:path";
 import process from "node:process";
 import { z } from "zod";
 import { logError, logInfo, logWarn } from "../logger.js";
@@ -41,6 +42,8 @@ export interface SlackClientFactory {
 interface Seat {
   spec: AgentSpec;
   mind: AgentMind;
+  // Set when the agent retired itself mid-turn; it stops when that turn ends.
+  retiring: boolean;
   // Threads currently showing this agent as working.
   statusThreads: Map<string, { channelId: string; threadTs: string }>;
   lastState: RuntimeState;
@@ -52,7 +55,7 @@ const AGENT_WAKE_BUDGET_QUIET_MS = 30 * 60_000;
 const STOP_THRESHOLD = 0.8;
 const RECENT_MESSAGES = 8;
 
-const OPERATOR_COMMANDS = new Set([".status", ".stop", ".compact", ".reset"]);
+const OPERATOR_COMMANDS = new Set([".status", ".stop", ".compact", ".reset", ".retire", ".revive", ".delete"]);
 // Marks a Slack event as taken in, whoever it woke, so a second copy of it is ignored.
 const INTAKE = "_intake";
 // How far back a wake in a channel looks along its main line: this many messages, and no older than this.
@@ -98,6 +101,8 @@ export class AgentHub {
   private readonly recent = new Map<string, JudgeMessage[]>();
   // Conversations whose recent messages have been read back from Slack since this process started.
   private readonly hydrated = new Set<string>();
+  // Agents that changed their own spec mid-turn and restart when the turn ends.
+  private readonly pendingRestart = new Set<string>();
   // The latest search token Slack attached to an @-mention or DM. A search runs as the person whose message carried it.
   // Slack does not say how long one lasts.
   private actionToken: string | null = null;
@@ -170,9 +175,10 @@ export class AgentHub {
     await slack.identify();
     this.store.pruneMessageIndex(((Date.now() - MESSAGE_INDEX_DAYS * 86_400_000) / 1000).toFixed(6));
 
-    const results = await Promise.allSettled(specs.map((spec) => this.startSeat(spec)));
+    const active = specs.filter((spec) => !spec.retired);
+    const results = await Promise.allSettled(active.map((spec) => this.startSeat(spec)));
     results.forEach((result, index) => {
-      if (result.status === "rejected") logError("agent failed to start", { agent: specs[index]!.name, error: errorMessage(result.reason) });
+      if (result.status === "rejected") logError("agent failed to start", { agent: active[index]!.name, error: errorMessage(result.reason) });
     });
     if (this.seats.size === 0) throw new Error("No agent could be started");
     // Every mind exists before the socket opens, so no event can arrive with nowhere to go.
@@ -213,7 +219,7 @@ export class AgentHub {
   private startSeat(spec: AgentSpec): Seat {
     const slack = this.requireSlack();
     if (spec.host.kind === "local") fs.mkdirSync(spec.cwd, { recursive: true });
-    const seat: Seat = { spec, mind: null as unknown as AgentMind, statusThreads: new Map(), lastState: "down" };
+    const seat: Seat = { spec, mind: null as unknown as AgentMind, retiring: false, statusThreads: new Map(), lastState: "down" };
     const tools = [
       ...this.buildTeamTools(seat),
       ...buildWakeTools(spec.name, this.store, this.config.timezone),
@@ -264,13 +270,100 @@ export class AgentHub {
     return [
       define({
         name: "list_agents",
-        description: "List the agents on your team: their names, roles, and whether they are working right now. Address an agent by writing its name in a message, the way you would a person.",
+        description: "List the agents on the roster: their names, roles, and whether they are working right now, plus any retired ones. Address an agent by writing its name in a message, the way you would a person.",
         shape: {},
         handler: async () =>
-          [...this.seats.values()]
-            // An agent at rest has no process running; it still wakes the moment it is addressed, so it is never shown as "down".
-            .map((other) => `${other.spec.name}${other.spec.name === seat.spec.name ? " (you)" : ""} · ${other.spec.title ?? "teammate"} · ${other.mind.state() === "running" ? "working right now" : "available, wakes when addressed"}`)
+          (this.registry?.specs() ?? [])
+            .map((other) => {
+              const live = this.seats.get(other.name);
+              // An agent at rest has no process running; it still wakes the moment it is addressed, so it is never shown as "down".
+              const state = other.retired ? "retired" : live?.mind.state() === "running" ? "working right now" : "available, wakes when addressed";
+              return `${other.name}${other.name === seat.spec.name ? " (you)" : ""} · ${other.title ?? "teammate"} · ${other.model ?? other.runtime} · ${state}`;
+            })
             .join("\n"),
+      }),
+      define({
+        name: "update_agent",
+        description:
+          "Repurpose an agent, yourself included: change its role line, its standing instructions, its model, or its icon. The agent keeps its name, memory, and session and is told its instructions changed. Say in Slack what you changed and why.",
+        shape: {
+          name: z.string().regex(agentNamePattern),
+          title: z.string().min(1).optional().describe("New role line."),
+          instructions: z.string().min(1).optional().describe("New standing instructions, replacing the old ones in full."),
+          model: z.string().optional().describe("New model for its runtime."),
+          icon: z.string().optional(),
+        },
+        handler: async (args) => {
+          const registry = this.requireRegistry();
+          if (!registry.has(args.name)) return `no agent named ${args.name}`;
+          if (args.title === undefined && args.instructions === undefined && args.model === undefined && args.icon === undefined) return "nothing to change";
+          const spec = registry.update(args.name, { title: args.title, model: args.model, icon: args.icon }, args.instructions);
+          if (args.name === seat.spec.name) {
+            // Its own restart waits for this turn to end, or the tool result could never come back.
+            seat.retiring = false;
+            this.pendingRestart.add(args.name);
+            return `updated ${spec.name}. The change takes effect when this turn ends.`;
+          }
+          if (!spec.retired) await this.restartSeat(spec);
+          logInfo("agent updated by an agent", { agent: spec.name, by: seat.spec.name, changed: Object.keys(args).filter((key) => key !== "name") });
+          return `updated ${spec.name}. It is running with the change now.`;
+        },
+      }),
+      define({
+        name: "retire_agent",
+        description:
+          "Retire an agent whose job is done, yourself included. It stops listening but keeps its name, home, memory, and session, and can be brought back with revive_agent. Say in Slack that it retired and why. To remove an agent for good, use delete_agent.",
+        shape: { name: z.string().regex(agentNamePattern), reason: z.string().min(1) },
+        handler: async (args) => {
+          const registry = this.requireRegistry();
+          const spec = registry.spec(args.name);
+          if (!spec) return `no agent named ${args.name}`;
+          if (spec.retired) return `${args.name} is already retired`;
+          if (this.liveAgents().length <= 1) return `${args.name} is the only agent listening; retire it and nobody would hear anyone. Create or revive another first.`;
+          registry.update(args.name, { retired: true, retiredReason: args.reason });
+          if (args.name === seat.spec.name) {
+            seat.retiring = true;
+            return `you are retired as of the end of this turn. Finish what is due, say so in Slack, and stop.`;
+          }
+          await this.stopSeat(args.name);
+          logInfo("agent retired", { agent: args.name, by: seat.spec.name, reason: args.reason });
+          return `retired ${args.name}. It no longer hears anything; revive_agent brings it back.`;
+        },
+      }),
+      define({
+        name: "revive_agent",
+        description: "Bring a retired agent back, with its memory and session as they were. Pass new instructions to repurpose it at the same time.",
+        shape: { name: z.string().regex(agentNamePattern), title: z.string().min(1).optional(), instructions: z.string().min(1).optional() },
+        handler: async (args) => {
+          const registry = this.requireRegistry();
+          const known = registry.spec(args.name);
+          if (!known) return `no agent named ${args.name}`;
+          if (!known.retired) return `${args.name} is not retired`;
+          const spec = registry.update(args.name, { retired: false, title: args.title }, args.instructions);
+          const revived = this.startSeat(spec);
+          await revived.mind.start();
+          logInfo("agent revived", { agent: args.name, by: seat.spec.name });
+          return `revived ${spec.name}. It is listening now.`;
+        },
+      }),
+      define({
+        name: "delete_agent",
+        description:
+          "Tear an agent down for good: its roster entry, inbox, session record, and home directory on the bridge are removed. Its Slack messages stay. You cannot delete yourself; retire instead. Prefer retire_agent unless the agent will never be needed again. Say in Slack that it was deleted and why.",
+        shape: { name: z.string().regex(agentNamePattern), reason: z.string().min(1), confirm: z.literal(true).describe("You have considered retire_agent and mean to delete.") },
+        handler: async (args) => {
+          const registry = this.requireRegistry();
+          if (args.name === seat.spec.name) return "you cannot delete yourself; retire_agent is the way to stand down.";
+          if (!registry.has(args.name)) return `no agent named ${args.name}`;
+          if (this.liveAgents().filter((name) => name !== args.name).length < 1) return `${args.name} is the only agent listening; create another first.`;
+          await this.stopSeat(args.name);
+          const spec = registry.remove(args.name);
+          this.store.forgetAgent(args.name);
+          // Only a home the bridge made is the bridge's to remove.
+          if (spec.host.kind === "local" && spec.cwd.startsWith(`${this.config.agentsRoot}${path.sep}`)) fs.rmSync(spec.cwd, { recursive: true, force: true });
+          logInfo("agent deleted", { agent: args.name, by: seat.spec.name, reason: args.reason });
+          return `deleted ${args.name}.`;
+        },
       }),
       define({
         name: "whats_new",
@@ -315,6 +408,29 @@ export class AgentHub {
     ];
   }
 
+  private requireRegistry(): AgentRegistry {
+    if (!this.registry) throw new Error("the hub is not started");
+    return this.registry;
+  }
+
+  private liveAgents(): string[] {
+    return [...this.seats.keys()].filter((name) => !this.seats.get(name)!.retiring);
+  }
+
+  private async stopSeat(name: string): Promise<void> {
+    const seat = this.seats.get(name);
+    if (!seat) return;
+    this.seats.delete(name);
+    await seat.mind.stop();
+  }
+
+  // The same agent, with a changed spec: same session, same inbox, new instructions and runtime options.
+  private async restartSeat(spec: AgentSpec): Promise<void> {
+    await this.stopSeat(spec.name);
+    const seat = this.startSeat(spec);
+    await seat.mind.start();
+  }
+
   // Harness trouble goes to the operators as the bridge, in the agents' DM with them. It is never posted as an agent.
   private async tellOperators(agent: string, text: string): Promise<void> {
     const slack = this.requireSlack();
@@ -332,6 +448,14 @@ export class AgentHub {
     seat.lastState = state;
     // Starting up also passes through idle; only the end of a turn clears the working indicator.
     if (state === "running" || !wasRunning) return;
+    // An agent that changed or retired itself during the turn is dealt with now that the turn is over.
+    if (seat.retiring) {
+      logInfo("agent retired itself", { agent: seat.spec.name });
+      void this.stopSeat(seat.spec.name);
+    } else if (this.pendingRestart.delete(seat.spec.name)) {
+      const spec = this.requireRegistry().spec(seat.spec.name);
+      if (spec) void this.restartSeat(spec);
+    }
     const threads = [...seat.statusThreads.values()];
     seat.statusThreads.clear();
     await Promise.allSettled(threads.map((thread) => this.requireSlack().setThreadStatus(thread.channelId, thread.threadTs, "active", personaOf(seat.spec))));
@@ -668,7 +792,7 @@ export class AgentHub {
     const named = target ? this.seats.get(target.toLowerCase()) : undefined;
     const targets = named ? [named] : target === "all" || command === ".status" || this.seats.size === 1 ? [...this.seats.values()] : [];
     let reply: string;
-    if (targets.length === 0) {
+    if (targets.length === 0 && command !== ".revive" && command !== ".delete") {
       reply = `Which agent? Try \`${command} <name>\` or \`${command} all\`. Agents: ${[...this.seats.keys()].join(", ")}`;
     } else if (command === ".status") {
       reply = targets
@@ -680,17 +804,39 @@ export class AgentHub {
           ].join("\n");
         })
         .join("\n");
+    } else if (command === ".revive" || command === ".delete") {
+      const registry = this.requireRegistry();
+      const name = target?.toLowerCase() ?? "";
+      const known = registry.spec(name);
+      if (!known) reply = `no agent named ${name}`;
+      else if (command === ".revive") {
+        if (!known.retired) reply = `${name} is not retired`;
+        else {
+          const spec = registry.update(name, { retired: false });
+          await this.startSeat(spec).mind.start();
+          reply = `revived ${name}`;
+        }
+      } else {
+        await this.stopSeat(name);
+        const spec = registry.remove(name);
+        this.store.forgetAgent(name);
+        if (spec.host.kind === "local" && spec.cwd.startsWith(`${this.config.agentsRoot}${path.sep}`)) fs.rmSync(spec.cwd, { recursive: true, force: true });
+        reply = `deleted ${name}`;
+      }
     } else {
       for (const seat of targets) {
         if (command === ".stop") await seat.mind.interrupt();
         else if (command === ".compact") await seat.mind.compact();
-        else {
+        else if (command === ".retire") {
+          this.requireRegistry().update(seat.spec.name, { retired: true, retiredReason: "retired by an operator" });
+          await this.stopSeat(seat.spec.name);
+        } else {
           await seat.mind.resetSession();
           // A new session knows nothing, so its next wake anywhere brings full context again.
           this.store.clearSeen(seat.spec.name);
         }
       }
-      const done = command === ".stop" ? "interrupt sent to" : command === ".compact" ? "compaction requested for" : "session forgotten for";
+      const done = command === ".stop" ? "interrupt sent to" : command === ".compact" ? "compaction requested for" : command === ".retire" ? "retired" : "session forgotten for";
       reply = `${done} ${targets.map((seat) => seat.spec.name).join(", ")}`;
     }
     await slack.postMessage({ channelId: message.channelId, threadTs: message.threadTs, text: `_bridge_\n${reply}` });

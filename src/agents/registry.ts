@@ -22,6 +22,8 @@ const agentSchema = z.object({
   inheritUserConfig: z.boolean().default(false),
   denyTools: z.array(z.string().min(1)).optional(),
   createdBy: z.string().min(1).optional(),
+  retired: z.boolean().optional(),
+  retiredReason: z.string().optional(),
 });
 
 const registrySchema = z.object({
@@ -63,6 +65,7 @@ function toSpec(entry: RegistryFile["agents"][number], agentsRoot: string): Agen
     instructionsPath: entry.instructions ? path.resolve(expandHome(entry.instructions)) : null,
     inheritUserConfig: entry.inheritUserConfig,
     denyTools: entry.denyTools ?? DEFAULT_DENY_TOOLS,
+    retired: entry.retired ?? false,
   };
 }
 
@@ -93,11 +96,56 @@ export class AgentRegistry {
   }
 
   defaultAgent(): string | null {
-    return this.file.defaultAgent ?? this.file.agents[0]?.name ?? null;
+    const named = this.file.defaultAgent;
+    if (named && this.file.agents.some((entry) => entry.name === named && !entry.retired)) return named;
+    return this.file.agents.find((entry) => !entry.retired)?.name ?? null;
   }
 
   has(name: string): boolean {
     return this.file.agents.some((entry) => entry.name === name);
+  }
+
+  spec(name: string): AgentSpec | null {
+    const entry = this.file.agents.find((candidate) => candidate.name === name);
+    return entry ? toSpec(entry, this.agentsRoot) : null;
+  }
+
+  // Changes what an agent is: its role, instructions, model, icon. Instructions given as text replace the agent's own file.
+  update(name: string, patch: { title?: string; model?: string | null; effort?: string | null; icon?: string; retired?: boolean; retiredReason?: string }, instructionsText?: string): AgentSpec {
+    const entry = this.file.agents.find((candidate) => candidate.name === name);
+    if (!entry) throw new Error(`No agent named ${name}.`);
+    if (patch.title !== undefined) entry.title = patch.title;
+    if (patch.icon !== undefined) entry.icon = patch.icon;
+    if (patch.model !== undefined) entry.model = patch.model ?? undefined;
+    if (patch.effort !== undefined) entry.effort = patch.effort ?? undefined;
+    if (patch.retired !== undefined) {
+      entry.retired = patch.retired;
+      entry.retiredReason = patch.retired ? patch.retiredReason : undefined;
+    }
+    if (instructionsText?.trim()) {
+      const instructionsPath = entry.instructions ? path.resolve(expandHome(entry.instructions)) : path.join(this.agentsRoot, entry.name, "AGENT.md");
+      fs.mkdirSync(path.dirname(instructionsPath), { recursive: true });
+      fs.writeFileSync(instructionsPath, `${instructionsText.trim()}\n`);
+      entry.instructions = instructionsPath;
+    }
+    this.write();
+    return toSpec(entry, this.agentsRoot);
+  }
+
+  // Removes an agent from the roster. Its home directory is the caller's to deal with.
+  remove(name: string): AgentSpec {
+    const index = this.file.agents.findIndex((candidate) => candidate.name === name);
+    if (index < 0) throw new Error(`No agent named ${name}.`);
+    const [entry] = this.file.agents.splice(index, 1);
+    if (this.file.defaultAgent === name) this.file.defaultAgent = undefined;
+    this.write();
+    return toSpec(entry!, this.agentsRoot);
+  }
+
+  private write(): void {
+    const temporary = `${this.filePath}.tmp`;
+    fs.writeFileSync(temporary, `${JSON.stringify(this.file, null, 2)}\n`);
+    fs.renameSync(temporary, this.filePath);
   }
 
   // Adds an agent and writes the file. Instructions given as text are saved in the agent's home.
@@ -112,9 +160,7 @@ export class AgentRegistry {
     }
     const spec = toSpec(parsed, this.agentsRoot);
     this.file.agents.push(parsed);
-    const temporary = `${this.filePath}.tmp`;
-    fs.writeFileSync(temporary, `${JSON.stringify(this.file, null, 2)}\n`);
-    fs.renameSync(temporary, this.filePath);
+    this.write();
     return spec;
   }
 }

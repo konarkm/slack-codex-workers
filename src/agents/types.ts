@@ -35,6 +35,8 @@ export interface AgentSpec {
   inheritUserConfig: boolean;
   // Tools removed from the agent's reach, as harness tool specs (a whole MCP server: "mcp__server").
   denyTools: string[];
+  // A retired agent keeps its name, home, and session but does not listen. It can be brought back.
+  retired: boolean;
 }
 
 // Inherited connectors an agent never gets unless its entry lifts the denial: the ones that speak as the operator (their
