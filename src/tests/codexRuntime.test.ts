@@ -1,7 +1,10 @@
 import { EventEmitter } from "node:events";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { CodexRuntime, classifyCodexError, codexDenyArgs, type CodexRpc } from "../runtimes/codexRuntime.js";
+import { CodexRuntime, classifyCodexError, codexDenyArgs, rewriteRolloutTools, type CodexRpc } from "../runtimes/codexRuntime.js";
 import { DEFAULT_WAKE_POLICY, type AgentSpec, type RuntimeEvents, type RuntimeState } from "../agents/types.js";
 
 const spec: AgentSpec = {
@@ -72,6 +75,8 @@ function setup(sessionId: string | null, sent: string[] = []) {
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
+const silentEvents = (): RuntimeEvents => ({ onSessionChanged: () => {}, onStateChanged: () => {}, onTurnCompleted: () => {}, onActivity: () => {}, onCompaction: () => {}, onProblem: () => {} });
+
 describe("CodexRuntime", () => {
   it("starts a thread with canonical dynamic tools and reports the session", async () => {
     const { rpc, runtime, sessions } = setup(null);
@@ -94,6 +99,34 @@ describe("CodexRuntime", () => {
     await gone.runtime.start();
     expect(gone.rpc.requests.map((r) => r.method)).toEqual(["thread/resume", "thread/start"]);
     expect(gone.sessions).toEqual(["thread-new"]);
+  });
+
+  it("writes the current tools into a persisted thread's rollout before resuming it", async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-home-"));
+    const dir = path.join(cwd, ".codex-home", "sessions", "2026", "09", "21");
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, "rollout-2026-09-21T10-49-56-thread-old.jsonl");
+    const stale = { type: "function", name: "old_tool", description: "gone", inputSchema: { type: "object" } };
+    const meta = { timestamp: "t", type: "session_meta", payload: { id: "thread-old", dynamic_tools: [stale] } };
+    fs.writeFileSync(file, `${JSON.stringify(meta)}\n${JSON.stringify({ type: "turn_context", payload: {} })}\n`);
+    const rpc = new FakeRpc();
+    const runtime = new CodexRuntime(
+      { spec: { ...spec, cwd }, sessionId: "thread-old", instructions: "be a teammate", tools: [{ name: "send", description: "send", shape: { text: z.string() }, handler: async () => "ok" }], events: silentEvents() },
+      "codex",
+      () => rpc as unknown as CodexRpc,
+    );
+    await runtime.start();
+    expect(rpc.requests.map((r) => r.method)).toEqual(["thread/resume"]);
+    const lines = fs.readFileSync(file, "utf8").split("\n");
+    const written = JSON.parse(lines[0]!);
+    expect(written.payload.dynamic_tools.map((tool: { name: string }) => tool.name)).toEqual(["send"]);
+    expect(written.payload.id).toBe("thread-old");
+    expect(lines[1]).toBe(JSON.stringify({ type: "turn_context", payload: {} }));
+
+    // The same list again leaves the file untouched.
+    const before = fs.statSync(file).mtimeMs;
+    expect(rewriteRolloutTools(file, [{ type: "function", name: "send", description: "send", inputSchema: written.payload.dynamic_tools[0].inputSchema }])).toBeNull();
+    expect(fs.statSync(file).mtimeMs).toBe(before);
   });
 
   it("starts a turn when idle and steers the running turn otherwise", async () => {

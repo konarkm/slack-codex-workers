@@ -171,6 +171,7 @@ export class CodexRuntime implements AgentRuntime {
     const { spec, events } = this.options;
     if (this.threadId) {
       try {
+        this.syncRolloutTools(this.threadId);
         // Instructions and policy are sent again on resume, so changes to them reach an existing thread.
         await rpc.request("thread/resume", { threadId: this.threadId, ...this.threadSettings() });
         this.resumeFailures = 0;
@@ -185,18 +186,31 @@ export class CodexRuntime implements AgentRuntime {
         this.resumeFailures = 0;
       }
     }
-    const raw = await rpc.request("thread/start", {
-      ...this.threadSettings(),
-      dynamicTools: this.options.tools.map((tool) => ({
-        type: "function",
-        name: tool.name,
-        description: tool.description,
-        inputSchema: z.toJSONSchema(z.object(tool.shape)),
-      })),
-    });
+    const raw = await rpc.request("thread/start", { ...this.threadSettings(), dynamicTools: this.dynamicTools() });
     this.threadId = threadResponseSchema.parse(raw).thread.id;
     await events.onSessionChanged(this.threadId);
     logInfo("codex thread started", { agent: spec.name, threadId: this.threadId });
+  }
+
+  private dynamicTools(): DynamicToolSpec[] {
+    return this.options.tools.map((tool) => ({ type: "function", name: tool.name, description: tool.description, inputSchema: z.toJSONSchema(z.object(tool.shape)) }));
+  }
+
+  // Codex takes a thread's tools once, at thread/start, and every resume reads them back from the session_meta record
+  // at the head of the thread's rollout file (thread/resume has no dynamicTools). A tool the bridge gained after the
+  // thread was born would never reach the agent, so the current list is written into that record before each resume.
+  // Local hosts only: the rollout lives on the agent's machine.
+  private syncRolloutTools(threadId: string): void {
+    const { spec } = this.options;
+    if (spec.host.kind !== "local") return;
+    try {
+      const file = findRollout(path.join(this.codexHome(), "sessions"), threadId);
+      if (!file) return;
+      const changed = rewriteRolloutTools(file, this.dynamicTools());
+      if (changed) logInfo("codex thread tools updated", { agent: spec.name, threadId, tools: changed });
+    } catch (error) {
+      logError("could not update the codex thread's tools; the agent keeps the tools it started with", { agent: spec.name, threadId, error: errorMessage(error) });
+    }
   }
 
   // An agent that does not inherit the operator's setup gets its own Codex home: the operator's login, and nothing else
@@ -205,12 +219,17 @@ export class CodexRuntime implements AgentRuntime {
   private isolatedHomeEnv(): Record<string, string> | undefined {
     const { spec } = this.options;
     if (spec.inheritUserConfig || spec.host.kind !== "local") return undefined;
-    const home = path.join(spec.cwd, ".codex-home");
-    const operatorHome = process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
+    const home = this.codexHome();
     fs.mkdirSync(home, { recursive: true });
     const link = path.join(home, "auth.json");
-    if (!fs.existsSync(link)) fs.symlinkSync(path.join(operatorHome, "auth.json"), link);
+    if (!fs.existsSync(link)) fs.symlinkSync(path.join(operatorCodexHome(), "auth.json"), link);
     return { CODEX_HOME: home };
+  }
+
+  // Where this agent's Codex keeps its state on this machine.
+  private codexHome(): string {
+    const { spec } = this.options;
+    return spec.inheritUserConfig ? operatorCodexHome() : path.join(spec.cwd, ".codex-home");
   }
 
   private denyArgs(): string[] {
@@ -347,6 +366,68 @@ export function configuredCodexServers(codexHome: string): string[] {
   } catch {
     return [];
   }
+}
+
+function operatorCodexHome(): string {
+  return process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
+}
+
+export interface DynamicToolSpec {
+  type: "function";
+  name: string;
+  description: string;
+  inputSchema: unknown;
+}
+
+// Rollouts sit at <home>/sessions/<year>/<month>/<day>/rollout-<time>-<thread id>.jsonl.
+export function findRollout(sessionsDir: string, threadId: string): string | null {
+  const suffix = `-${threadId}.jsonl`;
+  const walk = (dir: string, depth: number): string | null => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return null;
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (depth === 0) continue;
+        const found = walk(full, depth - 1);
+        if (found) return found;
+      } else if (entry.name.startsWith("rollout-") && entry.name.endsWith(suffix)) return full;
+    }
+    return null;
+  };
+  return walk(sessionsDir, 3);
+}
+
+// Replaces the tool list in the rollout's session_meta record when it differs from `tools`. Returns the names of the
+// tools added and removed, or null when nothing changed. The file is rewritten whole, through a rename, so a crash
+// midway leaves the old record intact.
+export function rewriteRolloutTools(file: string, tools: DynamicToolSpec[]): { added: string[]; removed: string[] } | null {
+  const content = fs.readFileSync(file, "utf8");
+  const newline = content.indexOf("\n");
+  const head = newline === -1 ? content : content.slice(0, newline);
+  const record = JSON.parse(head) as { type?: string; payload?: { dynamic_tools?: unknown } };
+  if (record.type !== "session_meta" || !record.payload) throw new Error("the rollout does not start with a session_meta record");
+  const current = Array.isArray(record.payload.dynamic_tools) ? (record.payload.dynamic_tools as Array<{ name?: string }>) : [];
+  if (canonical(current) === canonical(tools)) return null;
+  const before = new Set(current.map((tool) => tool.name));
+  const after = new Set(tools.map((tool) => tool.name));
+  record.payload.dynamic_tools = tools;
+  const rest = newline === -1 ? "" : content.slice(newline);
+  const temp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(temp, `${JSON.stringify(record)}${rest}`);
+  fs.renameSync(temp, file);
+  return { added: tools.map((tool) => tool.name).filter((name) => !before.has(name)), removed: [...before].filter((name): name is string => typeof name === "string" && !after.has(name)) };
+}
+
+// JSON with object keys sorted, so two serializers' orderings compare equal.
+function canonical(value: unknown): string {
+  return JSON.stringify(value, (_key, item: unknown) =>
+    item && typeof item === "object" && !Array.isArray(item) ? Object.fromEntries(Object.entries(item as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) : item,
+  );
 }
 
 // Codex reports these conditions only as English error text.
