@@ -70,6 +70,18 @@ class FakeSlack {
   onStopRequested(handler: (where: { channelId: string | null; threadTs: string | null }) => Promise<void>) {
     this.stopHandler = handler;
   }
+  titleHandler: ((change: { channelId: string; threadTs: string; title: string; userId: string | null }) => Promise<void>) | null = null;
+  tabHandler: ((opened: { channelId: string; userId: string }) => Promise<void>) | null = null;
+  prompts: Array<{ channelId: string; prompts: Array<{ title: string; message: string }> }> = [];
+  onSessionTitleChanged(handler: (change: { channelId: string; threadTs: string; title: string; userId: string | null }) => Promise<void>) {
+    this.titleHandler = handler;
+  }
+  onMessagesTabOpened(handler: (opened: { channelId: string; userId: string }) => Promise<void>) {
+    this.tabHandler = handler;
+  }
+  async setSuggestedPrompts(channelId: string, prompts: Array<{ title: string; message: string }>) {
+    this.prompts.push({ channelId, prompts });
+  }
   async lookupMessage(_channelId: string, ts: string) {
     // What the agents posted through this fake is what a reaction can land on.
     const index = this.posted.findIndex((_post, i) => `17267000${String(90 + i + 1).padStart(2, "0")}.000900` === ts);
@@ -565,6 +577,34 @@ describe("AgentHub", () => {
     judge.next = { for: ["cody"] };
     await slack.handler!(inbound({ ts: "1726700001.000100", text: "cody one more thing" }));
     expect(cody.delivered).toHaveLength(1);
+  });
+
+  it("keeps the owner's name on a DM session the person renamed, offers starters from the live roster, and lets an agent mark a session waiting or done", async () => {
+    await startHub(TEAM);
+    judge.next = { for: ["cody"] };
+    await slack.handler!(inbound({ channelId: "D1", channelType: "im", text: "cody look at the build" }));
+    await slack.titleHandler!({ channelId: "D1", threadTs: "1726700000.000100", title: "Build fix", userId: "UHUMAN" });
+    expect(slack.titles.at(-1)).toEqual({ channelId: "D1", threadTs: "1726700000.000100", title: "cody · Build fix" });
+    await slack.titleHandler!({ channelId: "D1", threadTs: "1726700000.000100", title: "cody · Build fix", userId: "UHUMAN" });
+    expect(slack.titles.filter((title) => title.title === "cody · Build fix")).toHaveLength(1);
+
+    await slack.tabHandler!({ channelId: "D1", userId: "UHUMAN" });
+    expect(slack.prompts[0]!.prompts.map((prompt) => prompt.title)).toEqual(["Who is around?", "Talk to ada", "Talk to cody"]);
+
+    const cody = runtimes.get("cody")!;
+    await cody.tool("mark_session").handler({ channel: "D1", thread_ts: "1726700000.000100", state: "waiting" } as never);
+    expect(slack.statuses.at(-1)).toMatchObject({ status: "suspended", persona: "cody" });
+    await cody.finishTurn();
+    await flush();
+    // The end of the turn does not overwrite what the agent said about the session.
+    expect(slack.statuses.at(-1)).toMatchObject({ status: "suspended" });
+  });
+
+  it("tells an agent what the person had open when they wrote a DM", async () => {
+    await startHub(TEAM);
+    judge.next = { for: ["ada"] };
+    await slack.handler!(inbound({ channelId: "D1", channelType: "im", text: "what's going on here", viewing: [{ kind: "channel_id", value: "C1" }, { kind: "thread_ts", value: "1726600000.000001" }] }));
+    expect(delivered("ada")[0]!.text).toContain("Viewing: #general (C1), thread 1726600000.000001");
   });
 
   it("tells the operators, as the bridge, when it gives up on someone's message", async () => {

@@ -41,6 +41,8 @@ export interface EnvelopeInput {
   threadContext: ThreadContext | null;
   // Other agents this same message woke, so each can see who else is looking at it.
   alsoWoken?: string[];
+  // What the person had open when they sent this, already rendered ("#general (C1), thread 123.4").
+  viewing?: string | null;
 }
 
 const MAX_BODY_CHARS = 16_000;
@@ -125,6 +127,7 @@ export function renderEnvelope(input: EnvelopeInput): string {
   ];
   if (decision.wake && decision.reason === "default") fields.push("Note: this was not clearly for any one agent; you are the one who picks those up.");
   if (input.alsoWoken && input.alsoWoken.length > 0) fields.push(`Also woken by this message: ${input.alsoWoken.map(sanitizeHeader).join(", ")}`);
+  if (input.viewing) fields.push(`Viewing: ${sanitizeHeader(input.viewing)} (what the person had open when they wrote this; "here" or "this" likely means it)`);
   const attachments = [...input.fileNotes.map(sanitizeHeader), ...(input.imageCount > 0 ? [`${input.imageCount} image${input.imageCount === 1 ? "" : "s"} attached to this input`] : [])];
   if (attachments.length > 0) fields.push(`Files: ${attachments.join("; ")}`);
   const sections: string[] = [];

@@ -46,6 +46,8 @@ interface Seat {
   retiring: boolean;
   // Threads currently showing this agent as working.
   statusThreads: Map<string, { channelId: string; threadTs: string }>;
+  // Threads the agent marked as waiting on the person or done during this turn; the end of the turn leaves them so.
+  markedThreads: Set<string>;
   lastState: RuntimeState;
 }
 
@@ -164,6 +166,21 @@ export class AgentHub {
       this.intake = this.intake.then(() => this.handleReaction(reaction));
       return this.intake;
     });
+    // The person's own title stays; the owning agent's name stays in front of it, since that is how sessions are told apart.
+    slack.onSessionTitleChanged(async (change) => {
+      const owner = this.store.dmOwner(change.channelId, change.threadTs);
+      if (!owner || change.title.toLowerCase().startsWith(`${owner} ·`)) return;
+      await slack.renameSession(change.channelId, change.threadTs, `${owner} · ${change.title}`.slice(0, 200)).catch(() => {});
+    });
+    // Starters at the top of the DM, built from whoever is on the roster right now.
+    slack.onMessagesTabOpened(async (opened) => {
+      const live = [...this.seats.values()].filter((seat) => !seat.retiring).map((seat) => seat.spec);
+      const prompts = [
+        { title: "Who is around?", message: "who is on the team right now, and what is each of you for?" },
+        ...live.slice(0, 3).map((spec) => ({ title: `Talk to ${spec.name}`, message: `${spec.name}, what are you working on?` })),
+      ];
+      await slack.setSuggestedPrompts(opened.channelId, prompts, "Start with an agent");
+    });
     slack.onStopRequested(async (where) => {
       for (const seat of this.seats.values()) {
         const showing = [...seat.statusThreads.values()].some((thread) => thread.channelId === where.channelId && (!where.threadTs || thread.threadTs === where.threadTs));
@@ -219,7 +236,7 @@ export class AgentHub {
   private startSeat(spec: AgentSpec): Seat {
     const slack = this.requireSlack();
     if (spec.host.kind === "local") fs.mkdirSync(spec.cwd, { recursive: true });
-    const seat: Seat = { spec, mind: null as unknown as AgentMind, retiring: false, statusThreads: new Map(), lastState: "down" };
+    const seat: Seat = { spec, mind: null as unknown as AgentMind, retiring: false, statusThreads: new Map(), markedThreads: new Set(), lastState: "down" };
     const tools = [
       ...this.buildTeamTools(seat),
       ...buildWakeTools(spec.name, this.store, this.config.timezone),
@@ -247,6 +264,10 @@ export class AgentHub {
           sessions: (channelId) => this.store.dmSessions(spec.name, channelId),
         },
         fetchFiles: (key, files) => prepareSlackAttachments(key, files, [], slack.botTokenForDownloads(), this.config),
+        markSession: async (channelId, threadTs, state) => {
+          seat.markedThreads.add(`${channelId}:${threadTs}`);
+          await slack.setThreadStatus(channelId, threadTs, state === "waiting" ? "suspended" : "closed", personaOf(spec));
+        },
       }),
     ];
     const ownInstructions = spec.instructionsPath && fs.existsSync(spec.instructionsPath) ? fs.readFileSync(spec.instructionsPath, "utf8") : null;
@@ -456,8 +477,9 @@ export class AgentHub {
       const spec = this.requireRegistry().spec(seat.spec.name);
       if (spec) void this.restartSeat(spec);
     }
-    const threads = [...seat.statusThreads.values()];
+    const threads = [...seat.statusThreads.entries()].filter(([key]) => !seat.markedThreads.has(key)).map(([, thread]) => thread);
     seat.statusThreads.clear();
+    seat.markedThreads.clear();
     await Promise.allSettled(threads.map((thread) => this.requireSlack().setThreadStatus(thread.channelId, thread.threadTs, "active", personaOf(seat.spec))));
   }
 
@@ -632,6 +654,7 @@ export class AgentHub {
           timezone: this.config.timezone,
           threadContext: missed,
           alsoWoken: woken.filter((other) => other.seat !== seat).map((other) => other.seat.spec.name),
+          viewing: await this.describeViewing(message),
         });
         await seat.mind
           .receive({ sourceKey: key, wake: true, priority: verdict.urgency, text, imagePaths })
@@ -735,6 +758,21 @@ export class AgentHub {
     } catch (error) {
       logWarn("could not read recent messages for the judgment", { conversationKey, error: errorMessage(error) });
     }
+  }
+
+  // "#general (C1), thread 123.4" from what Slack says the person had open. Null when Slack said nothing.
+  private async describeViewing(message: SlackInbound): Promise<string | null> {
+    if (!message.viewing || message.viewing.length === 0) return null;
+    const slack = this.requireSlack();
+    const parts: string[] = [];
+    for (const entity of message.viewing) {
+      if (entity.kind === "channel_id") {
+        const conversation = await slack.getConversation(entity.value).catch(() => null);
+        parts.push(conversation?.name ? `#${conversation.name} (${entity.value})` : entity.value);
+      } else if (entity.kind === "thread_ts") parts.push(`thread ${entity.value}`);
+      else parts.push(`${entity.kind.replace(/_id$/, "")} ${entity.value}`);
+    }
+    return parts.join(", ");
   }
 
   private async describeAuthor(message: SlackInbound): Promise<EnvelopeAuthor> {

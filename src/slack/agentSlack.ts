@@ -43,7 +43,17 @@ export interface SlackInbound {
   agentAuthor?: string | null;
   // Slack attaches this when the app is @-mentioned or DMed. It lets a bot-token search run as that person.
   actionToken?: string | null;
+  // What the person had open when they sent a DM, most relevant first: a channel, a thread, a canvas, a list.
+  viewing?: SlackViewedEntity[];
 }
+
+export interface SlackViewedEntity {
+  // The kind, without Slack's "slack#/types/" prefix: channel_id, thread_ts, canvas_id, list_id.
+  kind: string;
+  value: string;
+}
+
+export type SlackSessionStatus = "processing" | "active" | "suspended" | "closed";
 
 // Someone reacted to a message. Only reactions on messages the app posted are handed on.
 export interface SlackReaction {
@@ -114,6 +124,7 @@ interface RawMessageEvent {
   text?: string;
   team?: string;
   action_token?: string;
+  app_context?: { entities?: Array<{ type?: string; value?: string }> };
   files?: Array<{ id?: string; name?: string; mimetype?: string; url_private_download?: string }>;
   attachments?: Array<{ fallback?: string; text?: string; pretext?: string; title?: string; author_name?: string; from_url?: string }>;
   blocks?: unknown[];
@@ -190,6 +201,23 @@ export class AgentSlackClient {
     });
   }
 
+  // A person renamed a session in Slack.
+  onSessionTitleChanged(handler: (change: { channelId: string; threadTs: string; title: string; userId: string | null }) => Promise<void>): void {
+    (this.app.event as (name: string, listener: (args: { event: { channel?: string; thread_ts?: string; title?: string; user?: string } }) => Promise<void>) => void)(
+      "agent_session_title_changed",
+      async ({ event }) => {
+        if (event.channel && event.thread_ts && typeof event.title === "string") await handler({ channelId: event.channel, threadTs: event.thread_ts, title: event.title, userId: event.user ?? null });
+      },
+    );
+  }
+
+  // A person opened the app's Messages tab.
+  onMessagesTabOpened(handler: (opened: { channelId: string; userId: string }) => Promise<void>): void {
+    (this.app.event as (name: string, listener: (args: { event: { tab?: string; channel?: string; user?: string } }) => Promise<void>) => void)("app_home_opened", async ({ event }) => {
+      if (event.tab === "messages" && event.channel && event.user) await handler({ channelId: event.channel, userId: event.user });
+    });
+  }
+
   // Slack's stop button on a working indicator. The event names the thread, which tells the bridge which agent to stop.
   onStopRequested(handler: (where: { channelId: string | null; threadTs: string | null }) => Promise<void>): void {
     (this.app.event as (name: string, listener: (args: { event: { channel?: string; channel_id?: string; thread_ts?: string } }) => Promise<void>) => void)(
@@ -257,6 +285,9 @@ export class AgentSlackClient {
       unavailableFiles,
       editedAt,
       actionToken: raw.action_token ?? event.action_token ?? null,
+      viewing: (raw.app_context?.entities ?? event.app_context?.entities ?? [])
+        .filter((entity): entity is { type: string; value: string } => Boolean(entity.type && entity.value))
+        .map((entity) => ({ kind: entity.type.replace(/^slack#\/types\//, ""), value: entity.value })),
     };
   }
 
@@ -442,8 +473,18 @@ export class AgentSlackClient {
     });
   }
 
-  // Presence, not speech: shows the agent as working in a thread. Best effort; apps without the agent surface reject it.
-  async setThreadStatus(channelId: string, threadTs: string, status: "processing" | "active", persona?: SlackPersona | null): Promise<void> {
+  // Up to four starters shown at the top of the app's Messages tab. Best effort.
+  async setSuggestedPrompts(channelId: string, prompts: Array<{ title: string; message: string }>, title?: string): Promise<void> {
+    try {
+      await this.app.client.apiCall("assistant.threads.setSuggestedPrompts", { token: this.botToken, channel_id: channelId, prompts: prompts.slice(0, 4), title });
+    } catch (error) {
+      logError("could not set suggested prompts", { error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  // Presence, not speech: shows the agent as working, waiting on the person, or done in a thread. Best effort; apps without
+  // the agent surface reject it.
+  async setThreadStatus(channelId: string, threadTs: string, status: SlackSessionStatus, persona?: SlackPersona | null): Promise<void> {
     try {
       await this.app.client.apiCall("agents.sessions.setStatus", { token: this.botToken, channel_id: channelId, thread_ts: threadTs, status, ...personaFields(persona) });
     } catch {

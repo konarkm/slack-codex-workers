@@ -101,7 +101,7 @@ Other tools: `list_agents`, `create_agent`, `update_agent` (repurpose: role, ins
 
 Inbound webhooks: `create_webhook_source` makes a secret URL and a handler file that turns an outside system's requests into named events; `subscribe_webhook` wakes the agent on matching events with its own note. Payloads are written to disk and the wake carries the path. The listener binds `127.0.0.1:3014` by default (`WEBHOOK_PORT`, `WEBHOOK_BIND_HOST`, `WEBHOOK_PUBLIC_BASE_URL`; `WEBHOOK_PORT=off` disables it). Handler files run as trusted code in the bridge and should verify the sender's signature. Only the agent that created a source can rotate or disable it, and only agents running on the bridge machine get the webhook tools, since handlers and payloads live on its disk.
 
-Where the app is declared as a Slack agent, a thread shows Slack's working indicator under the agent's name while its turn runs, and Slack's stop button interrupts the agent shown working in that thread.
+Where the app is declared as a Slack agent, a thread shows Slack's working indicator under the agent's name from the moment a message is routed to it until its turn ends, and Slack's stop button interrupts the agent shown working in that thread. An agent can also mark a session `waiting` (on the person) or `done` with `mark_session`, which Slack shows in its session list. A DM carries what the person had open when they wrote it (`Viewing:`), so "what's going on here" works. When a person renames a session, the owning agent's name is kept in front. Opening the app's Messages tab shows suggested prompts built from the current roster.
 
 ## Operator commands
 

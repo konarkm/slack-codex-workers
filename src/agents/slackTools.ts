@@ -24,6 +24,8 @@ export interface SlackToolContext {
     claim(channelId: string, threadTs: string): void;
     sessions(channelId: string): string[];
   };
+  // The agent says where a session stands: waiting on the person, or finished.
+  markSession(channelId: string, threadTs: string, state: "waiting" | "done"): Promise<void>;
   // Downloads a message's files to the bridge's disk and says where they are.
   fetchFiles(key: string, files: SlackFileRef[]): Promise<{ imagePaths: string[]; fileNotes: string[] }>;
   // The agent read a conversation up to this message, so a later wake there does not hand it the same messages again.
@@ -115,6 +117,18 @@ export function buildSlackTools(ctx: SlackToolContext): AgentTool[] {
       handler: async () => {
         ctx.noteVisibleAction();
         return "dismissed";
+      },
+    }),
+    defineTool({
+      name: "mark_session",
+      description:
+        "Mark where a thread's work stands in Slack's session list: `waiting` when you have asked the person something and cannot go on until they answer; `done` when the work in that thread is finished. The bridge shows working and idle by itself; use this only for those two states.",
+      shape: { channel, thread_ts: messageTs.describe("The thread's root ts."), state: z.enum(["waiting", "done"]) },
+      handler: async (args) => {
+        const refusal = await dmRefusal(args.channel, args.thread_ts);
+        if (refusal) return refusal;
+        await ctx.markSession(args.channel, args.thread_ts, args.state);
+        return `marked ${args.state}`;
       },
     }),
     defineTool({
