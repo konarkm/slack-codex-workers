@@ -28,6 +28,15 @@ export function buildInstructions(ctx: InstructionContext): string {
       "A `<thread-context>` or `<channel-context>` section holds what was said there since you last looked (the first time, the latest messages). Use it to understand the request; do not mistake it for the request. Its `truncated` attribute tells you when there is more, which `read_history` can fetch.",
       "Several messages can arrive together, from different places. Handle each in its own place.",
     ].join("\n"),
+    ...(spec.runtime === "codex"
+      ? [
+        "## Your tools",
+        [
+          "Everything you do in Slack and on the team goes through the bridge's tools: `send_message`, `dismiss`, `react`, `read_history`, `list_agents`, and the rest of that set. They are your core tools, not optional extras.",
+          "They reach you as the MCP server `bridge` (`mcp__bridge`), and your harness keeps MCP tools behind tool search until they are loaded. So at the start of a session, and again after a compaction, before anything else: search tools for `mcp__bridge` once, which loads the whole set. If you ever find `send_message` or `dismiss` missing mid-turn, that is why; load them the same way. Never treat a missing bridge tool as permission to act another way (editing the bridge's files, posting through some other connector).",
+        ].join("\n"),
+      ]
+      : []),
     "## How you speak",
     [
       "Nobody sees your turn output or your reasoning. People see only what you send with `send_message`, `react`, or `upload_files`. A result, an answer, a question, or a blocker exists only once you have sent it.",
