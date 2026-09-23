@@ -171,7 +171,7 @@ export class CodexRuntime implements AgentRuntime {
     const { spec, events } = this.options;
     if (this.threadId) {
       try {
-        this.syncRolloutTools(this.threadId);
+        await this.syncRolloutTools(this.threadId);
         // Instructions and policy are sent again on resume, so changes to them reach an existing thread.
         await rpc.request("thread/resume", { threadId: this.threadId, ...this.threadSettings() });
         this.resumeFailures = 0;
@@ -199,9 +199,11 @@ export class CodexRuntime implements AgentRuntime {
   // Codex takes a thread's tools once, at thread/start, and every resume reads them back from the session_meta record
   // at the head of the thread's rollout file (thread/resume has no dynamicTools). A tool the bridge gained after the
   // thread was born would never reach the agent, so the current list is written into that record before each resume.
-  // Local hosts only: the rollout lives on the agent's machine.
-  private syncRolloutTools(threadId: string): void {
-    const { spec } = this.options;
+  // Local hosts only: the rollout lives on the agent's machine. This leans on a file format Codex owns and does not
+  // promise to keep, so when the record no longer reads as expected the operators hear about it rather than the agent
+  // quietly keeping stale tools.
+  private async syncRolloutTools(threadId: string): Promise<void> {
+    const { spec, events } = this.options;
     if (spec.host.kind !== "local") return;
     try {
       const file = findRollout(path.join(this.codexHome(), "sessions"), threadId);
@@ -210,6 +212,7 @@ export class CodexRuntime implements AgentRuntime {
       if (changed) logInfo("codex thread tools updated", { agent: spec.name, threadId, tools: changed });
     } catch (error) {
       logError("could not update the codex thread's tools; the agent keeps the tools it started with", { agent: spec.name, threadId, error: errorMessage(error) });
+      await events.onProblem(`The Codex rollout for thread ${threadId} could not be updated with the current tools (${errorMessage(error)}). ${spec.name} keeps the tools it started with until this is fixed; a Codex upgrade may have changed the rollout format.`);
     }
   }
 

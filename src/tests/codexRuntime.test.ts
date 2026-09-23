@@ -127,6 +127,19 @@ describe("CodexRuntime", () => {
     const before = fs.statSync(file).mtimeMs;
     expect(rewriteRolloutTools(file, [{ type: "function", name: "send", description: "send", inputSchema: written.payload.dynamic_tools[0].inputSchema }])).toBeNull();
     expect(fs.statSync(file).mtimeMs).toBe(before);
+
+    // A rollout that no longer opens with session_meta is left alone, the resume still goes ahead, and the operators hear about it.
+    fs.writeFileSync(file, `${JSON.stringify({ type: "something_new", payload: {} })}\n`);
+    const problems: string[] = [];
+    const guarded = new CodexRuntime(
+      { spec: { ...spec, cwd }, sessionId: "thread-old", instructions: "be a teammate", tools: [], events: { ...silentEvents(), onProblem: (text) => void problems.push(text) } },
+      "codex",
+      () => new FakeRpc() as unknown as CodexRpc,
+    );
+    await guarded.start();
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toContain("keeps the tools it started with");
+    expect(fs.readFileSync(file, "utf8")).toContain("something_new");
   });
 
   it("starts a turn when idle and steers the running turn otherwise", async () => {
