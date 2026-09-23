@@ -101,7 +101,7 @@ describe("CodexRuntime", () => {
 
   it("hands Codex the tool server as config overrides and keeps the token out of argv", () => {
     const args = codexToolServerArgs("http://127.0.0.1:3015/mcp");
-    expect(args).toEqual(["-c", 'mcp_servers.workspace.url="http://127.0.0.1:3015/mcp"', "-c", 'mcp_servers.workspace.bearer_token_env_var="SLACK_AGENTS_TOOL_TOKEN"', "-c", "mcp_servers.workspace.tool_timeout_sec=900"]);
+    expect(args).toEqual(["-c", 'mcp_servers.bridge.url="http://127.0.0.1:3015/mcp"', "-c", 'mcp_servers.bridge.bearer_token_env_var="SLACK_AGENTS_TOOL_TOKEN"', "-c", "mcp_servers.bridge.tool_timeout_sec=900"]);
     expect(args.join(" ")).not.toContain("secret");
   });
 

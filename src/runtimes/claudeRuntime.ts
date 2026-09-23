@@ -141,8 +141,9 @@ export class ClaudeRuntime implements AgentRuntime {
       settingSources: spec.inheritUserConfig ? ["user", "project", "local"] : ["project", "local"],
       strictMcpConfig: !spec.inheritUserConfig,
       settings: spec.inheritUserConfig ? undefined : { disableClaudeAiConnectors: true },
-      // The bridge's tools come from the hub's tool server, fetched at every session start, so a tool added later is there on the next wake.
-      mcpServers: { [AGENT_TOOL_SERVER]: { type: "http", url: toolAccess.url, headers: { Authorization: `Bearer ${toolAccess.token}` } } },
+      // The bridge's tools come from the hub's tool server, fetched at every session start, so a tool added later is there on the
+      // next wake. alwaysLoad keeps every one of them in the prompt; deferred behind tool search, an agent reaches for them less.
+      mcpServers: { [AGENT_TOOL_SERVER]: { type: "http", url: toolAccess.url, headers: { Authorization: `Bearer ${toolAccess.token}` }, alwaysLoad: true, timeout: 900_000 } },
       // Deny rules hold even with permission prompts bypassed.
       disallowedTools: spec.denyTools,
       permissionMode: "bypassPermissions",

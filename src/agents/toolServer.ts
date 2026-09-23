@@ -5,8 +5,9 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { logError, logInfo } from "../logger.js";
 import type { AgentTool } from "./types.js";
 
-// The MCP server name every harness sees; tools are addressed as `mcp__<name>__<tool>` (Claude) or `<name>__<tool>` (Codex).
-export const TOOL_SERVER_NAME = "workspace";
+// The MCP server name every harness sees; tools are addressed as `mcp__<name>__<tool>` (Claude) or `mcp__<name>.<tool>` (Codex).
+// Not "workspace": Claude Code reserves that name for servers given on the command line and drops them silently.
+export const TOOL_SERVER_NAME = "bridge";
 export const TOOL_TOKEN_ENV = "SLACK_AGENTS_TOOL_TOKEN";
 
 export interface ToolServerConfig {
