@@ -52,6 +52,8 @@ interface Seat {
   // Threads the agent marked as waiting on the person or done during this turn; the end of the turn leaves them so.
   markedThreads: Set<string>;
   lastState: RuntimeState;
+  // This seat's access to the tool server; revoked when this seat, not a later one for the same agent, stops.
+  toolToken: string;
 }
 
 // An agent-to-agent exchange that has been quiet this long starts over with a full budget.
@@ -108,6 +110,8 @@ export class AgentHub {
   private readonly hydrated = new Set<string>();
   // Agents that changed their own spec mid-turn and restart when the turn ends.
   private readonly pendingRestart = new Set<string>();
+  // Starting, stopping, and restarting one agent's seat run one at a time, so overlapping requests cannot leave two minds.
+  private readonly seatLocks = new Map<string, Promise<unknown>>();
   // The latest search token Slack attached to an @-mention or DM. A search runs as the person whose message carried it.
   // Slack does not say how long one lasts.
   private actionToken: string | null = null;
@@ -201,12 +205,16 @@ export class AgentHub {
     await this.toolServer.start();
     const active = specs.filter((spec) => !spec.retired);
     const results = await Promise.allSettled(active.map((spec) => this.startSeat(spec)));
+    const failed: Array<{ agent: string; error: string }> = [];
     results.forEach((result, index) => {
-      if (result.status === "rejected") logError("agent failed to start", { agent: active[index]!.name, error: errorMessage(result.reason) });
+      if (result.status !== "rejected") return;
+      failed.push({ agent: active[index]!.name, error: errorMessage(result.reason) });
+      logError("agent failed to start", failed.at(-1)!);
     });
     if (this.seats.size === 0) throw new Error("No agent could be started");
     // Every mind exists before the socket opens, so no event can arrive with nowhere to go.
     await slack.connect();
+    for (const { agent, error } of failed) await this.tellOperators(agent, `${agent} did not start: ${error}`);
     await Promise.allSettled([...this.seats.values()].map((seat) => seat.mind.start()));
 
     this.scheduler.start();
@@ -228,11 +236,12 @@ export class AgentHub {
     this.stopped = true;
     this.scheduler.stop();
     await this.webhookServer?.stop().catch(() => {});
-    await this.toolServer.stop().catch(() => {});
     this.webhookServer = null;
-    await this.slack?.stop().catch(() => {});
     await Promise.allSettled([...this.seats.values()].map((seat) => seat.mind.stop()));
     this.seats.clear();
+    // After the minds: a tool call they left open is cut instead of holding shutdown up.
+    await this.toolServer.stop().catch(() => {});
+    await this.slack?.stop().catch(() => {});
     this.store.close();
   }
 
@@ -244,7 +253,7 @@ export class AgentHub {
   private startSeat(spec: AgentSpec): Seat {
     const slack = this.requireSlack();
     if (spec.host.kind === "local") fs.mkdirSync(spec.cwd, { recursive: true });
-    const seat: Seat = { spec, mind: null as unknown as AgentMind, retiring: false, statusThreads: new Map(), markedThreads: new Set(), lastState: "down" };
+    const seat: Seat = { spec, mind: null as unknown as AgentMind, retiring: false, statusThreads: new Map(), markedThreads: new Set(), lastState: "down", toolToken: "" };
     const tools = [
       ...this.buildTeamTools(seat),
       ...buildWakeTools(spec.name, this.store, this.config.timezone),
@@ -279,8 +288,10 @@ export class AgentHub {
       }),
     ];
     const ownInstructions = spec.instructionsPath && fs.existsSync(spec.instructionsPath) ? fs.readFileSync(spec.instructionsPath, "utf8") : null;
-    const instructions = buildInstructions({ spec, workspaceName: slack.identity().teamName, operatorUserIds: this.config.adminUserIds, ownInstructions });
-    seat.mind = new AgentMind(spec, this.store, this.createRuntime, instructions, tools, this.toolServer.grant(spec.name, tools), {
+    const instructions = buildInstructions({ spec, workspaceName: slack.identity().teamName, operatorUserIds: this.config.adminUserIds, ownInstructions, toolNames: tools.map((tool) => tool.name) });
+    const access = this.toolServer.grant(spec.name, spec.host, tools);
+    seat.toolToken = access.token;
+    seat.mind = new AgentMind(spec, this.store, this.createRuntime, instructions, tools, access, {
       onStateChanged: (_agent, state) => this.onMindState(seat, state),
       onTurnCompleted: (_agent, event) => {
         if (event.status === "failed") logError("agent turn failed", { agent: spec.name, error: event.error });
@@ -333,7 +344,7 @@ export class AgentHub {
             this.pendingRestart.add(args.name);
             return `updated ${spec.name}. The change takes effect when this turn ends.`;
           }
-          if (!spec.retired) await this.restartSeat(spec);
+          if (!spec.retired) await this.launchSeat(spec);
           logInfo("agent updated by an agent", { agent: spec.name, by: seat.spec.name, changed: Object.keys(args).filter((key) => key !== "name") });
           return `updated ${spec.name}. It is running with the change now.`;
         },
@@ -369,8 +380,7 @@ export class AgentHub {
           if (!known) return `no agent named ${args.name}`;
           if (!known.retired) return `${args.name} is not retired`;
           const spec = registry.update(args.name, { retired: false, title: args.title }, args.instructions);
-          const revived = this.startSeat(spec);
-          await revived.mind.start();
+          await this.launchSeat(spec);
           logInfo("agent revived", { agent: args.name, by: seat.spec.name });
           return `revived ${spec.name}. It is listening now.`;
         },
@@ -428,8 +438,7 @@ export class AgentHub {
         handler: async (args) => {
           if (!this.registry) throw new Error("the hub is not started");
           const spec = this.registry.add({ name: args.name, title: args.title, runtime: args.runtime, model: args.model, icon: args.icon, createdBy: seat.spec.name }, args.instructions);
-          const created = this.startSeat(spec);
-          await created.mind.start();
+          await this.launchSeat(spec);
           logInfo("agent created by an agent", { agent: spec.name, createdBy: seat.spec.name });
           return `created ${spec.name}. It is listening now; say its name in a message to reach it.`;
         },
@@ -446,19 +455,44 @@ export class AgentHub {
     return [...this.seats.keys()].filter((name) => !this.seats.get(name)!.retiring);
   }
 
-  private async stopSeat(name: string): Promise<void> {
-    const seat = this.seats.get(name);
-    if (!seat) return;
-    this.seats.delete(name);
-    await seat.mind.stop();
-    this.toolServer.revoke(name);
+  private serial<T>(name: string, work: () => Promise<T>): Promise<T> {
+    const run = (this.seatLocks.get(name) ?? Promise.resolve()).catch(() => {}).then(work);
+    this.seatLocks.set(name, run);
+    void run.catch(() => {}).finally(() => {
+      if (this.seatLocks.get(name) === run) this.seatLocks.delete(name);
+    });
+    return run;
   }
 
-  // The same agent, with a changed spec: same session, same inbox, new instructions and runtime options.
-  private async restartSeat(spec: AgentSpec): Promise<void> {
-    await this.stopSeat(spec.name);
-    const seat = this.startSeat(spec);
-    await seat.mind.start();
+  private stopSeat(name: string): Promise<void> {
+    return this.serial(name, async () => {
+      const seat = this.seats.get(name);
+      if (seat) await this.stopSeatInstance(seat);
+    });
+  }
+
+  // Stops this seat only: if the agent was revived or restarted meanwhile, its newer seat is left alone.
+  private async stopSeatInstance(seat: Seat): Promise<void> {
+    if (this.seats.get(seat.spec.name) === seat) this.seats.delete(seat.spec.name);
+    await seat.mind.stop();
+    this.toolServer.revoke(seat.toolToken);
+  }
+
+  // Starts the agent with this spec, replacing a seat it already has: same session, same inbox, new instructions and
+  // runtime options. A seat still finishing the turn in which it retired itself is kept and simply stays on.
+  private launchSeat(spec: AgentSpec): Promise<void> {
+    return this.serial(spec.name, async () => {
+      const existing = this.seats.get(spec.name);
+      if (existing?.retiring) {
+        existing.retiring = false;
+        // Picks up anything the revive changed once that turn ends.
+        this.pendingRestart.add(spec.name);
+        return;
+      }
+      if (existing) await this.stopSeatInstance(existing);
+      const seat = this.startSeat(spec);
+      await seat.mind.start();
+    });
   }
 
   // Harness trouble goes to the operators as the bridge, in the agents' DM with them. It is never posted as an agent.
@@ -481,10 +515,10 @@ export class AgentHub {
     // An agent that changed or retired itself during the turn is dealt with now that the turn is over.
     if (seat.retiring) {
       logInfo("agent retired itself", { agent: seat.spec.name });
-      void this.stopSeat(seat.spec.name);
+      void this.serial(seat.spec.name, () => this.stopSeatInstance(seat));
     } else if (this.pendingRestart.delete(seat.spec.name)) {
       const spec = this.requireRegistry().spec(seat.spec.name);
-      if (spec) void this.restartSeat(spec);
+      if (spec && !spec.retired) void this.launchSeat(spec).catch((error) => logError("agent restart failed", { agent: spec.name, error: errorMessage(error) }));
     }
     const threads = [...seat.statusThreads.entries()].filter(([key]) => !seat.markedThreads.has(key)).map(([, thread]) => thread);
     seat.statusThreads.clear();
@@ -860,7 +894,7 @@ export class AgentHub {
         if (!known.retired) reply = `${name} is not retired`;
         else {
           const spec = registry.update(name, { retired: false });
-          await this.startSeat(spec).mind.start();
+          await this.launchSeat(spec);
           reply = `revived ${name}`;
         }
       } else {

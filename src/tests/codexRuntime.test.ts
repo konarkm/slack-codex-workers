@@ -48,13 +48,14 @@ function setup(sessionId: string | null) {
   const states: RuntimeState[] = [];
   const sessions: Array<string | null> = [];
   const turns: Array<{ status: string; finalText: string; consumedInputIds: string[] }> = [];
+  const problems: string[] = [];
   const events: RuntimeEvents = {
     onSessionChanged: (id) => void sessions.push(id),
     onStateChanged: (state) => void states.push(state),
     onTurnCompleted: (event) => void turns.push(event),
     onActivity: () => {},
     onCompaction: () => {},
-    onProblem: () => {},
+    onProblem: (text) => void problems.push(text),
   };
   const runtime = new CodexRuntime(
     {
@@ -68,7 +69,7 @@ function setup(sessionId: string | null) {
     "codex",
     () => rpc as unknown as CodexRpc,
   );
-  return { rpc, runtime, states, sessions, turns };
+  return { rpc, runtime, states, sessions, turns, problems };
 }
 
 const ACCESS = { url: "http://127.0.0.1:3015/mcp", token: "secret" };
@@ -97,6 +98,17 @@ describe("CodexRuntime", () => {
     await gone.runtime.start();
     expect(gone.rpc.requests.map((r) => r.method)).toEqual(["thread/resume", "thread/start"]);
     expect(gone.sessions).toEqual(["thread-new"]);
+  });
+
+  it("tells the operators when Codex cannot reach the tool server, and only for the bridge", async () => {
+    const { rpc, runtime, problems } = setup(null);
+    await runtime.start();
+    rpc.emit("notification", { method: "mcpServer/startupStatus/updated", params: { threadId: null, name: "other", status: "failed", error: "nope", failureReason: null } });
+    rpc.emit("notification", { method: "mcpServer/startupStatus/updated", params: { threadId: null, name: "bridge", status: "ready", error: null, failureReason: null } });
+    rpc.emit("notification", { method: "mcpServer/startupStatus/updated", params: { threadId: "thread-new", name: "bridge", status: "failed", error: "401 Unauthorized", failureReason: null } });
+    await flush();
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toContain("401 Unauthorized");
   });
 
   it("hands Codex the tool server as config overrides and keeps the token out of argv", () => {

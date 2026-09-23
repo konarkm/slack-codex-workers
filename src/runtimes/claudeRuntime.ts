@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import {
   query,
+  type McpHttpServerConfig,
   type Options,
   type Query,
   type SDKMessage,
@@ -12,10 +13,15 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { spawnOnHost } from "../agents/hostSpawn.js";
 import { logError, logInfo } from "../logger.js";
-import { TOOL_SERVER_NAME } from "../agents/toolServer.js";
+import { TOOL_SERVER_NAME, TOOL_TOKEN_ENV } from "../agents/toolServer.js";
 import type { AgentRuntime, RuntimeInput, RuntimeOptions, RuntimeState } from "../agents/types.js";
 
-export const AGENT_TOOL_SERVER = TOOL_SERVER_NAME;
+// The bridge's tools come from the hub's tool server, fetched at every session start, so a tool added later is there on
+// the next wake. alwaysLoad keeps every one of them in the prompt; deferred behind tool search, an agent reaches for them
+// less. The token is a reference Claude Code expands from its environment, so it never appears on a command line.
+export function claudeToolServerConfig(url: string): Record<string, McpHttpServerConfig> {
+  return { [TOOL_SERVER_NAME]: { type: "http", url, headers: { Authorization: `Bearer \${${TOOL_TOKEN_ENV}}` }, alwaysLoad: true, timeout: 900_000 } };
+}
 
 const MAX_INLINE_IMAGE_BYTES = 4 * 1024 * 1024;
 
@@ -141,9 +147,8 @@ export class ClaudeRuntime implements AgentRuntime {
       settingSources: spec.inheritUserConfig ? ["user", "project", "local"] : ["project", "local"],
       strictMcpConfig: !spec.inheritUserConfig,
       settings: spec.inheritUserConfig ? undefined : { disableClaudeAiConnectors: true },
-      // The bridge's tools come from the hub's tool server, fetched at every session start, so a tool added later is there on the
-      // next wake. alwaysLoad keeps every one of them in the prompt; deferred behind tool search, an agent reaches for them less.
-      mcpServers: { [AGENT_TOOL_SERVER]: { type: "http", url: toolAccess.url, headers: { Authorization: `Bearer ${toolAccess.token}` }, alwaysLoad: true, timeout: 900_000 } },
+      mcpServers: claudeToolServerConfig(toolAccess.url),
+      env: { ...process.env, [TOOL_TOKEN_ENV]: toolAccess.token },
       // Deny rules hold even with permission prompts bypassed.
       disallowedTools: spec.denyTools,
       permissionMode: "bypassPermissions",
@@ -158,7 +163,7 @@ export class ClaudeRuntime implements AgentRuntime {
     const runsScript = /(^|\/)(node|bun|deno)$/.test(spawnOptions.command);
     const args = runsScript ? spawnOptions.args.slice(1) : spawnOptions.args;
     const env = Object.fromEntries(
-      Object.entries(spawnOptions.env).filter(([key]) => /^CLAUDE_(CODE|AGENT)_/.test(key) && !/TOKEN|KEY|SECRET/.test(key)),
+      Object.entries(spawnOptions.env).filter(([key]) => (/^CLAUDE_(CODE|AGENT)_/.test(key) && !/TOKEN|KEY|SECRET/.test(key)) || key === TOOL_TOKEN_ENV),
     );
     const child = spawnOnHost({
       host: this.options.spec.host,
@@ -241,7 +246,7 @@ export class ClaudeRuntime implements AgentRuntime {
       }
       logInfo("claude session ready", { agent: spec.name, sessionId: message.session_id, model: message.model });
       // A tool schema the harness cannot serve makes it drop every bridge tool without an error, leaving the agent mute.
-      const missing = this.options.tools.map((definition) => `mcp__${AGENT_TOOL_SERVER}__${definition.name}`).filter((name) => !message.tools.includes(name));
+      const missing = this.options.tools.map((definition) => `mcp__${TOOL_SERVER_NAME}__${definition.name}`).filter((name) => !message.tools.includes(name));
       if (missing.length > 0) {
         const problem = `The harness is not serving ${missing.length} of ${this.options.tools.length} bridge tools (first: ${missing[0]}). The agent may be unable to speak.`;
         logError(problem, { agent: spec.name });

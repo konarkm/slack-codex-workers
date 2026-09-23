@@ -150,6 +150,15 @@ function inbound(overrides: Partial<SlackInbound> = {}): SlackInbound {
   return { teamId: "T1", channelId: "C1", channelType: "channel", ts: "1726700000.000100", threadTs: null, userId: "UHUMAN", botId: null, botUserId: null, text: "hello", files: [], unavailableFiles: [], editedAt: null, ...overrides };
 }
 
+async function toolsListStatus(runtime: FakeRuntime): Promise<number> {
+  const response = await fetch(runtime.options.toolAccess.url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", Authorization: `Bearer ${runtime.options.toolAccess.token}` },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+  });
+  return response.status;
+}
+
 let dir: string;
 let hub: AgentHub;
 let slack: FakeSlack;
@@ -579,6 +588,46 @@ describe("AgentHub", () => {
     judge.next = { for: ["cody"] };
     await slack.handler!(inbound({ ts: "1726700001.000100", text: "cody one more thing" }));
     expect(cody.delivered).toHaveLength(1);
+  });
+
+  it("keeps an agent that retired itself running when it is revived before its turn ends, with working tool access", async () => {
+    await startHub(TEAM);
+    judge.next = { for: ["cody"] };
+    await slack.handler!(inbound({ text: "cody wrap up" }));
+    const cody = runtimes.get("cody")!;
+    await cody.tool("retire_agent").handler({ name: "cody", reason: "job done" } as never);
+    const ada = runtimes.get("ada")!;
+    expect(await ada.tool("revive_agent").handler({ name: "cody" } as never)).toContain("revived cody");
+    // Same mind, still mid-turn, and its tools still answer.
+    expect(runtimes.get("cody")).toBe(cody);
+    expect(await toolsListStatus(cody)).toBe(200);
+    await cody.finishTurn();
+    await flush();
+    // The turn's end restarts it with the revived spec; the old seat's token is gone and the new one works.
+    const restarted = runtimes.get("cody")!;
+    expect(restarted).not.toBe(cody);
+    expect(await toolsListStatus(cody)).toBe(401);
+    expect(await toolsListStatus(restarted)).toBe(200);
+    judge.next = { for: ["cody"] };
+    await slack.handler!(inbound({ ts: "1726700001.000100", text: "cody still there?" }));
+    expect(restarted.delivered).toHaveLength(1);
+  });
+
+  it("leaves one running seat with valid tool access when updates to the same agent overlap", async () => {
+    await startHub(TEAM);
+    const ada = runtimes.get("ada")!;
+    const before = runtimes.get("cody")!;
+    await Promise.all([
+      ada.tool("update_agent").handler({ name: "cody", title: "release manager" } as never),
+      ada.tool("update_agent").handler({ name: "cody", title: "release captain" } as never),
+    ]);
+    const after = runtimes.get("cody")!;
+    expect(await toolsListStatus(before)).toBe(401);
+    expect(await toolsListStatus(after)).toBe(200);
+    expect(await ada.tool("list_agents").handler({} as never)).toContain("cody · release captain");
+    judge.next = { for: ["cody"] };
+    await slack.handler!(inbound({ text: "cody, new role?" }));
+    expect(after.delivered).toHaveLength(1);
   });
 
   it("keeps the owner's name on a DM session the person renamed, offers starters from the live roster, and lets an agent mark a session waiting or done", async () => {

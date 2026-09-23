@@ -7,6 +7,9 @@ export interface InstructionContext {
   operatorUserIds: string[];
   // The agent's own standing instructions (its AGENT.md), if any.
   ownInstructions: string | null;
+  // The bridge tools this agent has. Named in the instructions where the harness hides them until loaded, so a tool
+  // added later changes the instructions and the agent is told.
+  toolNames?: string[];
 }
 
 // Standing instructions for a named agent. Sent once as system context, never repeated per message.
@@ -32,8 +35,9 @@ export function buildInstructions(ctx: InstructionContext): string {
       ? [
         "## Your tools",
         [
-          "Everything you do in Slack and on the team goes through the bridge's tools: `send_message`, `dismiss`, `react`, `read_history`, `list_agents`, and the rest of that set. They are your core tools, not optional extras.",
-          "They reach you as the MCP server `bridge` (`mcp__bridge`), and your harness keeps MCP tools behind tool search until they are loaded. So at the start of a session, and again after a compaction, before anything else: search tools for `mcp__bridge` once, which loads the whole set. If you ever find `send_message` or `dismiss` missing mid-turn, that is why; load them the same way. Never treat a missing bridge tool as permission to act another way (editing the bridge's files, posting through some other connector).",
+          "Everything you do in Slack and on the team goes through the bridge's tools. They are your core tools, not optional extras.",
+          "They reach you as the MCP server `bridge` (`mcp__bridge`), and your harness keeps MCP tools behind tool search until they are loaded. So at the start of a session, after a compaction, and whenever the bridge tells you your standing instructions changed, before anything else: search tools for `mcp__bridge` once, which loads the whole set. If you ever find `send_message` or `dismiss` missing mid-turn, that is why; load them the same way. Never treat a missing bridge tool as permission to act another way (editing the bridge's files, posting through some other connector).",
+          ...(ctx.toolNames && ctx.toolNames.length > 0 ? [`The full set: ${[...ctx.toolNames].sort().map((name) => `\`${name}\``).join(", ")}.`] : []),
         ].join("\n"),
       ]
       : []),

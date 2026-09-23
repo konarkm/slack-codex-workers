@@ -239,8 +239,17 @@ export class CodexRuntime implements AgentRuntime {
 
   private async handleNotification(event: RpcNotification): Promise<void> {
     const params = (event.params ?? {}) as Record<string, unknown>;
-    if (params.threadId !== this.threadId) return;
     const { events } = this.options;
+    // Without the tool server the agent cannot speak, and Codex says so only here.
+    if (event.method === "mcpServer/startupStatus/updated") {
+      if (params.name === TOOL_SERVER_NAME && params.status === "failed" && (params.threadId == null || params.threadId === this.threadId)) {
+        const problem = `Codex could not connect to the bridge's tool server (${typeof params.error === "string" ? params.error : "no reason given"}). The agent may be unable to speak.`;
+        logError(problem, { agent: this.options.spec.name });
+        await events.onProblem(problem);
+      }
+      return;
+    }
+    if (params.threadId !== this.threadId) return;
     if (event.method === "turn/started") {
       const turn = params.turn as { id?: string } | undefined;
       if (turn?.id) this.activeTurnId = turn.id;
@@ -316,17 +325,18 @@ export class CodexRuntime implements AgentRuntime {
   }
 }
 
-// Codex has no per-tool deny list, so a denied MCP server is switched off for the agent's whole app-server process.
-// The ChatGPT app connectors (Slack, mail, payments, and the rest) follow the login, not the config, and come as one
-// built-in server; denying it turns the feature off.
-// Codex refuses to start if an override names a server its config does not define, so only configured servers are named.
 // TOML values for the override flags; the URL is a plain string and the token comes from the environment, never argv.
+// Setting `url` defines the server in full, so this override may name a server the config lacks (unlike the deny list below).
 // Bridge tools can run long (a workspace search, a large upload), so the per-call timeout is well above Codex's default.
 export function codexToolServerArgs(url: string): string[] {
   const key = `mcp_servers.${TOOL_SERVER_NAME}`;
   return ["-c", `${key}.url=${JSON.stringify(url)}`, "-c", `${key}.bearer_token_env_var=${JSON.stringify(TOOL_TOKEN_ENV)}`, "-c", `${key}.tool_timeout_sec=900`];
 }
 
+// Codex has no per-tool deny list, so a denied MCP server is switched off for the agent's whole app-server process.
+// The ChatGPT app connectors (Slack, mail, payments, and the rest) follow the login, not the config, and come as one
+// built-in server; denying it turns the feature off.
+// Codex refuses to start if an override names a server its config does not define, so only configured servers are named.
 export function codexDenyArgs(denyTools: string[], configuredServers: string[]): string[] {
   const servers = denyTools.map((entry) => /^mcp__([A-Za-z0-9_-]+)$/.exec(entry)?.[1]).filter((name): name is string => Boolean(name));
   return servers.flatMap((name) =>
