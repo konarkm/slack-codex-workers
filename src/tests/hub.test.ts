@@ -168,6 +168,8 @@ async function startHub(agents: unknown[], overrides: Partial<HubConfig> = {}): 
     adminUserIds: ["UHUMAN"],
     agentWakeBudget: 2,
     threadContextLimit: 12,
+    // Port 0: the OS picks a free one for each test hub.
+    toolServer: { port: 0, bindHost: "127.0.0.1", publicUrl: null },
     webhooks: null,
     attachmentStorageDir: path.join(dir, "attachments"),
     attachmentMaxBytes: 1024,

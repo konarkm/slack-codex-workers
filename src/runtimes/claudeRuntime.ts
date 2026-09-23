@@ -2,9 +2,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import {
-  createSdkMcpServer,
   query,
-  tool,
   type Options,
   type Query,
   type SDKMessage,
@@ -14,9 +12,10 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { spawnOnHost } from "../agents/hostSpawn.js";
 import { logError, logInfo } from "../logger.js";
+import { TOOL_SERVER_NAME } from "../agents/toolServer.js";
 import type { AgentRuntime, RuntimeInput, RuntimeOptions, RuntimeState } from "../agents/types.js";
 
-export const AGENT_TOOL_SERVER = "workspace";
+export const AGENT_TOOL_SERVER = TOOL_SERVER_NAME;
 
 const MAX_INLINE_IMAGE_BYTES = 4 * 1024 * 1024;
 
@@ -130,20 +129,7 @@ export class ClaudeRuntime implements AgentRuntime {
   }
 
   private buildOptions(): Options {
-    const { spec, tools, instructions } = this.options;
-    const server = createSdkMcpServer({
-      name: AGENT_TOOL_SERVER,
-      tools: tools.map((definition) =>
-        tool(definition.name, definition.description, definition.shape, async (args) => {
-          try {
-            const text = await definition.handler(args as never);
-            return { content: [{ type: "text", text }] };
-          } catch (error) {
-            return { content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }], isError: true };
-          }
-        }, { alwaysLoad: true }),
-      ),
-    });
+    const { spec, instructions, toolAccess } = this.options;
     const remote = spec.host.kind === "ssh";
     return {
       cwd: remote ? undefined : spec.cwd,
@@ -155,7 +141,8 @@ export class ClaudeRuntime implements AgentRuntime {
       settingSources: spec.inheritUserConfig ? ["user", "project", "local"] : ["project", "local"],
       strictMcpConfig: !spec.inheritUserConfig,
       settings: spec.inheritUserConfig ? undefined : { disableClaudeAiConnectors: true },
-      mcpServers: { [AGENT_TOOL_SERVER]: server },
+      // The bridge's tools come from the hub's tool server, fetched at every session start, so a tool added later is there on the next wake.
+      mcpServers: { [AGENT_TOOL_SERVER]: { type: "http", url: toolAccess.url, headers: { Authorization: `Bearer ${toolAccess.token}` } } },
       // Deny rules hold even with permission prompts bypassed.
       disallowedTools: spec.denyTools,
       permissionMode: "bypassPermissions",

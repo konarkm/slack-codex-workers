@@ -3,6 +3,8 @@ import { AgentStore } from "../agents/agentStore.js";
 import { AgentMind, type MindObserver } from "../agents/mind.js";
 import { DEFAULT_WAKE_POLICY, type AgentRuntime, type AgentSpec, type RuntimeInput, type RuntimeOptions, type RuntimeState } from "../agents/types.js";
 
+const ACCESS = { url: "http://127.0.0.1:0/mcp", token: "t" };
+
 const spec: AgentSpec = {
   name: "ada",
   title: null,
@@ -73,7 +75,7 @@ function setup(observer: MindObserver = {}) {
     const runtime = new FakeRuntime(options);
     runtimes.push(runtime);
     return runtime;
-  }, "instructions", [], observer);
+  }, "instructions", [], ACCESS, observer);
   return { store, mind, runtimes };
 }
 
@@ -251,7 +253,7 @@ describe("AgentMind", () => {
       const runtime = new FakeRuntime(options);
       runtimes.push(runtime);
       return runtime;
-    }, "instructions", []);
+    }, "instructions", [], ACCESS);
     await mind.receive({ sourceKey: "a", wake: true, priority: "next", text: "wedging input", imagePaths: [] });
     await mind.resetSession();
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -279,7 +281,7 @@ describe("AgentMind", () => {
       const runtime = new FakeRuntime(options);
       runtimes.push(runtime);
       return runtime;
-    }, "instructions", []);
+    }, "instructions", [], ACCESS);
     await mind.start();
     expect(runtimes[0]!.options.sessionId).toBe("session-1");
     expect(runtimes[0]!.delivered).toHaveLength(1);
@@ -295,7 +297,7 @@ describe("AgentMind", () => {
         const runtime = new FakeRuntime(options);
         runtimes.push(runtime);
         return runtime;
-      }, instructions, []);
+      }, instructions, [], ACCESS);
     const first: FakeRuntime[] = [];
     const before = make("old rules", first);
     await before.start();

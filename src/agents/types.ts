@@ -109,7 +109,10 @@ export interface RuntimeOptions {
   // Persisted provider session id to resume, if any.
   sessionId: string | null;
   instructions: string;
+  // The bridge's tools for this agent. Served by the hub's tool server; runtimes only need the names.
   tools: AgentTool[];
+  // Where the harness fetches those tools over MCP, with this agent's token.
+  toolAccess: { url: string; token: string };
   events: RuntimeEvents;
 }
 

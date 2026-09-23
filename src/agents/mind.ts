@@ -67,6 +67,7 @@ export class AgentMind {
     private readonly createRuntime: RuntimeFactory,
     private readonly instructions: string,
     private readonly tools: AgentTool[],
+    private readonly toolAccess: RuntimeOptions["toolAccess"],
     private readonly observer: MindObserver = {},
   ) {}
 
@@ -174,6 +175,7 @@ export class AgentMind {
       sessionId: this.store.getAgentState(this.spec.name)?.sessionId ?? null,
       instructions: this.instructions,
       tools: this.tools,
+      toolAccess: this.toolAccess,
       events,
     });
     return this.runtime;

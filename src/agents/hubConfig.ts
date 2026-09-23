@@ -34,6 +34,12 @@ export function loadHubConfig(): HubConfig {
           storageDir: path.join(stateRoot, "webhooks"),
           publicBaseUrl: process.env.WEBHOOK_PUBLIC_BASE_URL?.trim().replace(/\/+$/, "") || null,
         },
+    toolServer: {
+      port: numberFromEnv("TOOL_SERVER_PORT", 3015),
+      bindHost: process.env.TOOL_SERVER_BIND_HOST?.trim() || "127.0.0.1",
+      // Set this to the hub's tailnet address when an agent runs on another machine.
+      publicUrl: process.env.TOOL_SERVER_PUBLIC_URL?.trim() || null,
+    },
     attachmentStorageDir: path.resolve(process.env.ATTACHMENT_STORAGE_DIR ?? path.join(stateRoot, "attachments")),
     attachmentMaxBytes: numberFromEnv("ATTACHMENT_MAX_BYTES", 1024 * 1024 * 1024),
     attachmentTotalMaxBytes: null,

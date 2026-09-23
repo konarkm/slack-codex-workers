@@ -6,6 +6,7 @@ import { spawnOnHost } from "../agents/hostSpawn.js";
 import { RuntimeError, type AgentRuntime, type RuntimeInput, type RuntimeOptions, type RuntimeState, type TurnStatus } from "../agents/types.js";
 import { CodexRpcClient, type RpcNotification, type RpcServerRequest } from "../codex/rpcClient.js";
 import { logError, logInfo } from "../logger.js";
+import { TOOL_SERVER_NAME, TOOL_TOKEN_ENV } from "../agents/toolServer.js";
 
 export interface CodexRpc {
   start(): Promise<void>;
@@ -21,7 +22,6 @@ export interface CodexRpc {
 
 const threadResponseSchema = z.object({ thread: z.object({ id: z.string() }) });
 const turnResponseSchema = z.object({ turn: z.object({ id: z.string() }) });
-const toolCallSchema = z.object({ tool: z.string(), arguments: z.unknown().optional() });
 
 const CODEX_APPS_SERVER = "codex_apps";
 
@@ -131,7 +131,7 @@ export class CodexRuntime implements AgentRuntime {
   private async startInner(): Promise<void> {
     const { spec } = this.options;
     const rpc = this.createRpc?.() ?? new CodexRpcClient(this.codexBin, spec.cwd, CLIENT_INFO, () =>
-      spawnOnHost({ host: spec.host, command: this.codexBin, args: ["app-server", ...this.denyArgs()], cwd: spec.cwd, env: this.isolatedHomeEnv() }),
+      spawnOnHost({ host: spec.host, command: this.codexBin, args: ["app-server", ...this.toolServerArgs(), ...this.denyArgs()], cwd: spec.cwd, env: this.spawnEnv() }),
     );
     rpc.on("notification", (event) => {
       this.chain = this.chain.then(() => this.handleNotification(event)).catch((error) => {
@@ -171,7 +171,6 @@ export class CodexRuntime implements AgentRuntime {
     const { spec, events } = this.options;
     if (this.threadId) {
       try {
-        await this.syncRolloutTools(this.threadId);
         // Instructions and policy are sent again on resume, so changes to them reach an existing thread.
         await rpc.request("thread/resume", { threadId: this.threadId, ...this.threadSettings() });
         this.resumeFailures = 0;
@@ -186,47 +185,30 @@ export class CodexRuntime implements AgentRuntime {
         this.resumeFailures = 0;
       }
     }
-    const raw = await rpc.request("thread/start", { ...this.threadSettings(), dynamicTools: this.dynamicTools() });
+    const raw = await rpc.request("thread/start", this.threadSettings());
     this.threadId = threadResponseSchema.parse(raw).thread.id;
     await events.onSessionChanged(this.threadId);
     logInfo("codex thread started", { agent: spec.name, threadId: this.threadId });
   }
 
-  private dynamicTools(): DynamicToolSpec[] {
-    return this.options.tools.map((tool) => ({ type: "function", name: tool.name, description: tool.description, inputSchema: z.toJSONSchema(z.object(tool.shape)) }));
-  }
-
-  // Codex takes a thread's tools once, at thread/start, and every resume reads them back from the session_meta record
-  // at the head of the thread's rollout file (thread/resume has no dynamicTools). A tool the bridge gained after the
-  // thread was born would never reach the agent, so the current list is written into that record before each resume.
-  // Local hosts only: the rollout lives on the agent's machine. This leans on a file format Codex owns and does not
-  // promise to keep, so when the record no longer reads as expected the operators hear about it rather than the agent
-  // quietly keeping stale tools.
-  private async syncRolloutTools(threadId: string): Promise<void> {
-    const { spec, events } = this.options;
-    if (spec.host.kind !== "local") return;
-    try {
-      const file = findRollout(path.join(this.codexHome(), "sessions"), threadId);
-      if (!file) return;
-      const changed = rewriteRolloutTools(file, this.dynamicTools());
-      if (changed) logInfo("codex thread tools updated", { agent: spec.name, threadId, tools: changed });
-    } catch (error) {
-      logError("could not update the codex thread's tools; the agent keeps the tools it started with", { agent: spec.name, threadId, error: errorMessage(error) });
-      await events.onProblem(`The Codex rollout for thread ${threadId} could not be updated with the current tools (${errorMessage(error)}). ${spec.name} keeps the tools it started with until this is fixed; a Codex upgrade may have changed the rollout format.`);
-    }
-  }
-
   // An agent that does not inherit the operator's setup gets its own Codex home: the operator's login, and nothing else
   // (no MCP servers, no user instructions; the app connectors are switched off separately, since they follow the login).
   // Local agents only; a remote host keeps its own home.
-  private isolatedHomeEnv(): Record<string, string> | undefined {
+  private spawnEnv(): Record<string, string> {
     const { spec } = this.options;
-    if (spec.inheritUserConfig || spec.host.kind !== "local") return undefined;
+    const env: Record<string, string> = { [TOOL_TOKEN_ENV]: this.options.toolAccess.token };
+    if (spec.inheritUserConfig || spec.host.kind !== "local") return env;
     const home = this.codexHome();
     fs.mkdirSync(home, { recursive: true });
     const link = path.join(home, "auth.json");
     if (!fs.existsSync(link)) fs.symlinkSync(path.join(operatorCodexHome(), "auth.json"), link);
-    return { CODEX_HOME: home };
+    return { ...env, CODEX_HOME: home };
+  }
+
+  // The bridge's tools reach Codex as an MCP server it reads from config at every session start, so a tool added
+  // later is there on the next wake. Passed as overrides: nothing is written into any config file.
+  private toolServerArgs(): string[] {
+    return codexToolServerArgs(this.options.toolAccess.url);
   }
 
   // Where this agent's Codex keeps its state on this machine.
@@ -316,22 +298,6 @@ export class CodexRuntime implements AgentRuntime {
       case "applyPatchApproval":
         await rpc.respond(request.id, { decision: "approved_for_session" });
         return;
-      case "item/tool/call": {
-        const call = toolCallSchema.parse(params);
-        const tool = this.options.tools.find((candidate) => candidate.name === call.tool);
-        if (!tool) {
-          await rpc.respond(request.id, { contentItems: [{ type: "inputText", text: `Unknown tool: ${call.tool}` }], success: false });
-          return;
-        }
-        try {
-          const args = z.object(tool.shape).parse(call.arguments ?? {});
-          const text = await tool.handler(args);
-          await rpc.respond(request.id, { contentItems: [{ type: "inputText", text }], success: true });
-        } catch (error) {
-          await rpc.respond(request.id, { contentItems: [{ type: "inputText", text: `Error: ${errorMessage(error)}` }], success: false });
-        }
-        return;
-      }
       default:
         await rpc.respondError(request.id, -32601, `Unsupported server request method: ${request.method}`);
     }
@@ -354,6 +320,13 @@ export class CodexRuntime implements AgentRuntime {
 // The ChatGPT app connectors (Slack, mail, payments, and the rest) follow the login, not the config, and come as one
 // built-in server; denying it turns the feature off.
 // Codex refuses to start if an override names a server its config does not define, so only configured servers are named.
+// TOML values for the override flags; the URL is a plain string and the token comes from the environment, never argv.
+// Bridge tools can run long (a workspace search, a large upload), so the per-call timeout is well above Codex's default.
+export function codexToolServerArgs(url: string): string[] {
+  const key = `mcp_servers.${TOOL_SERVER_NAME}`;
+  return ["-c", `${key}.url=${JSON.stringify(url)}`, "-c", `${key}.bearer_token_env_var=${JSON.stringify(TOOL_TOKEN_ENV)}`, "-c", `${key}.tool_timeout_sec=900`];
+}
+
 export function codexDenyArgs(denyTools: string[], configuredServers: string[]): string[] {
   const servers = denyTools.map((entry) => /^mcp__([A-Za-z0-9_-]+)$/.exec(entry)?.[1]).filter((name): name is string => Boolean(name));
   return servers.flatMap((name) =>
@@ -373,64 +346,6 @@ export function configuredCodexServers(codexHome: string): string[] {
 
 function operatorCodexHome(): string {
   return process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
-}
-
-export interface DynamicToolSpec {
-  type: "function";
-  name: string;
-  description: string;
-  inputSchema: unknown;
-}
-
-// Rollouts sit at <home>/sessions/<year>/<month>/<day>/rollout-<time>-<thread id>.jsonl.
-export function findRollout(sessionsDir: string, threadId: string): string | null {
-  const suffix = `-${threadId}.jsonl`;
-  const walk = (dir: string, depth: number): string | null => {
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return null;
-    }
-    for (const entry of entries) {
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        if (depth === 0) continue;
-        const found = walk(full, depth - 1);
-        if (found) return found;
-      } else if (entry.name.startsWith("rollout-") && entry.name.endsWith(suffix)) return full;
-    }
-    return null;
-  };
-  return walk(sessionsDir, 3);
-}
-
-// Replaces the tool list in the rollout's session_meta record when it differs from `tools`. Returns the names of the
-// tools added and removed, or null when nothing changed. The file is rewritten whole, through a rename, so a crash
-// midway leaves the old record intact.
-export function rewriteRolloutTools(file: string, tools: DynamicToolSpec[]): { added: string[]; removed: string[] } | null {
-  const content = fs.readFileSync(file, "utf8");
-  const newline = content.indexOf("\n");
-  const head = newline === -1 ? content : content.slice(0, newline);
-  const record = JSON.parse(head) as { type?: string; payload?: { dynamic_tools?: unknown } };
-  if (record.type !== "session_meta" || !record.payload) throw new Error("the rollout does not start with a session_meta record");
-  const current = Array.isArray(record.payload.dynamic_tools) ? (record.payload.dynamic_tools as Array<{ name?: string }>) : [];
-  if (canonical(current) === canonical(tools)) return null;
-  const before = new Set(current.map((tool) => tool.name));
-  const after = new Set(tools.map((tool) => tool.name));
-  record.payload.dynamic_tools = tools;
-  const rest = newline === -1 ? "" : content.slice(newline);
-  const temp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(temp, `${JSON.stringify(record)}${rest}`);
-  fs.renameSync(temp, file);
-  return { added: tools.map((tool) => tool.name).filter((name) => !before.has(name)), removed: [...before].filter((name): name is string => typeof name === "string" && !after.has(name)) };
-}
-
-// JSON with object keys sorted, so two serializers' orderings compare equal.
-function canonical(value: unknown): string {
-  return JSON.stringify(value, (_key, item: unknown) =>
-    item && typeof item === "object" && !Array.isArray(item) ? Object.fromEntries(Object.entries(item as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) : item,
-  );
 }
 
 // Codex reports these conditions only as English error text.

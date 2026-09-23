@@ -1,10 +1,7 @@
 import { EventEmitter } from "node:events";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { CodexRuntime, classifyCodexError, codexDenyArgs, rewriteRolloutTools, type CodexRpc } from "../runtimes/codexRuntime.js";
+import { CodexRuntime, classifyCodexError, codexDenyArgs, codexToolServerArgs, type CodexRpc } from "../runtimes/codexRuntime.js";
 import { DEFAULT_WAKE_POLICY, type AgentSpec, type RuntimeEvents, type RuntimeState } from "../agents/types.js";
 
 const spec: AgentSpec = {
@@ -46,7 +43,7 @@ class FakeRpc extends EventEmitter {
   async respondError(): Promise<void> {}
 }
 
-function setup(sessionId: string | null, sent: string[] = []) {
+function setup(sessionId: string | null) {
   const rpc = new FakeRpc();
   const states: RuntimeState[] = [];
   const sessions: Array<string | null> = [];
@@ -64,7 +61,8 @@ function setup(sessionId: string | null, sent: string[] = []) {
       spec,
       sessionId,
       instructions: "be a teammate",
-      tools: [{ name: "send", description: "send", shape: { text: z.string() }, handler: async (args) => { sent.push((args as { text: string }).text); return "ok"; } }],
+      tools: [{ name: "send", description: "send", shape: { text: z.string() }, handler: async () => "ok" }],
+      toolAccess: ACCESS,
       events,
     },
     "codex",
@@ -73,17 +71,17 @@ function setup(sessionId: string | null, sent: string[] = []) {
   return { rpc, runtime, states, sessions, turns };
 }
 
+const ACCESS = { url: "http://127.0.0.1:3015/mcp", token: "secret" };
+
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-const silentEvents = (): RuntimeEvents => ({ onSessionChanged: () => {}, onStateChanged: () => {}, onTurnCompleted: () => {}, onActivity: () => {}, onCompaction: () => {}, onProblem: () => {} });
 
 describe("CodexRuntime", () => {
-  it("starts a thread with canonical dynamic tools and reports the session", async () => {
+  it("starts a thread without baked-in tools (they come from the tool server) and reports the session", async () => {
     const { rpc, runtime, sessions } = setup(null);
     await runtime.start();
     const start = rpc.requests.find((r) => r.method === "thread/start")!;
-    expect(start.params.dynamicTools[0]).toMatchObject({ type: "function", name: "send" });
-    expect(start.params.dynamicTools[0].inputSchema.properties.text.type).toBe("string");
+    expect(start.params.dynamicTools).toBeUndefined();
     expect(start.params.developerInstructions).toBe("be a teammate");
     expect(sessions).toEqual(["thread-new"]);
   });
@@ -101,45 +99,10 @@ describe("CodexRuntime", () => {
     expect(gone.sessions).toEqual(["thread-new"]);
   });
 
-  it("writes the current tools into a persisted thread's rollout before resuming it", async () => {
-    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-home-"));
-    const dir = path.join(cwd, ".codex-home", "sessions", "2026", "09", "21");
-    fs.mkdirSync(dir, { recursive: true });
-    const file = path.join(dir, "rollout-2026-09-21T10-49-56-thread-old.jsonl");
-    const stale = { type: "function", name: "old_tool", description: "gone", inputSchema: { type: "object" } };
-    const meta = { timestamp: "t", type: "session_meta", payload: { id: "thread-old", dynamic_tools: [stale] } };
-    fs.writeFileSync(file, `${JSON.stringify(meta)}\n${JSON.stringify({ type: "turn_context", payload: {} })}\n`);
-    const rpc = new FakeRpc();
-    const runtime = new CodexRuntime(
-      { spec: { ...spec, cwd }, sessionId: "thread-old", instructions: "be a teammate", tools: [{ name: "send", description: "send", shape: { text: z.string() }, handler: async () => "ok" }], events: silentEvents() },
-      "codex",
-      () => rpc as unknown as CodexRpc,
-    );
-    await runtime.start();
-    expect(rpc.requests.map((r) => r.method)).toEqual(["thread/resume"]);
-    const lines = fs.readFileSync(file, "utf8").split("\n");
-    const written = JSON.parse(lines[0]!);
-    expect(written.payload.dynamic_tools.map((tool: { name: string }) => tool.name)).toEqual(["send"]);
-    expect(written.payload.id).toBe("thread-old");
-    expect(lines[1]).toBe(JSON.stringify({ type: "turn_context", payload: {} }));
-
-    // The same list again leaves the file untouched.
-    const before = fs.statSync(file).mtimeMs;
-    expect(rewriteRolloutTools(file, [{ type: "function", name: "send", description: "send", inputSchema: written.payload.dynamic_tools[0].inputSchema }])).toBeNull();
-    expect(fs.statSync(file).mtimeMs).toBe(before);
-
-    // A rollout that no longer opens with session_meta is left alone, the resume still goes ahead, and the operators hear about it.
-    fs.writeFileSync(file, `${JSON.stringify({ type: "something_new", payload: {} })}\n`);
-    const problems: string[] = [];
-    const guarded = new CodexRuntime(
-      { spec: { ...spec, cwd }, sessionId: "thread-old", instructions: "be a teammate", tools: [], events: { ...silentEvents(), onProblem: (text) => void problems.push(text) } },
-      "codex",
-      () => new FakeRpc() as unknown as CodexRpc,
-    );
-    await guarded.start();
-    expect(problems).toHaveLength(1);
-    expect(problems[0]).toContain("keeps the tools it started with");
-    expect(fs.readFileSync(file, "utf8")).toContain("something_new");
+  it("hands Codex the tool server as config overrides and keeps the token out of argv", () => {
+    const args = codexToolServerArgs("http://127.0.0.1:3015/mcp");
+    expect(args).toEqual(["-c", 'mcp_servers.workspace.url="http://127.0.0.1:3015/mcp"', "-c", 'mcp_servers.workspace.bearer_token_env_var="SLACK_AGENTS_TOOL_TOKEN"', "-c", "mcp_servers.workspace.tool_timeout_sec=900"]);
+    expect(args.join(" ")).not.toContain("secret");
   });
 
   it("starts a turn when idle and steers the running turn otherwise", async () => {
@@ -223,17 +186,11 @@ describe("CodexRuntime", () => {
     expect(sessions).toEqual(["thread-new"]);
   });
 
-  it("runs tool calls from the agent and ignores other threads' notifications", async () => {
-    const sent: string[] = [];
-    const { rpc, runtime, turns } = setup(null, sent);
+  it("ignores other threads' notifications", async () => {
+    const { rpc, runtime, turns } = setup(null);
     await runtime.deliver({ id: "in-one", text: "one", imagePaths: [], priority: "next" });
-    rpc.emit("request", { id: 7, method: "item/tool/call", params: { threadId: "thread-new", tool: "send", arguments: { text: "hi" } } });
-    rpc.emit("request", { id: 8, method: "item/tool/call", params: { threadId: "thread-new", tool: "send", arguments: { text: 5 } } });
     rpc.emit("notification", { method: "turn/completed", params: { threadId: "someone-else", turn: { id: "x", status: "completed" } } });
     await flush();
-    expect(sent).toEqual(["hi"]);
-    expect(rpc.responses.find((r) => r.id === 7)).toMatchObject({ result: { success: true } });
-    expect(rpc.responses.find((r) => r.id === 8)).toMatchObject({ result: { success: false } });
     expect(turns).toEqual([]);
   });
 

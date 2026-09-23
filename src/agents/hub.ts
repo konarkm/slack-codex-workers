@@ -8,6 +8,7 @@ import { CodexRuntime } from "../runtimes/codexRuntime.js";
 import { AgentSlackClient, type SlackHistoryMessage, type SlackInbound, type SlackPersona, type SlackReaction } from "../slack/agentSlack.js";
 import { prepareSlackAttachments, type AttachmentConfig } from "../slack/attachments.js";
 import { WebhookIngressServer, type WebhookServerConfig } from "../webhooks/server.js";
+import { ToolServer, type ToolServerConfig } from "./toolServer.js";
 import { AgentStore } from "./agentStore.js";
 import { buildThreadContext, formatTime, mentionsUser, renderEnvelope, renderReactionEnvelope, renderSlackText, sourceKey, type EnvelopeAuthor, type ThreadContext, type WakeDecision } from "./envelope.js";
 import { buildInstructions } from "./instructions.js";
@@ -33,6 +34,8 @@ export interface HubConfig extends AttachmentConfig {
   threadContextLimit: number;
   // Inbound webhooks. Null turns the listener off.
   webhooks: (WebhookServerConfig & { storageDir: string; publicBaseUrl: string | null }) | null;
+  // Where the agents fetch the bridge's tools over MCP.
+  toolServer: ToolServerConfig;
 }
 
 export interface SlackClientFactory {
@@ -112,6 +115,7 @@ export class AgentHub {
   private readonly webhookWakes: WebhookWakes | null;
   private readonly ruleJudge = new RuleJudge();
   private webhookServer: WebhookIngressServer | null = null;
+  private readonly toolServer: ToolServer;
   private registry: AgentRegistry | null = null;
   private slack: AgentSlackClient | null = null;
   // Slack delivers events concurrently, and a mention twice. One line keeps order and makes the dedupe check reliable.
@@ -140,6 +144,7 @@ export class AgentHub {
       });
     };
     this.scheduler = new WakeScheduler(this.store, deliverWake);
+    this.toolServer = new ToolServer(config.toolServer);
     this.webhookWakes = config.webhooks
       ? new WebhookWakes(this.store, { storageDir: config.webhooks.storageDir, webhookPath: config.webhooks.webhookPath, publicBaseUrl: config.webhooks.publicBaseUrl }, deliverWake)
       : null;
@@ -192,6 +197,8 @@ export class AgentHub {
     await slack.identify();
     this.store.pruneMessageIndex(((Date.now() - MESSAGE_INDEX_DAYS * 86_400_000) / 1000).toFixed(6));
 
+    // Every harness fetches its tools from here at session start, so it is up before any mind is.
+    await this.toolServer.start();
     const active = specs.filter((spec) => !spec.retired);
     const results = await Promise.allSettled(active.map((spec) => this.startSeat(spec)));
     results.forEach((result, index) => {
@@ -221,6 +228,7 @@ export class AgentHub {
     this.stopped = true;
     this.scheduler.stop();
     await this.webhookServer?.stop().catch(() => {});
+    await this.toolServer.stop().catch(() => {});
     this.webhookServer = null;
     await this.slack?.stop().catch(() => {});
     await Promise.allSettled([...this.seats.values()].map((seat) => seat.mind.stop()));
@@ -272,7 +280,7 @@ export class AgentHub {
     ];
     const ownInstructions = spec.instructionsPath && fs.existsSync(spec.instructionsPath) ? fs.readFileSync(spec.instructionsPath, "utf8") : null;
     const instructions = buildInstructions({ spec, workspaceName: slack.identity().teamName, operatorUserIds: this.config.adminUserIds, ownInstructions });
-    seat.mind = new AgentMind(spec, this.store, this.createRuntime, instructions, tools, {
+    seat.mind = new AgentMind(spec, this.store, this.createRuntime, instructions, tools, this.toolServer.grant(spec.name, tools), {
       onStateChanged: (_agent, state) => this.onMindState(seat, state),
       onTurnCompleted: (_agent, event) => {
         if (event.status === "failed") logError("agent turn failed", { agent: spec.name, error: event.error });
@@ -443,6 +451,7 @@ export class AgentHub {
     if (!seat) return;
     this.seats.delete(name);
     await seat.mind.stop();
+    this.toolServer.revoke(name);
   }
 
   // The same agent, with a changed spec: same session, same inbox, new instructions and runtime options.
