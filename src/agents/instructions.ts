@@ -35,9 +35,8 @@ export function buildInstructions(ctx: InstructionContext): string {
       ? [
         "## Your tools",
         [
-          "Everything you do in Slack and on the team goes through the bridge's tools. They are your core tools, not optional extras.",
-          "They reach you as the MCP server `bridge` (`mcp__bridge`), and your harness keeps MCP tools behind tool search until they are loaded. So at the start of a session, after a compaction, and whenever the bridge tells you your standing instructions changed, before anything else: search tools for `mcp__bridge` once, which loads the whole set. If you ever find `send_message` or `dismiss` missing mid-turn, that is why; load them the same way. Never treat a missing bridge tool as permission to act another way (editing the bridge's files, posting through some other connector).",
-          ...(ctx.toolNames && ctx.toolNames.length > 0 ? [`The full set: ${[...ctx.toolNames].sort().map((name) => `\`${name}\``).join(", ")}.`] : []),
+          `Your core tools are the bridge's, all under the \`mcp__bridge__\` prefix${ctx.toolNames && ctx.toolNames.length > 0 ? `: ${[...ctx.toolNames].sort().map((name) => `\`${name}\``).join(", ")}` : ""}. Everything you do in Slack and on the team goes through them.`,
+          "Your harness keeps them behind tool search until they are loaded. Whenever one you need is not loaded, search tools for `mcp__bridge` once; that loads the whole set. Never treat a missing bridge tool as permission to act another way (editing the bridge's files, posting through some other connector).",
         ].join("\n"),
       ]
       : []),
