@@ -76,6 +76,20 @@ describe("webhook wakes", () => {
     expect(delivered).toHaveLength(2);
   });
 
+  it("counts a wake skipped for a retired subscriber as done, so a retry after its revival does not replay it", async () => {
+    let retired = true;
+    wakes = new WebhookWakes(store, { storageDir: dir, webhookPath: "/webhooks", publicBaseUrl: "https://hooks.example.com" }, async (agent, item) =>
+      retired ? "skipped" : deliverToInbox(agent, item),
+    );
+    await wakes.createSource("github", "ada");
+    writeHandler("github");
+    await tool("ada", "subscribe_webhook").handler({ source: "github", note: "review it" } as never);
+    expect((await wakes.ingest(await request("github", { event: "pr.opened", id: "1", repo: "bridge" }))).status).toBe(202);
+    retired = false;
+    expect((await wakes.ingest(await request("github", { event: "pr.opened", id: "1", repo: "bridge" }))).status).toBe(202);
+    expect(delivered).toHaveLength(0);
+  });
+
   it("lets a source name be created again after its owner was deleted", async () => {
     await wakes.createSource("github", "ada");
     writeHandler("github");

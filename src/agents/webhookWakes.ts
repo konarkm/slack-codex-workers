@@ -18,7 +18,8 @@ export interface WebhookWakeConfig {
 }
 
 export interface WebhookWakeDelivery {
-  (agent: string, item: { sourceKey: string; text: string }): Promise<unknown>;
+  // Resolves "skipped" when the agent is not to hear it (it is retired); throws when the wake could not be queued.
+  (agent: string, item: { sourceKey: string; text: string }): Promise<"skipped" | void>;
 }
 
 const sourcePattern = /^[a-z0-9][a-z0-9._-]{0,63}$/;
@@ -103,8 +104,10 @@ export class WebhookWakes {
         const payloadPath = await this.writePayload(source.source, event.event, event.payload ?? input.parsedJson ?? input.rawBody);
         for (const subscription of subscriptions) {
           try {
-            await this.deliver(subscription.agent, { sourceKey: keyFor(subscription), text: renderWebhookWake(subscription, event.event, fields, event.summary ?? null, payloadPath, input.receivedAt) });
-            woken += 1;
+            const outcome = await this.deliver(subscription.agent, { sourceKey: keyFor(subscription), text: renderWebhookWake(subscription, event.event, fields, event.summary ?? null, payloadPath, input.receivedAt) });
+            // A skip is final: recorded under the same key, so a retry does not bring the event to the agent once it is back.
+            if (outcome === "skipped") this.store.recordHandled(subscription.agent, keyFor(subscription), "skipped: the agent was retired");
+            else woken += 1;
           } catch (error) {
             failures += 1;
             logError("webhook wake not delivered", { agent: subscription.agent, source: source.source, error: error instanceof Error ? error.message : String(error) });
