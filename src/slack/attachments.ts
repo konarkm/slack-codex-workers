@@ -99,7 +99,10 @@ async function downloadSlackAttachment(
       },
       signal: controller.signal,
     });
+    // A download turned away still holds its connection until the body is released.
+    const turnAway = () => response.body?.cancel().catch(() => undefined);
     if (!response.ok || !response.body) {
+      await turnAway();
       return {
         record: buildAttachmentRecord(recordKey, messageKey, file, filePath, isImage, null, "failed", `${file.name} (download failed: ${response.status})`),
         note: `${file.name} (download failed: ${response.status})`,
@@ -110,12 +113,14 @@ async function downloadSlackAttachment(
     const declaredBytes = contentLengthHeader ? Number.parseInt(contentLengthHeader, 10) : null;
     if (declaredBytes !== null && Number.isFinite(declaredBytes)) {
       if (declaredBytes > config.attachmentMaxBytes) {
+        await turnAway();
         return {
           record: buildAttachmentRecord(recordKey, messageKey, file, filePath, isImage, declaredBytes, "failed", `${file.name} exceeds per-file limit`),
           note: `${file.name} exceeds the per-file attachment limit`,
         };
       }
       if (Number.isFinite(remainingBudget) && declaredBytes > remainingBudget) {
+        await turnAway();
         return {
           record: buildAttachmentRecord(recordKey, messageKey, file, filePath, isImage, declaredBytes, "failed", `${file.name} exceeds remaining attachment budget`),
           note: `${file.name} exceeds the total attachment budget for this message`,
@@ -147,6 +152,7 @@ async function downloadSlackAttachment(
       note: isImage ? file.name : `${file.name} at ${filePath}`,
     };
   } catch (error) {
+    controller.abort();
     await fsPromises.rm(filePath, { force: true }).catch(() => undefined);
     const note = error instanceof Error && error.name === "AbortError"
       ? `${file.name} exceeded attachment limits or timed out`

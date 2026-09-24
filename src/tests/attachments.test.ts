@@ -38,4 +38,26 @@ describe("prepareSlackAttachments", () => {
     expect(await fs.readFile(firstPath, "utf8")).toBe("content of F1");
     expect(await fs.readFile(secondPath, "utf8")).toBe("content of F2");
   });
+
+  it("releases the response body when it turns a download away", async () => {
+    const cancelled: string[] = [];
+    const endless = (label: string) =>
+      new ReadableStream({
+        pull() {
+          return new Promise(() => {});
+        },
+        cancel() {
+          cancelled.push(label);
+        },
+      });
+    vi.stubGlobal("fetch", async (url: string) =>
+      url.endsWith("F1") ? new Response(endless("error status"), { status: 500 }) : new Response(endless("too large"), { headers: { "content-length": "4096" } }),
+    );
+    const settings = await config();
+    const failed = await prepareSlackAttachments("slack:C1:1.1", [file("F1")], [], "xoxb-test", settings);
+    const tooLarge = await prepareSlackAttachments("slack:C1:2.2", [file("F2")], [], "xoxb-test", settings);
+    expect(failed.fileNotes[0]).toContain("download failed: 500");
+    expect(tooLarge.fileNotes[0]).toContain("exceeds per-file limit");
+    expect(cancelled).toEqual(["error status", "too large"]);
+  });
 });
