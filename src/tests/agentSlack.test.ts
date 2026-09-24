@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AgentSlackClient } from "../slack/agentSlack.js";
+import { AgentSlackClient, type SlackInbound } from "../slack/agentSlack.js";
 
 // The real constructor starts a Bolt app, which calls Slack. These tests only need the client's methods over a fake API.
 function clientWith(api: Record<string, Record<string, (args: Record<string, unknown>) => Promise<unknown>>>): AgentSlackClient {
@@ -75,5 +75,24 @@ describe("AgentSlackClient.uploadFiles", () => {
     const uploaded = await client.uploadFiles("C1", "1726600000.000100", [{ path: "/tmp/a.txt", filename: "a.txt", sizeBytes: 1 }], "log attached");
     expect(uploaded).toEqual({ ts: "1726600000.000900" });
     expect(infoCalls).toBe(1);
+  });
+});
+
+describe("AgentSlackClient.onMessage", () => {
+  it("passes on a mention whose conversation lookup fails, as a channel message", async () => {
+    const listeners = new Map<string, (args: { event: unknown }) => Promise<void>>();
+    const client = Object.create(AgentSlackClient.prototype) as AgentSlackClient;
+    Object.assign(client, {
+      identityValue: { teamId: "T1", teamName: "Test", botUserId: "UAPP", botId: "BAPP", appId: null },
+      app: { event: (name: string, listener: (args: { event: unknown }) => Promise<void>) => listeners.set(name, listener) },
+      getConversation: async () => {
+        throw new Error("ratelimited");
+      },
+    });
+    const received: SlackInbound[] = [];
+    client.onMessage(async (message) => void received.push(message));
+    await listeners.get("app_mention")!({ event: { type: "app_mention", channel: "C1", ts: "1726700000.000100", user: "UHUMAN", text: "<@UAPP> ada handle this" } });
+    expect(received).toHaveLength(1);
+    expect(received[0]).toMatchObject({ channelId: "C1", channelType: "channel", text: "<@UAPP> ada handle this" });
   });
 });

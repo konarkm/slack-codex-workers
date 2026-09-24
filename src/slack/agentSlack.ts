@@ -259,8 +259,9 @@ export class AgentSlackClient {
     if (!raw.channel || !raw.ts) return null;
     const identity = this.identity();
     if (raw.bot_id === identity.botId || raw.user === identity.botUserId) return null;
-    // app_mention events carry no channel type; ask Slack rather than guess, so a DM is never treated as a channel.
-    const channelType = raw.channel_type ?? (await this.getConversation(raw.channel).then((info) => info.type).catch(() => undefined));
+    // app_mention events carry no channel type; ask Slack rather than guess, so a DM is never treated as a channel. If Slack
+    // cannot say, it is taken as a channel: a DM also arrives as a message event of its own, which carries its type.
+    const channelType = raw.channel_type ?? (await this.getConversation(raw.channel).then((info) => info.type).catch(() => "channel" as const));
     if (channelType !== "channel" && channelType !== "group" && channelType !== "im" && channelType !== "mpim") return null;
     const files = (raw.files ?? [])
       .filter((file) => file.id && file.url_private_download)
