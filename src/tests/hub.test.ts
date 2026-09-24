@@ -719,7 +719,7 @@ describe("AgentHub", () => {
     expect(slack.posted.some((post) => post.channelId === "D-UHUMAN" && post.text.includes("remote did not start"))).toBe(true);
   });
 
-  it("keeps a home another agent reaches by another path: a symlink, or another spelling of it", async () => {
+  it("keeps a home another agent reaches by another path: a symlink, another spelling, or other capitals", async () => {
     const adaHome = path.join(dir, "homes", "ada");
     fs.mkdirSync(adaHome, { recursive: true });
     fs.symlinkSync(adaHome, path.join(dir, "ada-alias"), "dir");
@@ -730,6 +730,9 @@ describe("AgentHub", () => {
       { name: "cody", runtime: "codex", cwd: path.join(dir, "ada-alias") },
       { name: "scout", runtime: "claude" },
       { name: "rex", runtime: "claude", cwd: scoutWork },
+      { name: "ivy", runtime: "claude" },
+      // The same folder as ivy's home on a case-insensitive disk (macOS by default); a folder of its own elsewhere.
+      { name: "jay", runtime: "claude", cwd: path.join(dir, "homes", "IVY") },
     ]);
     fs.writeFileSync(path.join(adaHome, "cody-notes.md"), "cody's notes");
     await slack.handler!(inbound({ channelId: "D1", channelType: "im", text: ".delete ada" }));
@@ -738,6 +741,10 @@ describe("AgentHub", () => {
     await slack.handler!(inbound({ channelId: "D1", channelType: "im", ts: "1726700001.000100", text: ".delete scout" }));
     expect(slack.posted.at(-1)!.text).toContain("deleted scout");
     expect(fs.existsSync(scoutWork)).toBe(true);
+    fs.writeFileSync(path.join(dir, "homes", "IVY", "jay-notes.md"), "jay's notes");
+    await slack.handler!(inbound({ channelId: "D1", channelType: "im", ts: "1726700002.000100", text: ".delete ivy" }));
+    expect(slack.posted.at(-1)!.text).toContain("deleted ivy");
+    expect(fs.existsSync(path.join(dir, "homes", "IVY", "jay-notes.md"))).toBe(true);
   });
 
   it("does not take in a message, or fire a wake, whose inbox write failed", async () => {

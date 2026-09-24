@@ -486,18 +486,22 @@ export class AgentHub {
   }
 
   // Only the home the bridge made for a deleted agent is the bridge's to remove, and not while another agent works in it.
-  // Paths are compared as the filesystem resolves them, since a symlink or another spelling can name the same folder. When
-  // that cannot be settled, the folder stays.
+  // Folders are compared by identity, not by path: a symlink, another spelling, or other capitals on a case-insensitive
+  // disk can all name the home. When that cannot be settled, the folder stays.
   private removeHome(name: string): void {
     const home = path.resolve(this.config.agentsRoot, name);
     if (!fs.existsSync(home)) return;
     try {
-      const real = realPath(home);
+      const { dev, ino } = fs.statSync(home);
+      // An agent uses the home if its cwd, or any folder above that cwd as the filesystem resolves it, is the home.
       const inUse = this.requireRegistry()
         .specs()
         .some((other) => {
-          const cwd = realPath(other.cwd);
-          return cwd === real || cwd.startsWith(`${real}${path.sep}`);
+          for (let folder = realPath(other.cwd); ; folder = path.dirname(folder)) {
+            const found = statIfExists(folder);
+            if (found && found.dev === dev && found.ino === ino) return true;
+            if (path.dirname(folder) === folder) return false;
+          }
         });
       if (inUse) return;
     } catch (error) {
@@ -1031,6 +1035,15 @@ function realPath(target: string): string {
       rest.unshift(path.basename(existing));
       existing = parent;
     }
+  }
+}
+
+function statIfExists(target: string): fs.Stats | null {
+  try {
+    return fs.statSync(target);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
   }
 }
 
