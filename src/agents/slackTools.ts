@@ -266,7 +266,7 @@ export function buildSlackTools(ctx: SlackToolContext): AgentTool[] {
         }
         const refusal = args.thread_ts ? await dmRefusal(args.channel, args.thread_ts) : null;
         if (refusal) return refusal;
-        const messages = await slack.readHistory({ channelId: args.channel, threadTs: args.thread_ts ?? null, limit: args.limit ?? 30, before: args.before ?? null });
+        const messages = await slack.readHistory({ channelId: args.channel, threadTs: args.thread_ts ?? null, limit: args.limit ?? 30, before: args.before ?? null, keepRoot: false });
         const newest = messages.at(-1);
         // Reading the latest page is catching up.
         if (newest && !args.before) ctx.noteRead(args.channel, args.thread_ts ?? "top", newest.ts);

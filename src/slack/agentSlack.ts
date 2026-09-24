@@ -397,19 +397,25 @@ export class AgentSlackClient {
     await this.app.client.reactions.remove({ token: this.botToken, channel: channelId, timestamp: ts, name: emoji.replaceAll(":", "") });
   }
 
-  async readHistory(args: { channelId: string; threadTs?: string | null; limit: number; before?: string | null }): Promise<SlackHistoryMessage[]> {
+  // In a thread the opening message is put in front of the newest ones unless keepRoot is false, since it says what the
+  // thread is about. Leave it out when paging with before, where it would read as the oldest message on every page.
+  async readHistory(args: { channelId: string; threadTs?: string | null; limit: number; before?: string | null; keepRoot?: boolean }): Promise<SlackHistoryMessage[]> {
     const common = { token: this.botToken, channel: args.channelId, limit: args.limit, latest: args.before ?? undefined, inclusive: false };
     type Raw = RawMessageEvent & { reply_count?: number };
     let messages: Raw[];
     if (args.threadTs) {
       // Replies come oldest-first a page at a time, so the newest are on the last page. Page to it, keeping only the tail.
       messages = [];
+      let root: Raw | undefined;
       let cursor: string | undefined;
       do {
         const response = await this.app.client.conversations.replies({ ...common, ts: args.threadTs, limit: 200, cursor });
-        messages = [...messages, ...((response.messages ?? []) as Raw[])].slice(-args.limit);
+        const page = (response.messages ?? []) as Raw[];
+        if (!cursor && page[0]?.ts === args.threadTs) root = page[0];
+        messages = [...messages, ...page].slice(-args.limit);
         cursor = response.response_metadata?.next_cursor || undefined;
       } while (cursor);
+      if (root && args.keepRoot !== false && !messages.includes(root)) messages = [root, ...messages];
     } else {
       messages = ((await this.app.client.conversations.history(common)).messages ?? []) as Raw[];
     }

@@ -26,12 +26,19 @@ function longThread() {
 }
 
 describe("AgentSlackClient.readHistory in a thread", () => {
-  it("returns the newest replies of a long thread, and pages back from them with before", async () => {
+  it("returns the newest replies of a long thread with its opening message in front, since that says what the thread is about", async () => {
     const thread = longThread();
     const client = clientWith({ conversations: { replies: thread.replies } });
     const newest = await client.readHistory({ channelId: "C1", threadTs: "1726600000.000000", limit: 30 });
+    expect(newest.map((message) => message.text)).toEqual(["m0", ...Array.from({ length: 30 }, (_, index) => `m${230 + index}`)]);
+  });
+
+  it("pages back from the newest replies with before, leaving the root out when asked", async () => {
+    const thread = longThread();
+    const client = clientWith({ conversations: { replies: thread.replies } });
+    const newest = await client.readHistory({ channelId: "C1", threadTs: "1726600000.000000", limit: 30, keepRoot: false });
     expect(newest.map((message) => message.text)).toEqual(Array.from({ length: 30 }, (_, index) => `m${230 + index}`));
-    const earlier = await client.readHistory({ channelId: "C1", threadTs: "1726600000.000000", limit: 30, before: newest[0]!.ts });
+    const earlier = await client.readHistory({ channelId: "C1", threadTs: "1726600000.000000", limit: 30, before: newest[0]!.ts, keepRoot: false });
     expect(earlier.map((message) => message.text)).toEqual(Array.from({ length: 30 }, (_, index) => `m${200 + index}`));
   });
 });
