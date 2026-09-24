@@ -255,7 +255,8 @@ export class CodexRuntime implements AgentRuntime {
   private threadSettings(): Record<string, unknown> {
     const { spec } = this.options;
     return {
-      cwd: spec.cwd,
+      // On another machine the process already runs in its cwd, and a `~` there means nothing to Codex.
+      cwd: spec.host.kind === "local" ? spec.cwd : undefined,
       model: spec.model ?? undefined,
       approvalPolicy: "never",
       sandbox: "danger-full-access",

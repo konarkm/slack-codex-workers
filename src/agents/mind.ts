@@ -10,6 +10,8 @@ const MAX_RETRY_MS = 300_000;
 // Consecutive failures (turns that failed, or hand-offs the runtime could not take) before the operators are told the
 // agent is in trouble.
 const TROUBLE_AFTER_FAILURES = 3;
+// How long a stop request waits for the harness to confirm the interrupt.
+const INTERRUPT_WAIT_MS = 10_000;
 
 export type RuntimeFactory = (options: RuntimeOptions) => AgentRuntime;
 
@@ -118,8 +120,21 @@ export class AgentMind {
     this.visibleActionSinceWake = true;
   }
 
+  // A hung runtime must not hold up whoever asked for the stop: past the wait, the interrupt carries on without them.
   async interrupt(): Promise<void> {
-    await this.runtime?.interrupt();
+    const runtime = this.runtime;
+    if (!runtime) return;
+    const attempt = runtime.interrupt();
+    attempt.catch(() => {});
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`interrupt not confirmed within ${INTERRUPT_WAIT_MS / 1000} s`)), INTERRUPT_WAIT_MS);
+    });
+    try {
+      await Promise.race([attempt, late]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async compact(): Promise<void> {

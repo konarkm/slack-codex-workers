@@ -218,7 +218,7 @@ export class AgentHub {
         const showing = [...seat.statusThreads.values()].some((thread) => thread.channelId === where.channelId && (!where.threadTs || thread.threadTs === where.threadTs));
         if (!showing) continue;
         logInfo("stop requested from Slack", { agent: seat.spec.name });
-        await seat.mind.interrupt();
+        await seat.mind.interrupt().catch((error) => logWarn("stop from Slack failed", { agent: seat.spec.name, error: errorMessage(error) }));
       }
     });
     await slack.identify();
@@ -977,7 +977,7 @@ export class AgentHub {
       }
     } else {
       for (const seat of targets) {
-        if (command === ".stop") await seat.mind.interrupt();
+        if (command === ".stop") await seat.mind.interrupt().catch((error) => logWarn("operator stop failed", { agent: seat.spec.name, error: errorMessage(error) }));
         else if (command === ".compact") await seat.mind.compact();
         else if (command === ".retire") {
           this.requireRegistry().update(seat.spec.name, { retired: true, retiredReason: "retired by an operator" });

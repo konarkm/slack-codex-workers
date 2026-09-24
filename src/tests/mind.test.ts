@@ -252,6 +252,19 @@ describe("AgentMind", () => {
     await mind.stop();
   });
 
+  it("stops waiting on an interrupt the runtime never confirms", async () => {
+    const { mind, runtimes } = setup();
+    await receive(mind, { sourceKey: "a", wake: true, priority: "next", text: "long task", imagePaths: [] });
+    runtimes[0]!.interrupt = () => new Promise<void>(() => {});
+    vi.useFakeTimers();
+    const stopping = mind.interrupt();
+    const outcome = expect(stopping).rejects.toThrow("interrupt not confirmed within 10 s");
+    await vi.advanceTimersByTimeAsync(10_000);
+    await outcome;
+    vi.useRealTimers();
+    await mind.stop();
+  });
+
   it("does not deliver again what an operator's stop interrupted", async () => {
     const { mind, runtimes, store } = setup();
     await receive(mind, { sourceKey: "a", wake: true, priority: "next", text: "long task", imagePaths: [] });
