@@ -333,21 +333,22 @@ export class AgentSlackClient {
   async getPerson(userId: string): Promise<SlackPerson> {
     const cached = this.people.get(userId);
     if (cached) return cached;
-    let person: SlackPerson = { id: userId, name: userId, isBot: false, title: null };
     try {
       const response = await this.app.client.users.info({ token: this.botToken, user: userId });
       const user = response.user;
-      person = {
+      const person = {
         id: userId,
         name: user?.profile?.display_name?.trim() || user?.profile?.real_name?.trim() || user?.name?.trim() || userId,
         isBot: Boolean(user?.is_bot),
         title: user?.profile?.title?.trim() || null,
       };
+      this.people.set(userId, person);
+      return person;
     } catch (error) {
       logError("slack users.info failed", { agent: this.agentName, userId, error: error instanceof Error ? error.message : String(error) });
+      // Not remembered: the next lookup asks again, so a bot is not taken for a human for good.
+      return { id: userId, name: userId, isBot: false, title: null };
     }
-    this.people.set(userId, person);
-    return person;
   }
 
   async getConversation(channelId: string): Promise<SlackConversationInfo> {
@@ -396,12 +397,28 @@ export class AgentSlackClient {
     await this.app.client.reactions.remove({ token: this.botToken, channel: channelId, timestamp: ts, name: emoji.replaceAll(":", "") });
   }
 
-  async readHistory(args: { channelId: string; threadTs?: string | null; limit: number; before?: string | null }): Promise<SlackHistoryMessage[]> {
+  // In a thread the opening message is put in front of the newest ones unless keepRoot is false, since it says what the
+  // thread is about. Leave it out when paging with before, where it would read as the oldest message on every page.
+  async readHistory(args: { channelId: string; threadTs?: string | null; limit: number; before?: string | null; keepRoot?: boolean }): Promise<SlackHistoryMessage[]> {
     const common = { token: this.botToken, channel: args.channelId, limit: args.limit, latest: args.before ?? undefined, inclusive: false };
-    const response = args.threadTs
-      ? await this.app.client.conversations.replies({ ...common, ts: args.threadTs })
-      : await this.app.client.conversations.history(common);
-    const messages = (response.messages ?? []) as Array<RawMessageEvent & { reply_count?: number }>;
+    type Raw = RawMessageEvent & { reply_count?: number };
+    let messages: Raw[];
+    if (args.threadTs) {
+      // Replies come oldest-first a page at a time, so the newest are on the last page. Page to it, keeping only the tail.
+      messages = [];
+      let root: Raw | undefined;
+      let cursor: string | undefined;
+      do {
+        const response = await this.app.client.conversations.replies({ ...common, ts: args.threadTs, limit: 200, cursor });
+        const page = (response.messages ?? []) as Raw[];
+        if (!cursor && page[0]?.ts === args.threadTs) root = page[0];
+        messages = [...messages, ...page].slice(-args.limit);
+        cursor = response.response_metadata?.next_cursor || undefined;
+      } while (cursor);
+      if (root && args.keepRoot !== false && !messages.includes(root)) messages = [root, ...messages];
+    } else {
+      messages = ((await this.app.client.conversations.history(common)).messages ?? []) as Raw[];
+    }
     const mapped = messages.map((message) => ({
       ts: message.ts ?? "",
       threadTs: message.thread_ts ?? null,
@@ -463,14 +480,37 @@ export class AgentSlackClient {
     return response.channel.id;
   }
 
-  async uploadFiles(channelId: string, threadTs: string | null, files: ValidatedSlackUploadFile[], comment?: string): Promise<void> {
-    await (this.app.client.files.uploadV2 as unknown as (args: Record<string, unknown>) => Promise<unknown>)({
+  // The ts is the message the upload became. Slack shares an upload in the background, so when the completed upload does
+  // not say it yet, files.info is asked for a few seconds. Null when Slack still has not said.
+  async uploadFiles(channelId: string, threadTs: string | null, files: ValidatedSlackUploadFile[], comment?: string): Promise<{ ts: string | null }> {
+    type Share = { ts?: string };
+    type UploadedFile = { id?: string; shares?: { public?: Record<string, Share[]>; private?: Record<string, Share[]> } };
+    type Completed = { files?: Array<{ files?: UploadedFile[] }> };
+    const shareTs = (file: UploadedFile | undefined): string | null =>
+      [...(file?.shares?.public?.[channelId] ?? []), ...(file?.shares?.private?.[channelId] ?? [])].find((share) => share.ts)?.ts ?? null;
+    const response = await (this.app.client.files.uploadV2 as unknown as (args: Record<string, unknown>) => Promise<Completed>)({
       token: this.botToken,
       channel_id: channelId,
       thread_ts: threadTs ?? undefined,
       initial_comment: comment?.trim() || undefined,
       file_uploads: files.map((file) => ({ file: file.path, filename: file.filename, title: file.title })),
     });
+    const uploaded = (response.files ?? []).flatMap((completed) => completed.files ?? []);
+    const known = uploaded.map(shareTs).find(Boolean);
+    const fileId = uploaded.find((file) => file.id)?.id;
+    if (known || !fileId) return { ts: known ?? null };
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 500));
+      try {
+        const info = await this.app.client.files.info({ token: this.botToken, file: fileId });
+        const ts = shareTs(info.file as UploadedFile | undefined);
+        if (ts) return { ts };
+      } catch (error) {
+        logError("slack files.info failed", { agent: this.agentName, fileId, error: error instanceof Error ? error.message : String(error) });
+        break;
+      }
+    }
+    return { ts: null };
   }
 
   // Up to four starters shown at the top of the app's Messages tab. Best effort.

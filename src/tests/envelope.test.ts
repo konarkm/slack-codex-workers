@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildThreadContext, renderEnvelope, renderSlackText, replyTarget, type WakeDecision } from "../agents/envelope.js";
+import { buildThreadContext, renderEnvelope, renderReactionEnvelope, renderSlackText, replyTarget, type WakeDecision } from "../agents/envelope.js";
 import { supplementaryText, type SlackInbound } from "../slack/agentSlack.js";
 
 const OWN = "UAGENT";
@@ -95,6 +95,13 @@ describe("renderEnvelope", () => {
     expect(text.indexOf("<thread-context")).toBeLessThan(text.indexOf("<slack-message"));
   });
 
+  it("keeps a one-message budget to the thread's opening message", () => {
+    const history = [1, 2, 3, 4].map((n) => ({ ts: `1726600000.00000${n}`, threadTs: "1726600000.000001", userId: "U2", botId: null, username: null, text: `m${n}`, replyCount: 0, fileNames: [] }));
+    const threadContext = buildThreadContext("thread", history, null, "1726600000.000004", 1, () => "Priya (U2)", (value) => value);
+    expect(threadContext.messages.map((item) => item.text)).toEqual(["m1"]);
+    expect(threadContext.total).toBe(3);
+  });
+
   it("brings only what came after the agent's last-read marker, and names channel catch-up as such", () => {
     const history = [1, 2, 3, 4].map((n) => ({ ts: `1726600000.00000${n}`, threadTs: null, userId: "U2", botId: null, username: null, text: `m${n}`, replyCount: 0, fileNames: [] }));
     const missed = buildThreadContext("channel", history, "1726600000.000002", "1726600000.000004", 12, () => "Priya (U2)", (value) => value);
@@ -127,5 +134,21 @@ describe("renderEnvelope", () => {
   it("lists files and attached images", () => {
     const text = renderEnvelope({ ...base, message: message(), decision: addressed, fileNotes: ["spec.pdf at /tmp/spec.pdf"], imageCount: 2 });
     expect(text).toContain("Files: spec.pdf at /tmp/spec.pdf; 2 images attached to this input");
+  });
+});
+
+describe("renderReactionEnvelope", () => {
+  it("points the reply into the reacted message's thread in the DM too, where that thread is the session", () => {
+    const text = renderReactionEnvelope({
+      reaction: { channelId: "D1", itemTs: "1726700000.000100", emoji: "+1", userId: "UHUMAN", eventTs: "1726700001.000000" },
+      channelType: "im",
+      channelName: null,
+      author: { id: "UHUMAN", name: "Priya", kind: "human" },
+      wake: true,
+      target: { threadTs: null, text: "Want me to start?" },
+      appUserId: OWN,
+      timezone: "UTC",
+    });
+    expect(text).toContain("Reply target: channel=D1 thread_ts=1726700000.000100");
   });
 });
