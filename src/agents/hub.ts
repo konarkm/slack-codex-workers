@@ -423,10 +423,9 @@ export class AgentHub {
           if (!registry.has(args.name)) return `no agent named ${args.name}`;
           if (this.liveAgents().filter((name) => name !== args.name).length < 1) return `${args.name} is the only agent listening; create another first.`;
           await this.stopSeat(args.name);
-          const spec = registry.remove(args.name);
+          registry.remove(args.name);
           this.store.forgetAgent(args.name);
-          // Only a home the bridge made is the bridge's to remove.
-          if (spec.host.kind === "local" && spec.cwd.startsWith(`${this.config.agentsRoot}${path.sep}`)) fs.rmSync(spec.cwd, { recursive: true, force: true });
+          this.removeHome(args.name);
           logInfo("agent deleted", { agent: args.name, by: seat.spec.name, reason: args.reason });
           return `deleted ${args.name}.`;
         },
@@ -480,6 +479,15 @@ export class AgentHub {
   private requireRegistry(): AgentRegistry {
     if (!this.registry) throw new Error("the hub is not started");
     return this.registry;
+  }
+
+  // Only the home the bridge made for a deleted agent is the bridge's to remove, and not while another agent works in it.
+  private removeHome(name: string): void {
+    const home = path.resolve(this.config.agentsRoot, name);
+    const inUse = this.requireRegistry()
+      .specs()
+      .some((other) => other.cwd === home || other.cwd.startsWith(`${home}${path.sep}`));
+    if (!inUse) fs.rmSync(home, { recursive: true, force: true });
   }
 
   private liveAgents(): string[] {
@@ -930,9 +938,9 @@ export class AgentHub {
         }
       } else {
         await this.stopSeat(name);
-        const spec = registry.remove(name);
+        registry.remove(name);
         this.store.forgetAgent(name);
-        if (spec.host.kind === "local" && spec.cwd.startsWith(`${this.config.agentsRoot}${path.sep}`)) fs.rmSync(spec.cwd, { recursive: true, force: true });
+        this.removeHome(name);
         reply = `deleted ${name}`;
       }
     } else {

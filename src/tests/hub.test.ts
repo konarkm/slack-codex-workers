@@ -709,6 +709,22 @@ describe("AgentHub", () => {
     expect(runtimes.has("cody")).toBe(true);
     expect(slack.posted.some((post) => post.channelId === "D-UHUMAN" && post.text.includes("remote did not start"))).toBe(true);
   });
+
+  it("deletes only the home the bridge made for an agent, never a directory another agent works in", async () => {
+    const adaHome = path.join(dir, "homes", "ada");
+    await startHub([
+      { name: "ada", runtime: "claude", cwd: adaHome },
+      { name: "cody", runtime: "codex", cwd: adaHome },
+      { name: "scout", runtime: "claude" },
+      { name: "rex", runtime: "claude", cwd: path.join(dir, "homes", "scout", "rex") },
+    ]);
+    fs.writeFileSync(path.join(adaHome, "notes.md"), "ada's notes");
+    expect(await runtimes.get("ada")!.tool("delete_agent").handler({ name: "cody", reason: "x", confirm: true } as never)).toBe("deleted cody.");
+    expect(fs.existsSync(path.join(adaHome, "notes.md"))).toBe(true);
+    await slack.handler!(inbound({ channelId: "D1", channelType: "im", text: ".delete scout" }));
+    expect(slack.posted.at(-1)!.text).toContain("deleted scout");
+    expect(fs.existsSync(path.join(dir, "homes", "scout", "rex"))).toBe(true);
+  });
 });
 
 describe("decideWakes", () => {
