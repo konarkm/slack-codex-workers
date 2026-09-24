@@ -389,6 +389,30 @@ describe("CodexRuntime", () => {
     expect(turns.map((turn) => turn.consumedInputIds)).toEqual([[]]);
   });
 
+  it("never counts input as taken by a compaction, even when a start times out while the compaction's turn begins", async () => {
+    const { rpc, runtime, turns } = setup(null);
+    await runtime.start();
+    await runtime.compact();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const original = rpc.request.bind(rpc);
+    rpc.request = async <T>(method: string, params: unknown): Promise<T> => {
+      if (method !== "turn/start") return original<T>(method, params);
+      await gate;
+      throw new Error("RPC request timed out: turn/start");
+    };
+    const delivery = runtime.deliver({ id: "in-one", text: "one", imagePaths: [], priority: "next" });
+    await flush();
+    rpc.emit("notification", { method: "turn/started", params: { threadId: "thread-new", turn: { id: "compact-turn" } } });
+    await flush();
+    release();
+    await flush();
+    rpc.emit("notification", { method: "turn/completed", params: { threadId: "thread-new", turn: { id: "compact-turn", status: "completed" } } });
+    await flush();
+    await expect(delivery).rejects.toThrow(/timed out/);
+    expect(turns.map((turn) => turn.consumedInputIds)).toEqual([[]]);
+  });
+
   it("gives up a start at once when stopped during initialize, and stops the app-server that was initializing", async () => {
     const { rpc, runtime } = setup("thread-old");
     rpc.starting = new Promise<void>(() => {});

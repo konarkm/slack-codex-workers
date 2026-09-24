@@ -27,6 +27,9 @@ const CODEX_APPS_SERVER = "codex_apps";
 
 const CLIENT_INFO = { name: "slack-agents", title: "Slack Agents", version: "0.2.0" };
 
+// How long a compaction may hold back other turns if Codex never reports its turn ending.
+const COMPACTION_HOLD_MS = 300_000;
+
 // One named agent = one Codex app-server thread. The agent gets its own app-server process so it can live on any host.
 export class CodexRuntime implements AgentRuntime {
   private rpc: CodexRpc | null = null;
@@ -53,6 +56,10 @@ export class CodexRuntime implements AgentRuntime {
   // A turn seen to start while this runtime's own turn/start was waiting for its answer.
   private startedDuringRequest: string | null = null;
   private requestingStart = false;
+  // The compaction this runtime asked for, until its turn ends. Codex's answer names no turn, so its turn is the first
+  // one seen to start after the request. Compaction turns never take input: no steer, no start credit, no binding.
+  private compaction: { turnId: string | null; ended: Promise<void>; end: () => void } | null = null;
+  private readonly compactionTurns = new Set<string>();
   private chain: Promise<void> = Promise.resolve();
 
   constructor(
@@ -93,6 +100,7 @@ export class CodexRuntime implements AgentRuntime {
     this.rpc = null;
     this.initializing = null;
     this.activeTurnId = null;
+    this.endCompaction();
     await Promise.all([rpc?.stop(), initializing?.stop()]);
     await this.setState("down");
   }
@@ -117,7 +125,7 @@ export class CodexRuntime implements AgentRuntime {
 
   private async steerOrStart(rpc: CodexRpc, inputId: string | null, items: unknown[]): Promise<void> {
     if (this.rpc !== rpc) throw new Error("codex app-server is not running");
-    if (this.activeTurnId) {
+    if (this.activeTurnId && !this.compactionTurns.has(this.activeTurnId)) {
       const turnId = this.activeTurnId;
       try {
         await this.track(rpc.request("turn/steer", { threadId: this.threadId, expectedTurnId: turnId, input: items }).then(() => this.bindInput(turnId, inputId)));
@@ -174,10 +182,32 @@ export class CodexRuntime implements AgentRuntime {
     await this.start();
     const rpc = this.rpc;
     if (!rpc) throw new Error("codex app-server is not running");
-    // A compaction is a turn too, so it waits its place in line.
-    const compaction = this.turnLine.then(() => rpc.request("thread/compact/start", { threadId: this.threadId }));
-    this.turnLine = compaction.catch(() => {});
-    await compaction;
+    // A compaction is a turn too, so it waits its place in line, and holds the line until its turn has ended: a start or
+    // steer made meanwhile could not be told apart from it. The caller only waits for the request to be answered.
+    const answered = this.turnLine.then(() => {
+      let end!: () => void;
+      const ended = new Promise<void>((resolve) => (end = resolve));
+      this.compaction = { turnId: null, ended, end };
+      return rpc.request("thread/compact/start", { threadId: this.threadId });
+    });
+    this.turnLine = answered.then(
+      () => this.compactionHeld(),
+      () => this.endCompaction(),
+    );
+    await answered;
+  }
+
+  private async compactionHeld(): Promise<void> {
+    const ended = this.compaction?.ended;
+    if (!ended) return;
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([ended, new Promise<void>((resolve) => (timer = setTimeout(resolve, COMPACTION_HOLD_MS).unref()))]);
+    clearTimeout(timer);
+  }
+
+  private endCompaction(): void {
+    this.compaction?.end();
+    this.compaction = null;
   }
 
   private async startInner(): Promise<void> {
@@ -202,6 +232,7 @@ export class CodexRuntime implements AgentRuntime {
       this.rpc = null;
       const wasRunning = this.activeTurnId !== null;
       this.activeTurnId = null;
+      this.endCompaction();
       void (async () => {
         if (wasRunning) await this.options.events.onTurnCompleted({ status: "failed", finalText: "", error: "codex app-server exited mid-turn", consumedInputIds: this.takeAllTurnInputs(), inputFault: false });
         await this.setState("down");
@@ -320,7 +351,10 @@ export class CodexRuntime implements AgentRuntime {
       const turn = params.turn as { id?: string } | undefined;
       if (turn?.id) {
         this.activeTurnId = turn.id;
-        if (this.requestingStart) this.startedDuringRequest = turn.id;
+        if (this.compaction && this.compaction.turnId === null) {
+          this.compaction.turnId = turn.id;
+          this.compactionTurns.add(turn.id);
+        } else if (this.requestingStart) this.startedDuringRequest = turn.id;
         if (!this.turnInputs.has(turn.id)) this.turnInputs.set(turn.id, []);
       }
       await this.setState("running");
@@ -357,6 +391,7 @@ export class CodexRuntime implements AgentRuntime {
       if (this.completedTurnIds.size > 50) this.completedTurnIds.delete(this.completedTurnIds.values().next().value!);
       const consumedInputIds = this.turnInputs.get(turnId) ?? [];
       this.turnInputs.delete(turnId);
+      if (this.compactionTurns.delete(turnId) && this.compaction?.turnId === turnId) this.endCompaction();
       if (turnId === this.activeTurnId) this.activeTurnId = null;
       const status: TurnStatus = turn?.status === "completed" ? "completed" : turn?.status === "interrupted" ? "interrupted" : "failed";
       const finalText = this.lastAgentText;
@@ -393,6 +428,7 @@ export class CodexRuntime implements AgentRuntime {
   }
 
   private bindInput(turnId: string, inputId: string | null): void {
+    if (this.compactionTurns.has(turnId)) return;
     this.turnInputs.set(turnId, [...(this.turnInputs.get(turnId) ?? []), ...(inputId ? [inputId] : [])]);
   }
 
