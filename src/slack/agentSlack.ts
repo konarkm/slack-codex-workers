@@ -480,10 +480,14 @@ export class AgentSlackClient {
     return response.channel.id;
   }
 
-  // The ts is the message the upload became, when Slack has shared it by the time the upload completes; often it has not.
+  // The ts is the message the upload became. Slack shares an upload in the background, so when the completed upload does
+  // not say it yet, files.info is asked for a few seconds. Null when Slack still has not said.
   async uploadFiles(channelId: string, threadTs: string | null, files: ValidatedSlackUploadFile[], comment?: string): Promise<{ ts: string | null }> {
     type Share = { ts?: string };
-    type Completed = { files?: Array<{ files?: Array<{ shares?: { public?: Record<string, Share[]>; private?: Record<string, Share[]> } }> }> };
+    type UploadedFile = { id?: string; shares?: { public?: Record<string, Share[]>; private?: Record<string, Share[]> } };
+    type Completed = { files?: Array<{ files?: UploadedFile[] }> };
+    const shareTs = (file: UploadedFile | undefined): string | null =>
+      [...(file?.shares?.public?.[channelId] ?? []), ...(file?.shares?.private?.[channelId] ?? [])].find((share) => share.ts)?.ts ?? null;
     const response = await (this.app.client.files.uploadV2 as unknown as (args: Record<string, unknown>) => Promise<Completed>)({
       token: this.botToken,
       channel_id: channelId,
@@ -491,8 +495,22 @@ export class AgentSlackClient {
       initial_comment: comment?.trim() || undefined,
       file_uploads: files.map((file) => ({ file: file.path, filename: file.filename, title: file.title })),
     });
-    const shares = (response.files ?? []).flatMap((completed) => completed.files ?? []).flatMap((file) => [...(file.shares?.public?.[channelId] ?? []), ...(file.shares?.private?.[channelId] ?? [])]);
-    return { ts: shares.find((share) => share.ts)?.ts ?? null };
+    const uploaded = (response.files ?? []).flatMap((completed) => completed.files ?? []);
+    const known = uploaded.map(shareTs).find(Boolean);
+    const fileId = uploaded.find((file) => file.id)?.id;
+    if (known || !fileId) return { ts: known ?? null };
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 500));
+      try {
+        const info = await this.app.client.files.info({ token: this.botToken, file: fileId });
+        const ts = shareTs(info.file as UploadedFile | undefined);
+        if (ts) return { ts };
+      } catch (error) {
+        logError("slack files.info failed", { agent: this.agentName, fileId, error: error instanceof Error ? error.message : String(error) });
+        break;
+      }
+    }
+    return { ts: null };
   }
 
   // Up to four starters shown at the top of the app's Messages tab. Best effort.

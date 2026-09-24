@@ -59,3 +59,21 @@ describe("AgentSlackClient.getPerson", () => {
     expect(await client.getPerson("UBOT")).toMatchObject({ name: "Deploy Bot", isBot: true });
   });
 });
+
+describe("AgentSlackClient.uploadFiles", () => {
+  it("asks files.info for the message ts when the completed upload has not been shared yet", async () => {
+    let infoCalls = 0;
+    const client = clientWith({
+      files: {
+        uploadV2: async () => ({ ok: true, files: [{ files: [{ id: "F1", shares: {} }] }] }),
+        info: async () => {
+          infoCalls += 1;
+          return { file: { id: "F1", shares: { public: { C1: [{ ts: "1726600000.000900", thread_ts: "1726600000.000100" }] } } } };
+        },
+      },
+    });
+    const uploaded = await client.uploadFiles("C1", "1726600000.000100", [{ path: "/tmp/a.txt", filename: "a.txt", sizeBytes: 1 }], "log attached");
+    expect(uploaded).toEqual({ ts: "1726600000.000900" });
+    expect(infoCalls).toBe(1);
+  });
+});

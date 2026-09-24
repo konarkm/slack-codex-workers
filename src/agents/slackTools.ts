@@ -326,11 +326,10 @@ export function buildSlackTools(ctx: SlackToolContext): AgentTool[] {
         const uploaded = await slack.uploadFiles(args.channel, args.thread_ts ?? null, files, args.comment);
         ctx.noteVisibleAction();
         if (args.thread_ts) ctx.recordThreadParticipation(args.channel, args.thread_ts);
-        // The comment is said like a message, so the other agents hear it. Slack shares an upload in the background and
-        // often cannot yet say the message's ts; inside a thread a stand-in ts is enough, since replies go to the thread.
+        // The comment is said like a message, so the other agents hear it. Only under its real ts: an agent that hears it
+        // may reply to, react to, or read that message.
         const comment = args.comment?.trim();
-        const ts = uploaded.ts ?? (args.thread_ts ? (Date.now() / 1000).toFixed(6) : null);
-        if (comment && ts) ctx.afterSend({ channelId: args.channel, threadTs: args.thread_ts ?? null, ts, text: comment });
+        if (comment && uploaded.ts) ctx.afterSend({ channelId: args.channel, threadTs: args.thread_ts ?? null, ts: uploaded.ts, text: comment });
         return `uploaded ${files.length} file${files.length === 1 ? "" : "s"}`;
       },
     }),
