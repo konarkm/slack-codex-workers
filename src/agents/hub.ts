@@ -617,14 +617,24 @@ export class AgentHub {
   }
 
   // Slack is told it has an event the moment it arrives and will not send it again, so the event is saved before it joins
-  // the line, and dropped from the store once it has been handled. A stop in between leaves it for the next start.
+  // the line, and dropped from the store once it has been handled. A stop in between leaves it for the next start. Each
+  // step catches its own failure, so the line never stops for the events behind it; the event's row waits for next start.
+  // Never throws or rejects, so callers need not catch.
   private enterIntake(kind: PendingIntakeKind, event: SlackInbound | SlackReaction, savedId?: number): Promise<void> {
-    const id = savedId ?? this.store.savePendingIntake(kind, event);
+    let id = savedId ?? null;
+    if (id === null) {
+      try {
+        id = this.store.savePendingIntake(kind, event);
+      } catch (error) {
+        logError("could not save an incoming event; handling it unsaved", { kind, error: errorMessage(error) });
+      }
+    }
     this.intake = this.intake
-      .then(() => (kind === "message" ? this.handleInbound(event as SlackInbound) : this.handleReaction(event as SlackReaction)))
-      .then((done) => {
-        if (done) this.store.clearPendingIntake(id);
-      });
+      .then(async () => {
+        const done = kind === "message" ? await this.handleInbound(event as SlackInbound) : await this.handleReaction(event as SlackReaction);
+        if (done && id !== null) this.store.clearPendingIntake(id);
+      })
+      .catch((error) => logError("intake step failed; its saved event is taken in again at the next start", { kind, error: errorMessage(error) }));
     return this.intake;
   }
 

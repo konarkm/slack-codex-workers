@@ -715,6 +715,21 @@ describe("AgentHub", () => {
     expect(store.listPendingIntake()).toHaveLength(1);
   });
 
+  it("keeps taking in events after one event's step fails, and keeps that event's saved row", async () => {
+    await startHub(TEAM);
+    const store = (hub as unknown as { store: AgentStore }).store;
+    const clear = store.clearPendingIntake.bind(store);
+    store.clearPendingIntake = () => {
+      store.clearPendingIntake = clear;
+      throw new Error("database is locked");
+    };
+    judge.next = { for: ["cody"] };
+    await slack.handler!(inbound({ text: "cody fix the deploy" }));
+    await slack.handler!(inbound({ ts: "1726700001.000100", text: "cody and the tests" }));
+    expect(delivered("cody").map((input) => input.text).join("\n")).toContain("and the tests");
+    expect(store.listPendingIntake()).toHaveLength(1);
+  });
+
   it("takes in at start the events a hub saved but did not finish before it stopped", async () => {
     // Saved twice, as Slack sends a mention: taken in once.
     const saved = new AgentStore(path.join(dir, "agents.sqlite"));
