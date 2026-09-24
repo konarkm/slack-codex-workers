@@ -25,6 +25,9 @@ class FakeRuntime implements AgentRuntime {
   delivered: RuntimeInput[] = [];
   unconfirmed: string[] = [];
   failNextDeliver = false;
+  failDeliveries = 0;
+  // A hand-off that takes a while, like a Codex app-server starting.
+  gate: Promise<void> | null = null;
   private current: RuntimeState = "down";
   constructor(readonly options: RuntimeOptions) {}
   async start(): Promise<void> {
@@ -35,8 +38,10 @@ class FakeRuntime implements AgentRuntime {
   }
   async deliver(input: RuntimeInput): Promise<void> {
     await this.start();
-    if (this.failNextDeliver) {
+    await this.gate;
+    if (this.failNextDeliver || this.failDeliveries > 0) {
       this.failNextDeliver = false;
+      this.failDeliveries = Math.max(this.failDeliveries - 1, 0);
       throw new Error("runtime unavailable");
     }
     this.delivered.push(input);
@@ -68,6 +73,15 @@ class FakeRuntime implements AgentRuntime {
   }
 }
 
+const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+// receive() returns once the input is stored; this also waits for the hand-off to the runtime.
+async function receive(mind: AgentMind, item: Parameters<AgentMind["receive"]>[0]): Promise<boolean> {
+  const stored = await mind.receive(item);
+  await (mind as unknown as { pumping: Promise<void> | null }).pumping;
+  return stored;
+}
+
 function setup(observer: MindObserver = {}) {
   const store = new AgentStore(":memory:");
   const runtimes: FakeRuntime[] = [];
@@ -82,10 +96,10 @@ function setup(observer: MindObserver = {}) {
 describe("AgentMind", () => {
   it("holds context-only input until something wakes the agent, then delivers both together", async () => {
     const { mind, runtimes } = setup();
-    await mind.receive({ sourceKey: "a", wake: false, priority: "later", text: "ambient one", imagePaths: [] });
+    await receive(mind, { sourceKey: "a", wake: false, priority: "later", text: "ambient one", imagePaths: [] });
     expect(runtimes.length === 0 || runtimes[0]!.delivered.length === 0).toBe(true);
 
-    await mind.receive({ sourceKey: "b", wake: true, priority: "next", text: "mention two", imagePaths: ["/tmp/x.png"] });
+    await receive(mind, { sourceKey: "b", wake: true, priority: "next", text: "mention two", imagePaths: ["/tmp/x.png"] });
     expect(runtimes[0]!.delivered).toHaveLength(1);
     const input = runtimes[0]!.delivered[0]!;
     expect(input.text).toContain("ambient one");
@@ -97,15 +111,15 @@ describe("AgentMind", () => {
 
   it("stores a redelivered source event once", async () => {
     const { mind, runtimes } = setup();
-    expect(await mind.receive({ sourceKey: "a", wake: true, priority: "next", text: "hello", imagePaths: [] })).toBe(true);
-    expect(await mind.receive({ sourceKey: "a", wake: true, priority: "next", text: "hello", imagePaths: [] })).toBe(false);
+    expect(await receive(mind, { sourceKey: "a", wake: true, priority: "next", text: "hello", imagePaths: [] })).toBe(true);
+    expect(await receive(mind, { sourceKey: "a", wake: true, priority: "next", text: "hello", imagePaths: [] })).toBe(false);
     expect(runtimes[0]!.delivered).toHaveLength(1);
   });
 
   it("delivers a wake that arrives while a turn is running", async () => {
     const { mind, runtimes } = setup();
-    await mind.receive({ sourceKey: "a", wake: true, priority: "next", text: "first", imagePaths: [] });
-    await mind.receive({ sourceKey: "b", wake: true, priority: "now", text: "second", imagePaths: [] });
+    await receive(mind, { sourceKey: "a", wake: true, priority: "next", text: "first", imagePaths: [] });
+    await receive(mind, { sourceKey: "b", wake: true, priority: "now", text: "second", imagePaths: [] });
     const texts = runtimes[0]!.delivered.map((input) => input.text);
     expect(texts[0]).toBe("first");
     expect(texts[1]).toContain("second");
@@ -114,7 +128,7 @@ describe("AgentMind", () => {
 
   it("tells the agent once when a woken turn ends with no visible action", async () => {
     const { mind, runtimes } = setup();
-    await mind.receive({ sourceKey: "a", wake: true, priority: "next", text: "first", imagePaths: [] });
+    await receive(mind, { sourceKey: "a", wake: true, priority: "next", text: "first", imagePaths: [] });
     await runtimes[0]!.finishTurn();
     expect(runtimes[0]!.delivered).toHaveLength(2);
     expect(runtimes[0]!.delivered[1]!.text).toContain("without any visible action");
@@ -124,7 +138,7 @@ describe("AgentMind", () => {
 
   it("sends no notice when the agent acted visibly", async () => {
     const { mind, runtimes } = setup();
-    await mind.receive({ sourceKey: "a", wake: true, priority: "next", text: "first", imagePaths: [] });
+    await receive(mind, { sourceKey: "a", wake: true, priority: "next", text: "first", imagePaths: [] });
     mind.noteVisibleAction();
     await runtimes[0]!.finishTurn();
     expect(runtimes[0]!.delivered).toHaveLength(1);
@@ -132,7 +146,7 @@ describe("AgentMind", () => {
 
   it("counts input as delivered only once the turn that took it has finished", async () => {
     const { mind, runtimes, store } = setup();
-    await mind.receive({ sourceKey: "a", wake: true, priority: "next", text: "first", imagePaths: [] });
+    await receive(mind, { sourceKey: "a", wake: true, priority: "next", text: "first", imagePaths: [] });
     mind.noteVisibleAction();
     expect(store.getInboxItem(1)!.status).toBe("in_flight");
     await runtimes[0]!.finishTurn();
@@ -145,10 +159,12 @@ describe("AgentMind", () => {
       const { mind, runtimes, store } = setup();
       await mind.start();
       runtimes[0]!.failNextDeliver = true;
-      await expect(mind.receive({ sourceKey: "a", wake: true, priority: "next", text: "first", imagePaths: [] })).rejects.toThrow("runtime unavailable");
+      await receive(mind, { sourceKey: "a", wake: true, priority: "next", text: "first", imagePaths: [] });
+      await vi.advanceTimersByTimeAsync(0);
       expect(store.listQueued("ada")).toHaveLength(1);
       expect(store.getInboxItem(1)!.attempts).toBe(0);
-      await mind.receive({ sourceKey: "b", wake: true, priority: "next", text: "second", imagePaths: [] });
+      await receive(mind, { sourceKey: "b", wake: true, priority: "next", text: "second", imagePaths: [] });
+      await vi.advanceTimersByTimeAsync(0);
       expect(runtimes[0]!.delivered).toHaveLength(0);
       await vi.advanceTimersByTimeAsync(5_000);
       expect(runtimes[0]!.delivered).toHaveLength(1);
@@ -163,7 +179,7 @@ describe("AgentMind", () => {
 
   it("puts input back in the queue when the runtime dies mid-turn, and says it is a redelivery", async () => {
     const { mind, runtimes, store } = setup();
-    await mind.receive({ sourceKey: "a", wake: true, priority: "next", text: "first", imagePaths: [] });
+    await receive(mind, { sourceKey: "a", wake: true, priority: "next", text: "first", imagePaths: [] });
     await runtimes[0]!.crash();
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(runtimes[0]!.delivered).toHaveLength(2);
@@ -179,7 +195,7 @@ describe("AgentMind", () => {
       const troubles: string[] = [];
       const abandoned: string[] = [];
       const { mind, runtimes, store } = setup({ onTrouble: (_agent, message) => void troubles.push(message), onAbandoned: (_agent, items) => void abandoned.push(...items.map((item) => item.sourceKey)) });
-      await mind.receive({ sourceKey: "a", wake: true, priority: "next", text: "asked during an outage", imagePaths: [] });
+      await receive(mind, { sourceKey: "a", wake: true, priority: "next", text: "asked during an outage", imagePaths: [] });
       const delays = [5_000, 10_000, 20_000, 40_000];
       for (const delay of delays) {
         await runtimes[0]!.failTurn();
@@ -206,7 +222,7 @@ describe("AgentMind", () => {
     try {
       const abandoned: string[] = [];
       const { mind, runtimes, store } = setup({ onAbandoned: (_agent, items) => void abandoned.push(...items.map((item) => item.sourceKey)) });
-      await mind.receive({ sourceKey: "a", wake: true, priority: "next", text: "poison", imagePaths: [] });
+      await receive(mind, { sourceKey: "a", wake: true, priority: "next", text: "poison", imagePaths: [] });
       for (let round = 0; round < 3; round += 1) {
         await runtimes[0]!.failTurn(true);
         await vi.advanceTimersByTimeAsync(300_000);
@@ -222,8 +238,8 @@ describe("AgentMind", () => {
 
   it("confirms only the input a finished turn took, not one pushed while the result was arriving", async () => {
     const { mind, runtimes, store } = setup();
-    await mind.receive({ sourceKey: "a", wake: true, priority: "next", text: "first", imagePaths: [] });
-    await mind.receive({ sourceKey: "b", wake: true, priority: "next", text: "second", imagePaths: [] });
+    await receive(mind, { sourceKey: "a", wake: true, priority: "next", text: "first", imagePaths: [] });
+    await receive(mind, { sourceKey: "b", wake: true, priority: "next", text: "second", imagePaths: [] });
     mind.noteVisibleAction();
     const [firstInput] = runtimes[0]!.unconfirmed.splice(0, 1);
     await runtimes[0]!.options.events.onTurnCompleted({ status: "completed", finalText: "", error: null, consumedInputIds: [firstInput!], inputFault: false });
@@ -238,7 +254,7 @@ describe("AgentMind", () => {
 
   it("does not deliver again what an operator's stop interrupted", async () => {
     const { mind, runtimes, store } = setup();
-    await mind.receive({ sourceKey: "a", wake: true, priority: "next", text: "long task", imagePaths: [] });
+    await receive(mind, { sourceKey: "a", wake: true, priority: "next", text: "long task", imagePaths: [] });
     await runtimes[0]!.options.events.onTurnCompleted({ status: "interrupted", finalText: "", error: null, consumedInputIds: runtimes[0]!.unconfirmed.splice(0), inputFault: false });
     expect(store.getInboxItem(1)!.status).toBe("delivered");
     expect(runtimes[0]!.delivered).toHaveLength(1);
@@ -254,13 +270,13 @@ describe("AgentMind", () => {
       runtimes.push(runtime);
       return runtime;
     }, "instructions", [], ACCESS);
-    await mind.receive({ sourceKey: "a", wake: true, priority: "next", text: "wedging input", imagePaths: [] });
+    await receive(mind, { sourceKey: "a", wake: true, priority: "next", text: "wedging input", imagePaths: [] });
     await mind.resetSession();
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(runtimes[0]!.delivered).toHaveLength(1);
     expect(runtimes[0]!.state()).toBe("down");
     expect(store.getAgentState("ada")!.sessionId).toBeNull();
-    await mind.receive({ sourceKey: "b", wake: true, priority: "next", text: "after reset", imagePaths: [] });
+    await receive(mind, { sourceKey: "b", wake: true, priority: "next", text: "after reset", imagePaths: [] });
     expect(runtimes).toHaveLength(2);
     expect(runtimes[1]!.options.sessionId).toBeNull();
     expect(runtimes[1]!.delivered[0]!.text).toContain("wedging input");
@@ -301,9 +317,9 @@ describe("AgentMind", () => {
     const first: FakeRuntime[] = [];
     const before = make("old rules", first);
     await before.start();
-    await before.receive({ sourceKey: "a", wake: true, priority: "next", text: "one", imagePaths: [] });
+    await receive(before, { sourceKey: "a", wake: true, priority: "next", text: "one", imagePaths: [] });
     await first[0]!.finishTurn();
-    await before.receive({ sourceKey: "b", wake: true, priority: "next", text: "two", imagePaths: [] });
+    await receive(before, { sourceKey: "b", wake: true, priority: "next", text: "two", imagePaths: [] });
     // The first input carries them (the bridge had no record of what the session knew); the second does not.
     expect(first[0]!.delivered[0]!.text).toContain("old rules");
     expect(first[0]!.delivered.at(-1)!.text).toBe("two");
@@ -313,9 +329,63 @@ describe("AgentMind", () => {
     const second: FakeRuntime[] = [];
     const after = make("new rules", second);
     await after.start();
-    await after.receive({ sourceKey: "c", wake: true, priority: "next", text: "three", imagePaths: [] });
+    await receive(after, { sourceKey: "c", wake: true, priority: "next", text: "three", imagePaths: [] });
     expect(second[0]!.delivered[0]!.text).toContain("Your standing instructions have changed");
     expect(second[0]!.delivered[0]!.text).toContain("new rules");
     expect(second[0]!.delivered[0]!.text).toContain("three");
+  });
+  it("takes input as soon as it is stored, without waiting for the runtime to take it", async () => {
+    const { mind, runtimes, store } = setup();
+    await mind.start();
+    let release!: () => void;
+    runtimes[0]!.gate = new Promise<void>((resolve) => (release = resolve));
+    expect(await mind.receive({ sourceKey: "a", wake: true, priority: "next", text: "first", imagePaths: [] })).toBe(true);
+    expect(store.getInboxItem(1)!.status).toBe("in_flight");
+    expect(runtimes[0]!.delivered).toHaveLength(0);
+    release();
+    await flush();
+    expect(runtimes[0]!.delivered).toHaveLength(1);
+    await mind.stop();
+  });
+
+  it("tells the operators when the runtime keeps failing to take input, as it does when turns keep failing", async () => {
+    vi.useFakeTimers();
+    try {
+      const troubles: string[] = [];
+      const { mind, runtimes } = setup({ onTrouble: (_agent, message) => void troubles.push(message) });
+      await mind.start();
+      runtimes[0]!.failDeliveries = 5;
+      await receive(mind, { sourceKey: "a", wake: true, priority: "next", text: "first", imagePaths: [] });
+      await vi.advanceTimersByTimeAsync(5_000 + 10_000 + 20_000 + 40_000);
+      expect(troubles).toHaveLength(1);
+      expect(troubles[0]).toContain("runtime unavailable");
+      await mind.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("tells the operators about a problem the runtime reports, and keeps it as the last error after a good turn", async () => {
+    const troubles: string[] = [];
+    const { mind, runtimes, store } = setup({ onTrouble: (_agent, message) => void troubles.push(message) });
+    await receive(mind, { sourceKey: "a", wake: true, priority: "next", text: "first", imagePaths: [] });
+    await flush();
+    await runtimes[0]!.options.events.onProblem("bridge tools are unavailable");
+    mind.noteVisibleAction();
+    await runtimes[0]!.finishTurn();
+    expect(troubles).toEqual(["bridge tools are unavailable"]);
+    expect(store.getAgentState("ada")!.lastError).toBe("bridge tools are unavailable");
+    await mind.stop();
+  });
+
+  it("delivers what a reset put back in the queue to the new session right away", async () => {
+    const { mind, runtimes } = setup();
+    await receive(mind, { sourceKey: "a", wake: true, priority: "next", text: "stuck input", imagePaths: [] });
+    await flush();
+    await mind.resetSession();
+    await flush();
+    expect(runtimes).toHaveLength(2);
+    expect(runtimes[1]!.delivered[0]!.text).toContain("stuck input");
+    await mind.stop();
   });
 });

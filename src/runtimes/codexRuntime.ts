@@ -84,10 +84,13 @@ export class CodexRuntime implements AgentRuntime {
     await this.start();
     const rpc = this.rpc;
     if (!rpc) throw new Error("codex app-server is not running");
+    // Local paths only resolve on the agent's own host. A file that is gone would fail every retry of the input.
+    const images = this.options.spec.host.kind === "local" ? input.imagePaths : [];
+    const missing = images.filter((imagePath) => !fs.existsSync(imagePath));
+    const text = missing.length > 0 ? `${input.text}\n\n[bridge notice] Not attached; the file is no longer on disk: ${missing.join(", ")}` : input.text;
     const items = [
-      { type: "text", text: input.text, text_elements: [] },
-      // Local paths only resolve on the agent's own host.
-      ...(this.options.spec.host.kind === "local" ? input.imagePaths.map((path) => ({ type: "localImage", path })) : []),
+      { type: "text", text, text_elements: [] },
+      ...images.filter((imagePath) => !missing.includes(imagePath)).map((imagePath) => ({ type: "localImage", path: imagePath })),
     ];
     if (this.activeTurnId) {
       const turnId = this.activeTurnId;

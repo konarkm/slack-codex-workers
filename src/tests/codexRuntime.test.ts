@@ -1,4 +1,7 @@
 import { EventEmitter } from "node:events";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { CodexRuntime, classifyCodexError, codexDenyArgs, codexToolServerArgs, type CodexRpc } from "../runtimes/codexRuntime.js";
@@ -127,12 +130,14 @@ describe("CodexRuntime", () => {
 
   it("starts a turn when idle and steers the running turn otherwise", async () => {
     const { rpc, runtime, states, turns } = setup(null);
+    const image = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "codex-test-")), "a.png");
+    fs.writeFileSync(image, "png");
     await runtime.deliver({ id: "in-one", text: "one", imagePaths: [], priority: "next" });
-    await runtime.deliver({ id: "in-two", text: "two", imagePaths: ["/tmp/a.png"], priority: "next" });
+    await runtime.deliver({ id: "in-two", text: "two", imagePaths: [image], priority: "next" });
     const methods = rpc.requests.map((r) => r.method);
     expect(methods).toEqual(["thread/start", "turn/start", "turn/steer"]);
     expect(rpc.requests[2]!.params).toMatchObject({ expectedTurnId: "turn-1" });
-    expect(rpc.requests[2]!.params.input[1]).toEqual({ type: "localImage", path: "/tmp/a.png" });
+    expect(rpc.requests[2]!.params.input[1]).toEqual({ type: "localImage", path: image });
 
     rpc.emit("notification", { method: "item/completed", params: { threadId: "thread-new", item: { id: "i1", type: "agentMessage", text: "done" } } });
     rpc.emit("notification", { method: "turn/completed", params: { threadId: "thread-new", turn: { id: "turn-1", status: "completed" } } });
@@ -330,6 +335,14 @@ describe("CodexRuntime", () => {
     expect(rpc.requests.filter((r) => r.method === "turn/start")).toHaveLength(2);
     expect(runtime.state()).toBe("running");
     expect(states.slice(before)).toEqual([]);
+  });
+
+  it("leaves out an image that is no longer on disk, and says so", async () => {
+    const { rpc, runtime } = setup(null);
+    await runtime.deliver({ id: "in-one", text: "look", imagePaths: ["/nonexistent/gone.png"], priority: "next" });
+    const input = rpc.requests.find((r) => r.method === "turn/start")!.params.input;
+    expect(input).toHaveLength(1);
+    expect(input[0].text).toContain("/nonexistent/gone.png");
   });
 
   it("classifies Codex error text", () => {

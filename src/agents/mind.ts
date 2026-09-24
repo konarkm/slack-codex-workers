@@ -7,7 +7,8 @@ import type { AgentRuntime, AgentSpec, AgentTool, InputPriority, RuntimeEvents, 
 const MAX_INPUT_FAULTS = 3;
 const FIRST_RETRY_MS = 5_000;
 const MAX_RETRY_MS = 300_000;
-// Consecutive failed turns before the operators are told the agent is in trouble.
+// Consecutive failures (turns that failed, or hand-offs the runtime could not take) before the operators are told the
+// agent is in trouble.
 const TROUBLE_AFTER_FAILURES = 3;
 
 export type RuntimeFactory = (options: RuntimeOptions) => AgentRuntime;
@@ -60,6 +61,8 @@ export class AgentMind {
   private consecutiveFailures = 0;
   // Inbox rows behind each input handed to the runtime.
   private readonly inputRows = new Map<string, number[]>();
+  // Something wrong with the runtime that it reported. It stays the last error, past good turns, until the runtime goes.
+  private problem: string | null = null;
 
   constructor(
     readonly spec: AgentSpec,
@@ -96,10 +99,12 @@ export class AgentMind {
   }
 
   // Accepts one input from any surface. Returns false when this source event was already received.
+  // Returns once the input is stored: handing it over can take minutes (a Codex app-server starting), and every other
+  // agent's intake would wait behind it.
   async receive(item: Omit<NewInboxItem, "agent">): Promise<boolean> {
     const stored = this.store.enqueue({ ...item, agent: this.spec.name });
     if (!stored) return false;
-    await this.pump();
+    void this.pump().catch((error) => logError("agent delivery failed", { agent: this.spec.name, error: errorMessage(error) }));
     return true;
   }
 
@@ -125,14 +130,26 @@ export class AgentMind {
     this.store.setAgentSession(this.spec.name, null);
     this.store.requeueAllInFlight(this.spec.name);
     await old?.stop();
+    // What was put back goes to the new session now, not with whatever wakes the agent next, and without the old backoff.
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+    this.holdUntil = 0;
+    this.retryDelayMs = FIRST_RETRY_MS;
+    void this.pump().catch((error) => logError("agent delivery failed", { agent: this.spec.name, error: errorMessage(error) }));
   }
 
   private detachRuntime(): AgentRuntime | null {
     const old = this.runtime;
     this.runtime = null;
     this.runtimeToken = null;
-    this.inputRows.clear();
+    this.forgetInFlight();
     return old;
+  }
+
+  // The runtime holding the in-flight input is gone; that input goes back in the queue.
+  private forgetInFlight(): void {
+    this.inputRows.clear();
+    this.problem = null;
   }
 
   private ensureRuntime(): AgentRuntime {
@@ -146,7 +163,7 @@ export class AgentMind {
       onStateChanged: async (state) => {
         if (!current()) return;
         if (state === "down") {
-          this.inputRows.clear();
+          this.forgetInFlight();
           this.store.requeueAllInFlight(this.spec.name);
         }
         await this.observer.onStateChanged?.(this.spec.name, state);
@@ -162,8 +179,12 @@ export class AgentMind {
         });
       },
       onActivity: () => {},
-      onProblem: (message) => {
-        if (current()) this.store.setAgentError(this.spec.name, message);
+      // Bridge tools missing, a lost session: the agent may be unable to speak, so an operator hears of it.
+      onProblem: async (message) => {
+        if (!current()) return;
+        this.problem = message;
+        this.store.setAgentError(this.spec.name, message);
+        await this.observer.onTrouble?.(this.spec.name, message);
       },
       onCompaction: (event) => {
         logInfo("agent compaction", { agent: this.spec.name, status: event.status });
@@ -191,7 +212,7 @@ export class AgentMind {
     if (event.status !== "failed") {
       // An operator's stop ends the work it interrupted; that input is not delivered again.
       this.store.markDelivered(rows);
-      this.store.setAgentError(this.spec.name, null);
+      this.store.setAgentError(this.spec.name, this.problem);
       this.retryDelayMs = FIRST_RETRY_MS;
       this.consecutiveFailures = 0;
       return;
@@ -205,11 +226,15 @@ export class AgentMind {
       this.store.setAgentError(this.spec.name, message);
       await this.observer.onAbandoned?.(this.spec.name, abandoned, reason);
     }
+    this.scheduleRetry();
+    await this.noteFailure(reason);
+  }
+
+  private async noteFailure(reason: string): Promise<void> {
     this.consecutiveFailures += 1;
     if (this.consecutiveFailures === TROUBLE_AFTER_FAILURES) {
-      await this.observer.onTrouble?.(this.spec.name, `${this.consecutiveFailures} turns in a row have failed (${reason}). Input is held and retried; nothing has been dropped.`);
+      await this.observer.onTrouble?.(this.spec.name, `${this.consecutiveFailures} attempts in a row have failed (${reason}). Input is held and retried; nothing has been dropped.`);
     }
-    this.scheduleRetry();
   }
 
   private async afterTurn(event: TurnCompletion): Promise<void> {
@@ -269,17 +294,17 @@ export class AgentMind {
   // Context-only items wait in the inbox and ride along with the next item that wakes the agent.
   private async deliverQueued(): Promise<void> {
     if (this.stopped || Date.now() < this.holdUntil) return;
-    const queued = this.store.listQueued(this.spec.name);
-    if (!queued.some((item) => item.wake)) return;
+    const batch = this.store.listQueued(this.spec.name);
+    if (!batch.some((item) => item.wake)) return;
     const runtime = this.ensureRuntime();
     const inputId = randomUUID();
     const notes = [
       ...this.instructionsUpdate(),
-      ...(queued.some((item) => item.attempts > 0) ? [REDELIVERY_NOTE] : []),
-      renderBatch(queued),
+      ...(batch.some((item) => item.attempts > 0) ? [REDELIVERY_NOTE] : []),
+      renderBatch(batch),
       ...(runtime.state() === "running" ? [MID_TURN_NOTE] : []),
     ];
-    const rowIds = queued.map((item) => item.id);
+    const rowIds = batch.map((item) => item.id);
     this.inputRows.set(inputId, rowIds);
     // Marked before the hand-off, so a turn that finishes at once still finds them in flight.
     this.store.markInFlight(rowIds);
@@ -287,17 +312,23 @@ export class AgentMind {
       await runtime.deliver({
         id: inputId,
         text: notes.join("\n\n"),
-        imagePaths: queued.flatMap((item) => item.imagePaths),
-        priority: queued.reduce<InputPriority>((best, item) => (PRIORITY_RANK[item.priority] < PRIORITY_RANK[best] ? item.priority : best), "later"),
+        imagePaths: batch.flatMap((item) => item.imagePaths),
+        priority: batch.reduce<InputPriority>((best, item) => (PRIORITY_RANK[item.priority] < PRIORITY_RANK[best] ? item.priority : best), "later"),
       });
     } catch (error) {
       this.inputRows.delete(inputId);
       this.store.returnUndelivered(rowIds);
+      // A runtime replaced meanwhile (a reset) failing says nothing about its successor, which takes the input next.
+      if (runtime !== this.runtime) {
+        this.pumpAgain = true;
+        return;
+      }
       const message = errorMessage(error);
       this.store.setAgentError(this.spec.name, message);
       logError("agent delivery failed; input stays queued", { agent: this.spec.name, error: message, retryInMs: this.retryDelayMs });
       this.scheduleRetry();
-      throw error;
+      await this.noteFailure(message);
+      return;
     }
     this.visibleActionSinceWake = false;
     this.noticeSentForWake = false;
