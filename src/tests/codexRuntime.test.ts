@@ -401,7 +401,8 @@ describe("CodexRuntime", () => {
       await gate;
       throw new Error("RPC request timed out: turn/start");
     };
-    const delivery = runtime.deliver({ id: "in-one", text: "one", imagePaths: [], priority: "next" });
+    // Watched from the start: the delivery fails before the compaction ends.
+    const delivery = expect(runtime.deliver({ id: "in-one", text: "one", imagePaths: [], priority: "next" })).rejects.toThrow(/timed out/);
     await flush();
     rpc.emit("notification", { method: "turn/started", params: { threadId: "thread-new", turn: { id: "compact-turn" } } });
     await flush();
@@ -409,7 +410,7 @@ describe("CodexRuntime", () => {
     await flush();
     rpc.emit("notification", { method: "turn/completed", params: { threadId: "thread-new", turn: { id: "compact-turn", status: "completed" } } });
     await flush();
-    await expect(delivery).rejects.toThrow(/timed out/);
+    await delivery;
     expect(turns.map((turn) => turn.consumedInputIds)).toEqual([[]]);
   });
 
