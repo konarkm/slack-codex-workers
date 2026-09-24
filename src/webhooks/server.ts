@@ -87,7 +87,9 @@ export class WebhookIngressServer {
 
   private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
-      const clientKey = this.resolveClientKey(req);
+      // Failed auth is counted per client and per source URL. A miss on an unknown URL is not counted: behind a tunnel every
+      // client can share one address, and a scanner's misses must not block the real senders.
+      const clientKey = `${this.resolveClientKey(req)} ${this.extractRoutePath(req.url)?.routeToken ?? ""}`;
       const blockedUntil = this.getAuthBlockUntil(clientKey);
       if (blockedUntil > Date.now()) {
         const retryAfterSeconds = Math.max(1, Math.ceil((blockedUntil - Date.now()) / 1000));
@@ -101,9 +103,6 @@ export class WebhookIngressServer {
 
       const normalized = await this.normalizeRequest(req);
       if ("status" in normalized) {
-        if (normalized.authFailure) {
-          this.recordAuthFailure(clientKey);
-        }
         this.respondJson(res, normalized.status, normalized.body, normalized.headers);
         return;
       }
@@ -127,7 +126,7 @@ export class WebhookIngressServer {
 
   private async normalizeRequest(
     req: IncomingMessage,
-  ): Promise<RawWebhookIngress | { status: number; body: Record<string, unknown>; headers?: Record<string, string>; authFailure?: boolean }> {
+  ): Promise<RawWebhookIngress | { status: number; body: Record<string, unknown>; headers?: Record<string, string> }> {
     if (req.method !== "POST") {
       return { status: 405, body: { ok: false, error: "method_not_allowed" } };
     }
@@ -139,7 +138,7 @@ export class WebhookIngressServer {
 
     const source = this.resolveSource(routePath.routeToken);
     if (!source || !source.enabled) {
-      return { status: 404, body: { ok: false, error: "not_found" }, authFailure: true };
+      return { status: 404, body: { ok: false, error: "not_found" } };
     }
 
     if (!this.canAcceptRequest()) {
@@ -202,16 +201,13 @@ export class WebhookIngressServer {
     };
   }
 
+  // Behind the Cloudflare tunnel, the client is the address Cloudflare saw. x-forwarded-for is never used: the client sets it.
   private resolveClientKey(req: IncomingMessage): string {
     const remoteAddress = req.socket.remoteAddress ?? "unknown";
     if (this.config.webhookTrustLoopbackProxy && isLoopbackAddress(remoteAddress)) {
       const cfConnectingIp = req.headers["cf-connecting-ip"];
       if (typeof cfConnectingIp === "string" && cfConnectingIp.trim()) {
         return cfConnectingIp.trim();
-      }
-      const forwardedFor = req.headers["x-forwarded-for"];
-      if (typeof forwardedFor === "string" && forwardedFor.trim()) {
-        return forwardedFor.split(",")[0]!.trim();
       }
     }
     return remoteAddress;

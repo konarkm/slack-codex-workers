@@ -89,27 +89,16 @@ describe("webhook ingress server", () => {
     expect(handler).not.toHaveBeenCalled();
   });
 
-  it("rate limits repeated secret-route misses under the webhook base path", async () => {
+  it("never blocks a client for hits on unknown webhook URLs", async () => {
     const handler = vi.fn();
     const server = new WebhookIngressServer(makeConfig(), () => null, handler);
     activeServers.push(server);
     await server.start();
 
-    let response: Response | null = null;
-    for (let attempt = 0; attempt < 10; attempt += 1) {
-      response = await fetch(`http://127.0.0.1:${server.getListeningPort()}/webhooks/unknown`, {
-        method: "POST",
-        body: "hello",
-      });
+    for (let attempt = 0; attempt < 11; attempt += 1) {
+      const response = await fetch(`http://127.0.0.1:${server.getListeningPort()}/webhooks/unknown`, { method: "POST", body: "hello" });
       expect(response.status).toBe(404);
     }
-
-    response = await fetch(`http://127.0.0.1:${server.getListeningPort()}/webhooks/unknown`, {
-      method: "POST",
-      body: "hello",
-    });
-
-    expect(response.status).toBe(429);
     expect(handler).not.toHaveBeenCalled();
   });
 
@@ -225,15 +214,43 @@ describe("webhook ingress server", () => {
     expect(response.status).toBe(429);
   });
 
+  it("counts failed auth per client and per source URL, so one sender's failures do not block another source", async () => {
+    const handler = vi.fn().mockResolvedValue({ status: 401, body: { ok: false } });
+    const server = new WebhookIngressServer(makeConfig({ webhookBodyMaxBytes: 1024 }), (token) => makeSource({ routeToken: token }), handler);
+    activeServers.push(server);
+    await server.start();
+    const post = (token: string) => fetch(`http://127.0.0.1:${server.getListeningPort()}/webhooks/${token}`, { method: "POST", body: "{}" });
+
+    for (let attempt = 0; attempt < 10; attempt += 1) expect((await post("route-a")).status).toBe(401);
+    expect((await post("route-a")).status).toBe(429);
+    expect((await post("route-b")).status).toBe(401);
+  });
+
+  it("keys clients behind the tunnel by cf-connecting-ip, never by the x-forwarded-for a client can set", async () => {
+    const handler = vi.fn().mockResolvedValue({ status: 401, body: { ok: false } });
+    const server = new WebhookIngressServer(makeConfig({ webhookBodyMaxBytes: 1024, webhookTrustLoopbackProxy: true }), () => makeSource(), handler);
+    activeServers.push(server);
+    await server.start();
+    const post = (headers: Record<string, string>) => fetch(`http://127.0.0.1:${server.getListeningPort()}/webhooks/route-secret`, { method: "POST", headers, body: "{}" });
+
+    // A new x-forwarded-for on every try does not escape the block.
+    for (let attempt = 0; attempt < 10; attempt += 1) expect((await post({ "cf-connecting-ip": "198.51.100.1", "x-forwarded-for": `203.0.113.${attempt}` })).status).toBe(401);
+    expect((await post({ "cf-connecting-ip": "198.51.100.1", "x-forwarded-for": "203.0.113.99" })).status).toBe(429);
+    expect((await post({ "cf-connecting-ip": "198.51.100.2" })).status).toBe(401);
+    // Without the tunnel's header the client is the proxy's own address, whatever x-forwarded-for says.
+    for (let attempt = 0; attempt < 10; attempt += 1) expect((await post({ "x-forwarded-for": `192.0.2.${attempt}` })).status).toBe(401);
+    expect((await post({ "x-forwarded-for": "192.0.2.99" })).status).toBe(429);
+  });
+
   it("forgets clients whose auth failures have expired, even if they never come back", async () => {
-    const server = new WebhookIngressServer(makeConfig({ webhookTrustLoopbackProxy: true }), () => null, vi.fn());
+    const server = new WebhookIngressServer(makeConfig({ webhookTrustLoopbackProxy: true }), () => makeSource(), vi.fn().mockResolvedValue({ status: 401, body: { ok: false } }));
     activeServers.push(server);
     await server.start();
     const miss = (client: string) =>
-      fetch(`http://127.0.0.1:${server.getListeningPort()}/webhooks/unknown`, { method: "POST", headers: { "x-forwarded-for": client }, body: "{}" });
+      fetch(`http://127.0.0.1:${server.getListeningPort()}/webhooks/route-secret`, { method: "POST", headers: { "cf-connecting-ip": client }, body: "{}" });
     const failures = (server as unknown as { authFailures: Map<string, unknown> }).authFailures;
 
-    for (let client = 0; client < 20; client += 1) expect((await miss(`198.51.100.${client}`)).status).toBe(404);
+    for (let client = 0; client < 20; client += 1) expect((await miss(`198.51.100.${client}`)).status).toBe(401);
     expect(failures.size).toBe(20);
 
     const now = Date.now();
@@ -243,7 +260,7 @@ describe("webhook ingress server", () => {
     } finally {
       clock.mockRestore();
     }
-    expect([...failures.keys()]).toEqual(["203.0.113.1"]);
+    expect([...failures.keys()]).toEqual(["203.0.113.1 route-secret"]);
   });
 
   it("returns shutting_down before invoking the handler when ingress is closed", async () => {
