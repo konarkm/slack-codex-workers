@@ -159,7 +159,8 @@ export interface ReactionEnvelopeInput {
 // A reaction on one of the agent's own messages. Short: the emoji, who, and what it was on.
 export function renderReactionEnvelope(input: ReactionEnvelopeInput): string {
   const { reaction, author } = input;
-  const threadTs = input.target.threadTs ?? (input.channelType === "im" ? null : reaction.itemTs);
+  // In the DM too: a reply at the top level there would open a new session.
+  const threadTs = input.target.threadTs ?? reaction.itemTs;
   const excerpt = renderSlackText(input.target.text, input.appUserId, new Map()).replace(/[\r\n]+/g, " ⏎ ");
   return [
     `<slack-reaction wake="${input.wake ? "addressed" : "none"}">`,

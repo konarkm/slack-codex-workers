@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildThreadContext, renderEnvelope, renderSlackText, replyTarget, type WakeDecision } from "../agents/envelope.js";
+import { buildThreadContext, renderEnvelope, renderReactionEnvelope, renderSlackText, replyTarget, type WakeDecision } from "../agents/envelope.js";
 import { supplementaryText, type SlackInbound } from "../slack/agentSlack.js";
 
 const OWN = "UAGENT";
@@ -134,5 +134,21 @@ describe("renderEnvelope", () => {
   it("lists files and attached images", () => {
     const text = renderEnvelope({ ...base, message: message(), decision: addressed, fileNotes: ["spec.pdf at /tmp/spec.pdf"], imageCount: 2 });
     expect(text).toContain("Files: spec.pdf at /tmp/spec.pdf; 2 images attached to this input");
+  });
+});
+
+describe("renderReactionEnvelope", () => {
+  it("points the reply into the reacted message's thread in the DM too, where that thread is the session", () => {
+    const text = renderReactionEnvelope({
+      reaction: { channelId: "D1", itemTs: "1726700000.000100", emoji: "+1", userId: "UHUMAN", eventTs: "1726700001.000000" },
+      channelType: "im",
+      channelName: null,
+      author: { id: "UHUMAN", name: "Priya", kind: "human" },
+      wake: true,
+      target: { threadTs: null, text: "Want me to start?" },
+      appUserId: OWN,
+      timezone: "UTC",
+    });
+    expect(text).toContain("Reply target: channel=D1 thread_ts=1726700000.000100");
   });
 });
