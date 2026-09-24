@@ -701,6 +701,14 @@ describe("AgentHub", () => {
     expect(await runtimes.get("cody")!.tool("update_agent").handler({ name: "ada", icon: "" } as never)).toContain("updated ada");
     expect(new AgentRegistry(path.join(dir, "agents.json"), path.join(dir, "homes")).spec("ada")!.icon).toBeNull();
   });
+
+  it("starts the other agents, and tells the operators, when one agent's seat cannot be built", async () => {
+    // An ssh agent with no tool-server address cannot be given its tools.
+    await startHub([...TEAM, { name: "remote", runtime: "codex", title: "builder", host: "ssh:grok-bot", cwd: "/home/x/agent" }]);
+    expect(runtimes.has("ada")).toBe(true);
+    expect(runtimes.has("cody")).toBe(true);
+    expect(slack.posted.some((post) => post.channelId === "D-UHUMAN" && post.text.includes("remote did not start"))).toBe(true);
+  });
 });
 
 describe("decideWakes", () => {

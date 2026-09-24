@@ -222,7 +222,8 @@ export class AgentHub {
     // Every harness fetches its tools from here at session start, so it is up before any mind is.
     await this.toolServer.start();
     const active = specs.filter((spec) => !spec.retired);
-    const results = await Promise.allSettled(active.map((spec) => this.startSeat(spec)));
+    // Building a seat can throw at once (an ssh agent with no route to the tool server); that is this agent's failure alone.
+    const results = await Promise.allSettled(active.map(async (spec) => this.startSeat(spec)));
     const failed: Array<{ agent: string; error: string }> = [];
     results.forEach((result, index) => {
       if (result.status !== "rejected") return;
