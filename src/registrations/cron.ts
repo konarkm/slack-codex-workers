@@ -109,9 +109,10 @@ function parseField(value: string, spec: CronFieldSpec): ParsedCronField {
   if (set.size === 0) {
     throw new Error(`Invalid cron field: ${value}`);
   }
+  // As in Vixie cron, a field that starts with "*" (such as "*/2") counts as a wildcard for day-of-month/day-of-week matching.
   return {
     values: set,
-    isWildcard: false,
+    isWildcard: trimmed.startsWith("*"),
   };
 }
 
@@ -184,6 +185,26 @@ function validateTimezone(value: string): void {
   }
 }
 
+// Building a formatter costs about ten times as much as using one, and a scan uses one per minute.
+const formatters = new Map<string, Intl.DateTimeFormat>();
+
+function zonedFormatter(timeZone: string): Intl.DateTimeFormat {
+  let formatter = formatters.get(timeZone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      minute: "numeric",
+      hour: "numeric",
+      day: "numeric",
+      month: "numeric",
+      weekday: "short",
+      hour12: false,
+    });
+    formatters.set(timeZone, formatter);
+  }
+  return formatter;
+}
+
 function getZonedValues(date: Date, timeZone: string): {
   minute: number;
   hour: number;
@@ -191,16 +212,7 @@ function getZonedValues(date: Date, timeZone: string): {
   month: number;
   dayOfWeek: number;
 } {
-  const formatter = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    minute: "numeric",
-    hour: "numeric",
-    day: "numeric",
-    month: "numeric",
-    weekday: "short",
-    hour12: false,
-  });
-  const parts = formatter.formatToParts(date);
+  const parts = zonedFormatter(timeZone).formatToParts(date);
   const record = Object.fromEntries(parts.map((part) => [part.type, part.value]));
   const weekday = weekdayMap[String(record.weekday ?? "").slice(0, 3).toLowerCase()];
   if (weekday === undefined) {

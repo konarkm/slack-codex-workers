@@ -37,10 +37,21 @@ export interface WakeDelivery {
   (agent: string, item: { sourceKey: string; text: string }): Promise<unknown>;
 }
 
+// How much of a cron wake's unscanned past one tick looks at: a few milliseconds.
+const CRON_BACKLOG_SLICE_MS = 24 * 60 * 60_000;
+
+// The part of a cron wake's window already scanned with no match: (from, to], for the window that starts at `since`.
+interface CronCursor {
+  since: number;
+  from: number;
+  to: number;
+}
+
 // Fires due wakes into their agents' inboxes. The inbox source key makes a wake that is due once arrive once.
 export class WakeScheduler {
   private timer: NodeJS.Timeout | null = null;
   private ticking = false;
+  private readonly cronCursors = new Map<string, CronCursor>();
 
   constructor(
     private readonly store: AgentStore,
@@ -72,11 +83,14 @@ export class WakeScheduler {
 
   private async fireDue(now: Date): Promise<number> {
     let fired = 0;
-    for (const wake of this.store.listScheduledWakes()) {
-      if (!wake.enabled) continue;
+    const wakes = this.store.listScheduledWakes().filter((wake) => wake.enabled);
+    for (const id of this.cronCursors.keys()) {
+      if (!wakes.some((wake) => wake.id === id)) this.cronCursors.delete(id);
+    }
+    for (const wake of wakes) {
       let due: Date | null;
       try {
-        due = dueAt(wake, now);
+        due = wake.trigger.kind === "cron" ? this.cronDueAt(wake, wake.trigger, now) : dueAt(wake, now);
       } catch (error) {
         // One unreadable schedule must not stop everyone else's wakes.
         logError("scheduled wake could not be evaluated", { agent: wake.agent, wakeId: wake.id, error: error instanceof Error ? error.message : String(error) });
@@ -94,6 +108,26 @@ export class WakeScheduler {
       fired += 1;
     }
     return fired;
+  }
+
+  // dueAt for a cron wake, but each tick scans only minutes no earlier tick has: the new ones since the last tick, then at
+  // most a slice of the older window. A sparse schedule would otherwise rescan weeks of minutes every tick. A match more
+  // than a slice back (after the hub was down) is found a few ticks late.
+  private cronDueAt(wake: ScheduledWake, trigger: { schedule: string; timezone: string }, now: Date): Date | null {
+    const since = Date.parse(wake.lastFiredAt ?? wake.createdAt);
+    const cursor = this.cronCursors.get(wake.id);
+    const scanned = cursor && cursor.since === since ? cursor : { since, from: now.getTime(), to: now.getTime() };
+    this.cronCursors.set(wake.id, scanned);
+    // Newest first, so the first match found is the latest one.
+    const recent = findLatestMatchingCronMinute(trigger.schedule, trigger.timezone, new Date(scanned.to), now);
+    if (recent) return recent;
+    scanned.to = Math.max(scanned.to, now.getTime());
+    if (scanned.from <= since) return null;
+    const sliceStart = Math.max(since, scanned.from - CRON_BACKLOG_SLICE_MS);
+    const older = findLatestMatchingCronMinute(trigger.schedule, trigger.timezone, new Date(sliceStart), new Date(scanned.from));
+    if (older) return older;
+    scanned.from = sliceStart;
+    return null;
   }
 }
 

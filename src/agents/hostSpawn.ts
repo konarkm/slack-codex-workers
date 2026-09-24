@@ -17,13 +17,20 @@ export function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
+// Quoting a path whole would stop the remote shell expanding "~", so a home-relative path becomes "$HOME" plus the quoted rest.
+function shellPath(value: string): string {
+  if (value === "~") return `"$HOME"`;
+  if (value.startsWith("~/")) return `"$HOME"/${shellQuote(value.slice(2))}`;
+  return shellQuote(value);
+}
+
 export function buildRemoteCommand(request: Pick<HostSpawnRequest, "command" | "args" | "cwd" | "env">): string {
   const assignments = Object.entries(request.env ?? {})
     .filter((entry): entry is [string, string] => typeof entry[1] === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(entry[0]))
-    .map(([key, value]) => `${key}=${shellQuote(value)}`);
+    .map(([key, value]) => `${key}=${shellPath(value)}`);
   const exec = ["exec", ...(assignments.length > 0 ? ["env", ...assignments] : []), shellQuote(request.command), ...request.args.map(shellQuote)];
   // The agent's home is created on first use, as it is locally.
-  return `mkdir -p ${shellQuote(request.cwd)} && cd ${shellQuote(request.cwd)} && ${exec.join(" ")}`;
+  return `mkdir -p ${shellPath(request.cwd)} && cd ${shellPath(request.cwd)} && ${exec.join(" ")}`;
 }
 
 // Both agent harnesses speak over stdio, so running one on another machine is the same spawn behind ssh.

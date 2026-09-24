@@ -225,6 +225,27 @@ describe("webhook ingress server", () => {
     expect(response.status).toBe(429);
   });
 
+  it("forgets clients whose auth failures have expired, even if they never come back", async () => {
+    const server = new WebhookIngressServer(makeConfig({ webhookTrustLoopbackProxy: true }), () => null, vi.fn());
+    activeServers.push(server);
+    await server.start();
+    const miss = (client: string) =>
+      fetch(`http://127.0.0.1:${server.getListeningPort()}/webhooks/unknown`, { method: "POST", headers: { "x-forwarded-for": client }, body: "{}" });
+    const failures = (server as unknown as { authFailures: Map<string, unknown> }).authFailures;
+
+    for (let client = 0; client < 20; client += 1) expect((await miss(`198.51.100.${client}`)).status).toBe(404);
+    expect(failures.size).toBe(20);
+
+    const now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now + 60 * 60 * 1000);
+    try {
+      await miss("203.0.113.1");
+    } finally {
+      clock.mockRestore();
+    }
+    expect([...failures.keys()]).toEqual(["203.0.113.1"]);
+  });
+
   it("returns shutting_down before invoking the handler when ingress is closed", async () => {
     const handler = vi.fn();
     const server = new WebhookIngressServer(

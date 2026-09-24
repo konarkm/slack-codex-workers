@@ -66,7 +66,8 @@ export class WebhookWakes {
     if (this.store.getWebhookSource(source)) throw new Error(`Webhook source ${source} already exists.`);
     const handlerPath = path.join(this.config.storageDir, "sources", source, "handler.mjs");
     await fs.mkdir(path.dirname(handlerPath), { recursive: true });
-    await fs.writeFile(handlerPath, buildWebhookHandlerScaffold(source), { flag: "wx" });
+    // No catalog row means no source owns this name. A handler left behind by a deleted agent is replaced, not kept.
+    await fs.writeFile(handlerPath, buildWebhookHandlerScaffold(source));
     return this.store.createWebhookSource({ source, routeToken: randomBytes(18).toString("hex"), handlerPath, ownerAgent });
   }
 
@@ -88,29 +89,35 @@ export class WebhookWakes {
     let created = 0;
     let woken = 0;
     for (const event of result.events) {
-      if (!this.store.recordWebhookEvent(source.source, event.event, event.dedupeKey)) continue;
-      created += 1;
+      if (this.store.recordWebhookEvent(source.source, event.event, event.dedupeKey)) created += 1;
       const fields = event.fields ?? {};
-      const subscriptions = this.store.listWebhookSubscriptions({ source: source.source }).filter((candidate) => matchesSubscription(candidate, event.event, fields));
+      const keyFor = (subscription: WebhookSubscription) => `webhook:${source.source}:${event.event}:${event.dedupeKey}:${subscription.id}`;
+      // A seen event is not done until every subscriber has it queued. A retry finishes what a failure or a crash left undone,
+      // and a subscriber whose inbox already holds it is skipped.
+      const subscriptions = this.store
+        .listWebhookSubscriptions({ source: source.source })
+        .filter((candidate) => matchesSubscription(candidate, event.event, fields) && !this.store.hasSource(candidate.agent, keyFor(candidate)));
       if (subscriptions.length === 0) continue;
-      const payloadPath = await this.writePayload(source.source, event.event, event.payload ?? input.parsedJson ?? input.rawBody);
       let failures = 0;
-      for (const subscription of subscriptions) {
-        try {
-          await this.deliver(subscription.agent, {
-            sourceKey: `webhook:${source.source}:${event.event}:${event.dedupeKey}:${subscription.id}`,
-            text: renderWebhookWake(subscription, event.event, fields, event.summary ?? null, payloadPath, input.receivedAt),
-          });
-          woken += 1;
-        } catch (error) {
-          failures += 1;
-          logError("webhook wake not delivered", { agent: subscription.agent, source: source.source, error: error instanceof Error ? error.message : String(error) });
+      try {
+        const payloadPath = await this.writePayload(source.source, event.event, event.payload ?? input.parsedJson ?? input.rawBody);
+        for (const subscription of subscriptions) {
+          try {
+            await this.deliver(subscription.agent, { sourceKey: keyFor(subscription), text: renderWebhookWake(subscription, event.event, fields, event.summary ?? null, payloadPath, input.receivedAt) });
+            woken += 1;
+          } catch (error) {
+            failures += 1;
+            logError("webhook wake not delivered", { agent: subscription.agent, source: source.source, error: error instanceof Error ? error.message : String(error) });
+          }
         }
+      } catch (error) {
+        failures = subscriptions.length;
+        logError("webhook payload not saved", { source: source.source, error: error instanceof Error ? error.message : String(error) });
       }
-      if (failures === subscriptions.length) {
-        // Nobody got it. Forget the event so the sender's retry is not deduplicated away.
+      if (failures > 0) {
+        // Somebody missed it. Forget the event so the sender's retry counts as new and reaches them.
         this.store.forgetWebhookEvent(source.source, event.event, event.dedupeKey);
-        return { status: 503, body: { ok: false, error: "no subscriber could be reached; retry" } };
+        return { status: 503, body: { ok: false, error: "not every subscriber could be reached; retry" } };
       }
     }
     return { status: 202, body: { ok: true, events: created, wakes: woken } };
