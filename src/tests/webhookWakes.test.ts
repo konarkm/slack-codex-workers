@@ -15,8 +15,13 @@ beforeEach(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), "webhook-wakes-"));
   store = new AgentStore(":memory:");
   delivered = [];
-  wakes = new WebhookWakes(store, { storageDir: dir, webhookPath: "/webhooks", publicBaseUrl: "https://hooks.example.com" }, async (agent, item) => void delivered.push({ agent, ...item }));
+  wakes = new WebhookWakes(store, { storageDir: dir, webhookPath: "/webhooks", publicBaseUrl: "https://hooks.example.com" }, deliverToInbox);
 });
+
+// Like the hub: the durable inbox is the delivery, and its source key keeps a repeat from waking anyone twice.
+async function deliverToInbox(agent: string, item: { sourceKey: string; text: string }): Promise<void> {
+  if (store.enqueue({ agent, ...item, wake: true, priority: "later", imagePaths: [] })) delivered.push({ agent, ...item });
+}
 
 afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
 
@@ -103,12 +108,49 @@ describe("webhook wakes", () => {
     let reachable = false;
     const flaky = new WebhookWakes(store, { storageDir: dir, webhookPath: "/webhooks", publicBaseUrl: null }, async (agent, item) => {
       if (!reachable) throw new Error("unreachable");
-      delivered.push({ agent, ...item });
+      await deliverToInbox(agent, item);
     });
     expect((await flaky.ingest(await request("github", { event: "push", id: "9", repo: "r" }))).status).toBe(503);
     reachable = true;
     expect((await flaky.ingest(await request("github", { event: "push", id: "9", repo: "r" }))).body).toMatchObject({ events: 1, wakes: 1 });
     expect(delivered).toHaveLength(1);
+  });
+
+  it("asks for a retry when one of several subscribers was missed, and the retry reaches only that one", async () => {
+    await wakes.createSource("github", "ada");
+    writeHandler("github");
+    await tool("ada", "subscribe_webhook").handler({ source: "github", note: "n" } as never);
+    await tool("cody", "subscribe_webhook").handler({ source: "github", note: "n" } as never);
+    let codyReachable = false;
+    const partial = new WebhookWakes(store, { storageDir: dir, webhookPath: "/webhooks", publicBaseUrl: null }, async (agent, item) => {
+      if (agent === "cody" && !codyReachable) throw new Error("unreachable");
+      await deliverToInbox(agent, item);
+    });
+    expect((await partial.ingest(await request("github", { event: "push", id: "7", repo: "r" }))).status).toBe(503);
+    codyReachable = true;
+    expect((await partial.ingest(await request("github", { event: "push", id: "7", repo: "r" }))).status).toBe(202);
+    expect(delivered.map((item) => item.agent).sort()).toEqual(["ada", "cody"]);
+  });
+
+  it("asks for a retry when the payload could not be saved, and the retry wakes the subscriber", async () => {
+    await wakes.createSource("github", "ada");
+    writeHandler("github");
+    await tool("ada", "subscribe_webhook").handler({ source: "github", note: "n" } as never);
+    // A file where the payloads directory should be makes the save fail.
+    fs.writeFileSync(path.join(dir, "payloads"), "");
+    expect((await wakes.ingest(await request("github", { event: "push", id: "8", repo: "r" }))).status).toBe(503);
+    fs.rmSync(path.join(dir, "payloads"));
+    expect((await wakes.ingest(await request("github", { event: "push", id: "8", repo: "r" }))).status).toBe(202);
+    expect(delivered.map((item) => item.agent)).toEqual(["ada"]);
+  });
+
+  it("finishes an event that was recorded but never queued, as after a crash", async () => {
+    await wakes.createSource("github", "ada");
+    writeHandler("github");
+    await tool("ada", "subscribe_webhook").handler({ source: "github", note: "n" } as never);
+    store.recordWebhookEvent("github", "push", "5");
+    expect((await wakes.ingest(await request("github", { event: "push", id: "5", repo: "r" }))).status).toBe(202);
+    expect(delivered.map((item) => item.agent)).toEqual(["ada"]);
   });
 
   it("keeps a multi-line field from adding header lines", async () => {
