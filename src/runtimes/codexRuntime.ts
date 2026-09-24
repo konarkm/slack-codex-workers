@@ -38,8 +38,11 @@ export class CodexRuntime implements AgentRuntime {
   // Turn ids already seen to complete, so a late turn/start response cannot mark a finished turn as running.
   private readonly completedTurnIds = new Set<string>();
   private resumeFailures = 0;
-  // Inputs taken by the current turn (the one that started it and any steered in).
-  private turnInputIds: string[] = [];
+  // Inputs each turn took (the one that started it and any steered in), by turn id. A turn listed here is one of ours.
+  private readonly turnInputs = new Map<string, string[]>();
+  // turn/start and turn/steer requests not yet answered. Their answers say which turn an input went to, so a turn's
+  // completion waits for them before it reports what the turn took.
+  private readonly unanswered = new Set<Promise<void>>();
   // Bumped by stop(), so a start still under way gives up what it built instead of bringing a stopped runtime back.
   private generation = 0;
   private chain: Promise<void> = Promise.resolve();
@@ -79,16 +82,17 @@ export class CodexRuntime implements AgentRuntime {
 
   async deliver(input: RuntimeInput): Promise<void> {
     await this.start();
-    if (!this.rpc) throw new Error("codex app-server is not running");
+    const rpc = this.rpc;
+    if (!rpc) throw new Error("codex app-server is not running");
     const items = [
       { type: "text", text: input.text, text_elements: [] },
       // Local paths only resolve on the agent's own host.
       ...(this.options.spec.host.kind === "local" ? input.imagePaths.map((path) => ({ type: "localImage", path })) : []),
     ];
     if (this.activeTurnId) {
+      const turnId = this.activeTurnId;
       try {
-        await this.rpc!.request("turn/steer", { threadId: this.threadId, expectedTurnId: this.activeTurnId, input: items });
-        if (input.id) this.turnInputIds.push(input.id);
+        await this.track(rpc.request("turn/steer", { threadId: this.threadId, expectedTurnId: turnId, input: items }).then(() => this.bindInput(turnId, input.id)));
         return;
       } catch (error) {
         // A timeout leaves the outcome unknown; sending the input again as a new turn could make the agent answer twice.
@@ -98,26 +102,31 @@ export class CodexRuntime implements AgentRuntime {
         this.activeTurnId = null;
       }
     }
-    let startedId: string;
-    if (input.id) this.turnInputIds.push(input.id);
-    try {
-      const raw = await this.rpc!.request("turn/start", {
-        threadId: this.threadId,
-        input: items,
-        approvalPolicy: "never",
-        sandboxPolicy: { type: "dangerFullAccess" },
-        model: this.options.spec.model ?? undefined,
-        effort: this.options.spec.effort ?? undefined,
-      });
-      startedId = turnResponseSchema.parse(raw).turn.id;
-    } catch (error) {
-      // If a turn/started notification arrived while the request was failing, the turn is running and the input was taken.
-      if (this.activeTurnId) return;
-      this.turnInputIds = this.turnInputIds.filter((id) => id !== input.id);
-      throw error;
-    }
+    const request = rpc.request("turn/start", {
+      threadId: this.threadId,
+      input: items,
+      approvalPolicy: "never",
+      sandboxPolicy: { type: "dangerFullAccess" },
+      model: this.options.spec.model ?? undefined,
+      effort: this.options.spec.effort ?? undefined,
+    });
+    const startedId = await this.track(
+      request.then(
+        (raw) => {
+          const id = turnResponseSchema.parse(raw).turn.id;
+          this.bindInput(id, input.id);
+          return id;
+        },
+        (error: unknown) => {
+          // If a turn/started notification arrived while the request was failing, the turn is running and the input was taken.
+          if (!this.activeTurnId) throw error;
+          this.bindInput(this.activeTurnId, input.id);
+          return null;
+        },
+      ),
+    );
     // A fast turn can finish before this response is handled.
-    if (this.completedTurnIds.has(startedId)) return;
+    if (startedId === null || this.completedTurnIds.has(startedId) || this.rpc !== rpc) return;
     this.activeTurnId = startedId;
     await this.setState("running");
   }
@@ -155,7 +164,7 @@ export class CodexRuntime implements AgentRuntime {
       const wasRunning = this.activeTurnId !== null;
       this.activeTurnId = null;
       void (async () => {
-        if (wasRunning) await this.options.events.onTurnCompleted({ status: "failed", finalText: "", error: "codex app-server exited mid-turn", consumedInputIds: this.takeTurnInputs(), inputFault: false });
+        if (wasRunning) await this.options.events.onTurnCompleted({ status: "failed", finalText: "", error: "codex app-server exited mid-turn", consumedInputIds: this.takeAllTurnInputs(), inputFault: false });
         await this.setState("down");
       })();
     });
@@ -266,7 +275,10 @@ export class CodexRuntime implements AgentRuntime {
     if (params.threadId !== this.threadId) return;
     if (event.method === "turn/started") {
       const turn = params.turn as { id?: string } | undefined;
-      if (turn?.id) this.activeTurnId = turn.id;
+      if (turn?.id) {
+        this.activeTurnId = turn.id;
+        if (!this.turnInputs.has(turn.id)) this.turnInputs.set(turn.id, []);
+      }
       await this.setState("running");
       return;
     }
@@ -292,18 +304,28 @@ export class CodexRuntime implements AgentRuntime {
       return;
     }
     if (event.method === "turn/completed") {
-      const turn = params.turn as { id?: string; status?: string; error?: { message?: string } | null } | undefined;
-      if (turn?.id && this.activeTurnId && turn.id !== this.activeTurnId) return;
-      if (turn?.id) {
-        this.completedTurnIds.add(turn.id);
-        if (this.completedTurnIds.size > 50) this.completedTurnIds.delete(this.completedTurnIds.values().next().value!);
-      }
-      this.activeTurnId = null;
+      const turn = params.turn as { id?: string; status?: string; error?: { message?: string; codexErrorInfo?: unknown } | null } | undefined;
+      await Promise.all(this.unanswered);
+      const turnId = turn?.id ?? this.activeTurnId;
+      // A turn this runtime neither started nor saw start takes none of its input.
+      if (!turnId || (turnId !== this.activeTurnId && !this.turnInputs.has(turnId))) return;
+      this.completedTurnIds.add(turnId);
+      if (this.completedTurnIds.size > 50) this.completedTurnIds.delete(this.completedTurnIds.values().next().value!);
+      const consumedInputIds = this.turnInputs.get(turnId) ?? [];
+      this.turnInputs.delete(turnId);
+      if (turnId === this.activeTurnId) this.activeTurnId = null;
       const status: TurnStatus = turn?.status === "completed" ? "completed" : turn?.status === "interrupted" ? "interrupted" : "failed";
       const finalText = this.lastAgentText;
       this.lastAgentText = "";
-      await events.onTurnCompleted({ status, finalText, error: status === "failed" ? (turn?.error?.message ?? "turn failed") : null, consumedInputIds: this.takeTurnInputs(), inputFault: false });
-      await this.setState("idle");
+      await events.onTurnCompleted({
+        status,
+        finalText,
+        error: status === "failed" ? (turn?.error?.message ?? "turn failed") : null,
+        consumedInputIds,
+        inputFault: status === "failed" && isCodexInputFault(turn?.error?.codexErrorInfo),
+      });
+      // Reporting the end can start the next turn (the silent-turn notice); that one is running.
+      if (!this.activeTurnId) await this.setState("idle");
     }
   }
 
@@ -326,9 +348,23 @@ export class CodexRuntime implements AgentRuntime {
     }
   }
 
-  private takeTurnInputs(): string[] {
-    const ids = this.turnInputIds;
-    this.turnInputIds = [];
+  private bindInput(turnId: string, inputId: string | null): void {
+    this.turnInputs.set(turnId, [...(this.turnInputs.get(turnId) ?? []), ...(inputId ? [inputId] : [])]);
+  }
+
+  private track<T>(request: Promise<T>): Promise<T> {
+    const answered = request.then(
+      () => {},
+      () => {},
+    );
+    this.unanswered.add(answered);
+    void answered.then(() => this.unanswered.delete(answered));
+    return request;
+  }
+
+  private takeAllTurnInputs(): string[] {
+    const ids = [...this.turnInputs.values()].flat();
+    this.turnInputs.clear();
     return ids;
   }
 
@@ -370,6 +406,15 @@ export function configuredCodexServers(codexHome: string): string[] {
 
 function operatorCodexHome(): string {
   return process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
+}
+
+// Turn failures caused by what was sent in (more than the context window holds, a request or image the API rejects),
+// as opposed to the provider, the login, or the network. Codex says which in the turn error's structured code.
+export function isCodexInputFault(info: unknown): boolean {
+  if (info === "contextWindowExceeded" || info === "badRequest") return true;
+  if (!info || typeof info !== "object") return false;
+  const status = (Object.values(info)[0] as { httpStatusCode?: number | null } | undefined)?.httpStatusCode;
+  return status === 400 || status === 413;
 }
 
 // Codex reports these conditions only as English error text.

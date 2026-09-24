@@ -229,6 +229,63 @@ describe("CodexRuntime", () => {
     expect(rpc.requests[0]).toMatchObject({ method: "thread/resume", params: { threadId: "thread-old", developerInstructions: "be a teammate", approvalPolicy: "never", sandbox: "danger-full-access" } });
   });
 
+  it("counts a steered input as taken when its turn ends just as the steer is answered", async () => {
+    const { rpc, runtime, turns } = setup(null);
+    await runtime.deliver({ id: "in-one", text: "one", imagePaths: [], priority: "next" });
+    const original = rpc.request.bind(rpc);
+    rpc.request = async <T>(method: string, params: unknown): Promise<T> => {
+      const result = await original<T>(method, params);
+      // Both arrive in one read: the steer's answer and the turn's end.
+      if (method === "turn/steer") rpc.emit("notification", { method: "turn/completed", params: { threadId: "thread-new", turn: { id: "turn-1", status: "completed" } } });
+      return result;
+    };
+    await runtime.deliver({ id: "in-two", text: "two", imagePaths: [], priority: "next" });
+    await flush();
+    expect(turns.map((turn) => turn.consumedInputIds)).toEqual([["in-one", "in-two"]]);
+  });
+
+  it("gives a completion only the input of its own turn, not one whose turn is still being started", async () => {
+    const { rpc, runtime, turns } = setup(null);
+    await runtime.deliver({ id: "in-one", text: "one", imagePaths: [], priority: "next" });
+    rpc.failNext["turn/steer"] = "no active turn to steer";
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const original = rpc.request.bind(rpc);
+    rpc.request = async <T>(method: string, params: unknown): Promise<T> => {
+      if (method === "turn/start") await gate;
+      return original<T>(method, params);
+    };
+    const second = runtime.deliver({ id: "in-two", text: "two", imagePaths: [], priority: "next" });
+    await flush();
+    // The previous turn's completion arrives late, and so does one for a turn this runtime never started.
+    rpc.emit("notification", { method: "turn/completed", params: { threadId: "thread-new", turn: { id: "turn-x", status: "completed" } } });
+    rpc.emit("notification", { method: "turn/completed", params: { threadId: "thread-new", turn: { id: "turn-1", status: "completed" } } });
+    await flush();
+    release();
+    await second;
+    await flush();
+    expect(turns.map((turn) => turn.consumedInputIds)).toEqual([["in-one"]]);
+    expect(runtime.state()).toBe("running");
+    rpc.emit("notification", { method: "turn/completed", params: { threadId: "thread-new", turn: { id: "turn-2", status: "failed", error: { message: "boom" } } } });
+    await flush();
+    expect(turns.map((turn) => turn.consumedInputIds)).toEqual([["in-one"], ["in-two"]]);
+  });
+
+  it("reports a turn that failed because of what was sent in as the input's fault, and other failures as not", async () => {
+    const { rpc, runtime, turns } = setup(null);
+    const fail = async (turnId: string, codexErrorInfo: unknown) => {
+      await runtime.deliver({ id: turnId, text: "x", imagePaths: [], priority: "next" });
+      rpc.emit("notification", { method: "turn/completed", params: { threadId: "thread-new", turn: { id: turnId, status: "failed", error: { message: "failed", codexErrorInfo } } } });
+      await flush();
+    };
+    await fail("turn-1", "contextWindowExceeded");
+    await fail("turn-2", { httpConnectionFailed: { httpStatusCode: 400 } });
+    await fail("turn-3", "usageLimitExceeded");
+    await fail("turn-4", { responseStreamDisconnected: { httpStatusCode: 502 } });
+    await fail("turn-5", null);
+    expect(turns.map((turn) => turn.inputFault)).toEqual([true, true, false, false, false]);
+  });
+
   it("stops an app-server that fails to initialize", async () => {
     const { rpc, runtime } = setup(null);
     rpc.failStart = "RPC request timed out: initialize";
@@ -259,6 +316,20 @@ describe("CodexRuntime", () => {
     await runtime.start();
     expect(sessions).toEqual([]);
     expect(runtime.sessionId()).toBe("thread-old");
+  });
+
+  it("stays running when a new turn starts while the last one's end is being reported", async () => {
+    const { rpc, runtime, events, states } = setup(null);
+    await runtime.deliver({ id: "in-one", text: "one", imagePaths: [], priority: "next" });
+    events.onTurnCompleted = async () => {
+      await runtime.deliver({ id: null, text: "notice", imagePaths: [], priority: "next" });
+    };
+    const before = states.length;
+    rpc.emit("notification", { method: "turn/completed", params: { threadId: "thread-new", turn: { id: "turn-1", status: "completed" } } });
+    await flush();
+    expect(rpc.requests.filter((r) => r.method === "turn/start")).toHaveLength(2);
+    expect(runtime.state()).toBe("running");
+    expect(states.slice(before)).toEqual([]);
   });
 
   it("classifies Codex error text", () => {
