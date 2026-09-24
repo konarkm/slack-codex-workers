@@ -59,6 +59,19 @@ export class CodexRpcClient extends EventEmitter {
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => this.emit("stderr", chunk));
 
+    // A pipe that breaks before the exit is seen (the app-server or its ssh transport died) fails the requests waiting on
+    // it and ends the process; unhandled, the error would take the whole hub down.
+    child.stdin.on("error", (error) => {
+      if (this.child !== child) return;
+      for (const pending of this.pending.values()) {
+        clearTimeout(pending.timer);
+        pending.reject(error);
+      }
+      this.pending.clear();
+      this.emit("stderr", `stdin: ${error.message}`);
+      child.kill("SIGTERM");
+    });
+
     child.on("error", (error) => {
       if (this.child === child) {
         for (const pending of this.pending.values()) {
