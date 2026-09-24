@@ -35,6 +35,7 @@ export type { WebhookServerConfig };
 export class WebhookIngressServer {
   private server: Server | null = null;
   private readonly authFailures = new Map<string, AuthFailureState>();
+  private lastAuthFailureSweep = 0;
 
   constructor(
     private readonly config: WebhookServerConfig,
@@ -228,11 +229,23 @@ export class WebhookIngressServer {
 
   private recordAuthFailure(clientKey: string): void {
     const now = Date.now();
+    this.sweepAuthFailures(now);
     const current = this.authFailures.get(clientKey) ?? { failures: [], blockedUntil: 0 };
     const recentFailures = current.failures.filter((timestamp) => now - timestamp <= AUTH_FAILURE_WINDOW_MS);
     recentFailures.push(now);
     const blockedUntil = recentFailures.length >= AUTH_FAILURE_MAX_ATTEMPTS ? now + AUTH_FAILURE_BLOCK_MS : current.blockedUntil;
     this.authFailures.set(clientKey, { failures: recentFailures, blockedUntil });
+  }
+
+  // A client that fails once and never returns would otherwise stay in the map for good. At most once a minute, so a flood
+  // of distinct clients does not pay for a full pass on every failure.
+  private sweepAuthFailures(now: number): void {
+    if (now - this.lastAuthFailureSweep < 60_000) return;
+    this.lastAuthFailureSweep = now;
+    for (const [clientKey, state] of this.authFailures) {
+      const newest = state.failures.at(-1) ?? 0;
+      if (state.blockedUntil <= now && now - newest > AUTH_FAILURE_WINDOW_MS) this.authFailures.delete(clientKey);
+    }
   }
 
   private resetAuthFailures(clientKey: string): void {
