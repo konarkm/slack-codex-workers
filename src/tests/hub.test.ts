@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { AgentStore, NewInboxItem } from "../agents/agentStore.js";
 import { AgentHub, decideWakes, type HubConfig } from "../agents/hub.js";
 import { AgentRegistry } from "../agents/registry.js";
 import { RuleJudge, type JudgeInput, type Verdict, type WakeJudge } from "../agents/judge.js";
@@ -737,6 +738,30 @@ describe("AgentHub", () => {
     await slack.handler!(inbound({ channelId: "D1", channelType: "im", ts: "1726700001.000100", text: ".delete scout" }));
     expect(slack.posted.at(-1)!.text).toContain("deleted scout");
     expect(fs.existsSync(scoutWork)).toBe(true);
+  });
+
+  it("does not take in a message, or fire a wake, whose inbox write failed", async () => {
+    await startHub(TEAM);
+    const store = (hub as unknown as { store: AgentStore }).store;
+    const enqueue = store.enqueue.bind(store);
+    store.enqueue = (item: NewInboxItem) => {
+      if (item.agent === "cody") throw new Error("database or disk is full");
+      return enqueue(item);
+    };
+    judge.next = { for: ["cody"] };
+    const message = inbound({ text: "cody fix the deploy" });
+    await slack.handler!(message);
+    await runtimes.get("cody")!.tool("schedule_wake").handler({ every_minutes: 5, note: "check the build" } as never);
+    const scheduler = (hub as unknown as { scheduler: { tick(now: Date): Promise<number> } }).scheduler;
+    const later = new Date(Date.now() + 10 * 60_000);
+    expect(await scheduler.tick(later)).toBe(0);
+    expect(delivered("cody")).toHaveLength(0);
+    // Once the inbox takes writes again, Slack's redelivery of the event and the next tick both get through.
+    store.enqueue = enqueue;
+    await slack.handler!(message);
+    await flush();
+    expect(delivered("cody").map((input) => input.text).join("\n")).toContain("fix the deploy");
+    expect(await scheduler.tick(later)).toBe(1);
   });
 
   it("deletes only the home the bridge made for an agent, never a directory another agent works in", async () => {

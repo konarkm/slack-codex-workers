@@ -152,21 +152,20 @@ export class AgentHub {
       options.spec.runtime === "claude" ? new ClaudeRuntime(options) : new CodexRuntime(options, config.codexBin),
   ) {
     this.store = new AgentStore(config.databasePath);
-    const deliverWake = async (agent: string, item: { sourceKey: string; text: string }): Promise<void> => {
+    const deliverWake = async (agent: string, item: { sourceKey: string; text: string }): Promise<"skipped" | void> => {
       const known = this.registry?.spec(agent);
       if (!known) throw new Error(`agent ${agent} is not in the registry`);
       // A retired agent hears nothing, so its wakes do not pile up to arrive all at once when it is revived.
-      if (known.retired) return;
+      if (known.retired) return "skipped";
       const input = { ...item, wake: true, priority: "later" as const, imagePaths: [] };
       const seat = this.seats.get(agent);
-      // The inbox is the durable step. An agent that is down finds the wake waiting when it starts.
+      // The inbox is the durable step, and a failure to write it is thrown, so the wake stays due and a webhook sender is
+      // told to retry. An agent that is down finds the wake waiting when it starts.
       if (!seat) {
         this.store.enqueue({ ...input, agent });
         return;
       }
-      await seat.mind.receive(input).catch((error) => {
-        logWarn("wake queued; the agent could not take it yet", { agent, error: errorMessage(error) });
-      });
+      await seat.mind.receive(input);
     };
     this.scheduler = new WakeScheduler(this.store, deliverWake);
     this.toolServer = new ToolServer(config.toolServer);
@@ -744,6 +743,9 @@ export class AgentHub {
       }
       fileNotes.push(...message.unavailableFiles.map((name) => `${name} (Slack gave no download link)`));
 
+      // An agent whose inbox could not be written is not marked as having it, and the event is not marked taken in, so a
+      // second copy of it reaches that agent; the others already have it and skip it then.
+      let stored = true;
       for (const { seat, decision } of woken) {
         const { spec } = seat;
         const missed = await this.fetchMissed(spec.name, message).catch((error) => {
@@ -766,10 +768,16 @@ export class AgentHub {
           alsoWoken: woken.filter((other) => other.seat !== seat).map((other) => other.seat.spec.name),
           viewing: await this.describeViewing(message),
         });
-        await this.handOver(seat, { sourceKey: key, wake: true, priority: verdict.urgency, text, imagePaths }, { channelId: message.channelId, threadTs: threadRoot });
+        try {
+          await this.handOver(seat, { sourceKey: key, wake: true, priority: verdict.urgency, text, imagePaths }, { channelId: message.channelId, threadTs: threadRoot });
+        } catch (error) {
+          stored = false;
+          logError("input not stored; the event stays open for another copy", { agent: spec.name, error: errorMessage(error) });
+          continue;
+        }
         this.store.markSeen(spec.name, message.channelId, threadKey, message.ts);
       }
-      this.store.recordHandled(INTAKE, key, "");
+      if (stored) this.store.recordHandled(INTAKE, key, "");
     } catch (error) {
       logError("inbound handling failed", { channelId: message.channelId, ts: message.ts, error: errorMessage(error) });
     }
@@ -824,7 +832,8 @@ export class AgentHub {
     }
     // The working indicator shown at routing is cleared when this seat's turn ends.
     if (seat !== routed) seat.statusThreads.set(`${thread.channelId}:${thread.threadTs}`, thread);
-    await seat.mind.receive(input).catch((error) => logWarn("input queued; the agent could not take it yet", { agent, error: errorMessage(error) }));
+    // Throws only when the inbox could not be written; handing the input on to the runtime happens after, on its own.
+    await seat.mind.receive(input);
   }
 
   // What the judgment model sees as "what was just said": the conversation itself, and for a channel's main line also
