@@ -345,6 +345,69 @@ describe("CodexRuntime", () => {
     expect(input[0].text).toContain("/nonexistent/gone.png");
   });
 
+  it("starts one turn at a time: input arriving while the notice's turn is being started is steered into it", async () => {
+    const { rpc, runtime, turns } = setup(null);
+    await runtime.deliver({ id: "in-one", text: "one", imagePaths: [], priority: "next" });
+    rpc.emit("notification", { method: "turn/completed", params: { threadId: "thread-new", turn: { id: "turn-1", status: "completed" } } });
+    await flush();
+    let answerNotice!: (value: unknown) => void;
+    const original = rpc.request.bind(rpc);
+    rpc.request = async <T>(method: string, params: unknown): Promise<T> => {
+      if (method !== "turn/start") return original<T>(method, params);
+      rpc.requests.push({ method, params });
+      if (rpc.requests.filter((r) => r.method === "turn/start").length === 2) return new Promise<T>((resolve) => (answerNotice = resolve as (value: unknown) => void));
+      throw new Error("cannot start the new turn while another turn is running");
+    };
+    const notice = runtime.deliver({ id: null, text: "notice", imagePaths: [], priority: "next" });
+    const second = runtime.deliver({ id: "in-two", text: "two", imagePaths: [], priority: "next" });
+    await flush();
+    answerNotice({ turn: { id: "notice-turn" } });
+    await notice;
+    await second;
+    expect(rpc.requests.filter((r) => r.method === "turn/start")).toHaveLength(2);
+    expect(rpc.requests.at(-1)).toMatchObject({ method: "turn/steer", params: { expectedTurnId: "notice-turn" } });
+    rpc.emit("notification", { method: "turn/completed", params: { threadId: "thread-new", turn: { id: "notice-turn", status: "completed" } } });
+    await flush();
+    expect(turns.map((turn) => turn.consumedInputIds)).toEqual([["in-one"], ["in-two"]]);
+  });
+
+  it("never counts a rejected start as taken by a turn that happened to start meanwhile", async () => {
+    const { rpc, runtime, turns } = setup(null);
+    await runtime.start();
+    const original = rpc.request.bind(rpc);
+    rpc.request = async <T>(method: string, params: unknown): Promise<T> => {
+      if (method === "turn/start") {
+        rpc.emit("notification", { method: "turn/started", params: { threadId: "thread-new", turn: { id: "turn-9" } } });
+        await flush();
+        throw new Error("cannot start the new turn while another turn is running");
+      }
+      return original<T>(method, params);
+    };
+    await expect(runtime.deliver({ id: "in-one", text: "one", imagePaths: [], priority: "next" })).rejects.toThrow(/cannot start/);
+    rpc.emit("notification", { method: "turn/completed", params: { threadId: "thread-new", turn: { id: "turn-9", status: "completed" } } });
+    await flush();
+    expect(turns.map((turn) => turn.consumedInputIds)).toEqual([[]]);
+  });
+
+  it("gives up a start at once when stopped during initialize, and stops the app-server that was initializing", async () => {
+    const { rpc, runtime } = setup("thread-old");
+    rpc.starting = new Promise<void>(() => {});
+    const delivery = runtime.deliver({ id: "in-one", text: "one", imagePaths: [], priority: "next" });
+    await flush();
+    await runtime.stop();
+    await expect(delivery).rejects.toThrow(/stopped/);
+    expect(rpc.stops).toBe(1);
+  });
+
+  it("leaves out an image it cannot read, such as a directory, and says so", async () => {
+    const { rpc, runtime } = setup(null);
+    const folder = fs.mkdtempSync(path.join(os.tmpdir(), "codex-test-"));
+    await runtime.deliver({ id: "in-one", text: "look", imagePaths: [folder], priority: "next" });
+    const input = rpc.requests.find((r) => r.method === "turn/start")!.params.input;
+    expect(input).toHaveLength(1);
+    expect(input[0].text).toContain(folder);
+  });
+
   it("classifies Codex error text", () => {
     expect(classifyCodexError(new Error("no rollout found for thread id abc"))).toBe("session_missing");
     expect(classifyCodexError(new Error("401 Unauthorized"))).toBe("auth");

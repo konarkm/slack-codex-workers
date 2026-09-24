@@ -45,6 +45,14 @@ export class CodexRuntime implements AgentRuntime {
   private readonly unanswered = new Set<Promise<void>>();
   // Bumped by stop(), so a start still under way gives up what it built instead of bringing a stopped runtime back.
   private generation = 0;
+  // An app-server still initializing, so stop() can end it, and the way to fail the start waiting on it.
+  private initializing: CodexRpc | null = null;
+  private abortStart: ((error: Error) => void) | null = null;
+  // Turn starts and steers go one at a time: two starts in flight at once cannot tell whose turn is whose.
+  private turnLine: Promise<unknown> = Promise.resolve();
+  // A turn seen to start while this runtime's own turn/start was waiting for its answer.
+  private startedDuringRequest: string | null = null;
+  private requestingStart = false;
   private chain: Promise<void> = Promise.resolve();
 
   constructor(
@@ -65,18 +73,27 @@ export class CodexRuntime implements AgentRuntime {
 
   start(): Promise<void> {
     if (this.rpc && this.currentState !== "down") return Promise.resolve();
-    this.starting ??= this.startInner().finally(() => {
+    // stop() fails a pending start at once, so a delivery waiting on it (and a reset's next delivery) is not held for
+    // the app-server's 180 s initialize timeout.
+    this.starting ??= new Promise<void>((resolve, reject) => {
+      this.abortStart = reject;
+      this.startInner().then(resolve, reject);
+    }).finally(() => {
       this.starting = null;
+      this.abortStart = null;
     });
     return this.starting;
   }
 
   async stop(): Promise<void> {
     this.generation += 1;
+    this.abortStart?.(new Error("codex runtime was stopped while starting"));
     const rpc = this.rpc;
+    const initializing = this.initializing;
     this.rpc = null;
+    this.initializing = null;
     this.activeTurnId = null;
-    await rpc?.stop();
+    await Promise.all([rpc?.stop(), initializing?.stop()]);
     await this.setState("down");
   }
 
@@ -84,18 +101,26 @@ export class CodexRuntime implements AgentRuntime {
     await this.start();
     const rpc = this.rpc;
     if (!rpc) throw new Error("codex app-server is not running");
-    // Local paths only resolve on the agent's own host. A file that is gone would fail every retry of the input.
+    // Local paths only resolve on the agent's own host. A file that is gone or unreadable would fail every retry of the input.
     const images = this.options.spec.host.kind === "local" ? input.imagePaths : [];
-    const missing = images.filter((imagePath) => !fs.existsSync(imagePath));
-    const text = missing.length > 0 ? `${input.text}\n\n[bridge notice] Not attached; the file is no longer on disk: ${missing.join(", ")}` : input.text;
+    const unreadable = images.filter((imagePath) => !isReadableFile(imagePath));
+    const text = unreadable.length > 0 ? `${input.text}\n\n[bridge notice] Not attached; the file could not be read (it may have been removed): ${unreadable.join(", ")}` : input.text;
     const items = [
       { type: "text", text, text_elements: [] },
-      ...images.filter((imagePath) => !missing.includes(imagePath)).map((imagePath) => ({ type: "localImage", path: imagePath })),
+      ...images.filter((imagePath) => !unreadable.includes(imagePath)).map((imagePath) => ({ type: "localImage", path: imagePath })),
     ];
+    // Whether to steer or start is decided in line, after any start ahead of this one has been answered.
+    const turn = this.turnLine.then(() => this.steerOrStart(rpc, input.id, items));
+    this.turnLine = turn.catch(() => {});
+    await turn;
+  }
+
+  private async steerOrStart(rpc: CodexRpc, inputId: string | null, items: unknown[]): Promise<void> {
+    if (this.rpc !== rpc) throw new Error("codex app-server is not running");
     if (this.activeTurnId) {
       const turnId = this.activeTurnId;
       try {
-        await this.track(rpc.request("turn/steer", { threadId: this.threadId, expectedTurnId: turnId, input: items }).then(() => this.bindInput(turnId, input.id)));
+        await this.track(rpc.request("turn/steer", { threadId: this.threadId, expectedTurnId: turnId, input: items }).then(() => this.bindInput(turnId, inputId)));
         return;
       } catch (error) {
         // A timeout leaves the outcome unknown; sending the input again as a new turn could make the agent answer twice.
@@ -105,6 +130,8 @@ export class CodexRuntime implements AgentRuntime {
         this.activeTurnId = null;
       }
     }
+    this.requestingStart = true;
+    this.startedDuringRequest = null;
     const request = rpc.request("turn/start", {
       threadId: this.threadId,
       input: items,
@@ -116,14 +143,18 @@ export class CodexRuntime implements AgentRuntime {
     const startedId = await this.track(
       request.then(
         (raw) => {
+          this.requestingStart = false;
           const id = turnResponseSchema.parse(raw).turn.id;
-          this.bindInput(id, input.id);
+          this.bindInput(id, inputId);
           return id;
         },
         (error: unknown) => {
-          // If a turn/started notification arrived while the request was failing, the turn is running and the input was taken.
-          if (!this.activeTurnId) throw error;
-          this.bindInput(this.activeTurnId, input.id);
+          this.requestingStart = false;
+          // A timed-out start may still have begun its turn; if one was seen to start meanwhile (and starts go one at a
+          // time), that turn is this input's. A start that was refused took nothing, whatever else is running.
+          const started = this.startedDuringRequest;
+          if (!started || classifyCodexError(error) !== "transient") throw error;
+          this.bindInput(started, inputId);
           return null;
         },
       ),
@@ -141,7 +172,12 @@ export class CodexRuntime implements AgentRuntime {
 
   async compact(): Promise<void> {
     await this.start();
-    await this.rpc!.request("thread/compact/start", { threadId: this.threadId });
+    const rpc = this.rpc;
+    if (!rpc) throw new Error("codex app-server is not running");
+    // A compaction is a turn too, so it waits its place in line.
+    const compaction = this.turnLine.then(() => rpc.request("thread/compact/start", { threadId: this.threadId }));
+    this.turnLine = compaction.catch(() => {});
+    await compaction;
   }
 
   private async startInner(): Promise<void> {
@@ -175,16 +211,19 @@ export class CodexRuntime implements AgentRuntime {
       if (this.generation !== generation) throw new Error("codex runtime was stopped while starting");
     };
     try {
+      this.initializing = rpc;
       await rpc.start();
       stopped();
+      this.initializing = null;
       this.rpc = rpc;
       await this.openThread(rpc);
       stopped();
     } catch (error) {
       // Leave nothing half-started behind (an app-server that never answered initialize included); the next attempt
-      // spawns a fresh one.
+      // spawns a fresh one. A stop() that overtook the start has already stopped it.
+      if (this.initializing === rpc) this.initializing = null;
       if (this.rpc === rpc) this.rpc = null;
-      await rpc.stop().catch(() => {});
+      if (this.generation === generation) await rpc.stop().catch(() => {});
       throw error;
     }
     await this.setState("idle");
@@ -281,6 +320,7 @@ export class CodexRuntime implements AgentRuntime {
       const turn = params.turn as { id?: string } | undefined;
       if (turn?.id) {
         this.activeTurnId = turn.id;
+        if (this.requestingStart) this.startedDuringRequest = turn.id;
         if (!this.turnInputs.has(turn.id)) this.turnInputs.set(turn.id, []);
       }
       await this.setState("running");
@@ -405,6 +445,15 @@ export function configuredCodexServers(codexHome: string): string[] {
     return [...config.matchAll(/^\[mcp_servers\.(?:"([^"]+)"|([A-Za-z0-9_-]+))\]/gm)].map((match) => match[1] ?? match[2]!);
   } catch {
     return [];
+  }
+}
+
+function isReadableFile(filePath: string): boolean {
+  try {
+    fs.accessSync(filePath, fs.constants.R_OK);
+    return fs.statSync(filePath).isFile();
+  } catch {
+    return false;
   }
 }
 
