@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { AgentStore, NewInboxItem } from "../agents/agentStore.js";
+import { AgentStore, type NewInboxItem } from "../agents/agentStore.js";
 import { AgentHub, decideWakes, type HubConfig } from "../agents/hub.js";
 import { AgentRegistry } from "../agents/registry.js";
 import { RuleJudge, type JudgeInput, type Verdict, type WakeJudge } from "../agents/judge.js";
@@ -688,6 +688,46 @@ describe("AgentHub", () => {
     await internals.launchSeat(internals.registry.spec("cody")!);
     await flush();
     expect(delivered("cody").map((input) => input.text).join("\n")).toContain("any update on the build?");
+  });
+
+  it("saves each Slack event before it joins the intake line, and clears it once it is handled", async () => {
+    await startHub(TEAM);
+    const store = (hub as unknown as { store: AgentStore }).store;
+    let judged!: () => void;
+    judge.gate = new Promise((resolve) => (judged = resolve));
+    judge.next = { for: ["cody"] };
+    const routed = slack.handler!(inbound({ text: "cody fix the deploy" }));
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    // Waits in the line behind the message, whose judgment is held open.
+    const reacted = slack.reactionHandler!({ channelId: "C1", itemTs: "1726700000.000100", emoji: "eyes", userId: "UHUMAN", eventTs: "1726700001.000100" });
+    expect(store.listPendingIntake().map((row) => row.kind)).toEqual(["message", "reaction"]);
+    judge.gate = null;
+    judged();
+    await Promise.all([routed, reacted]);
+    expect(store.listPendingIntake()).toHaveLength(0);
+    // One whose input could not be stored stays, to be taken in again at the next start.
+    const enqueue = store.enqueue.bind(store);
+    store.enqueue = (item: NewInboxItem) => {
+      if (item.agent === "cody") throw new Error("database or disk is full");
+      return enqueue(item);
+    };
+    await slack.handler!(inbound({ ts: "1726700002.000100", text: "cody and the tests" }));
+    expect(store.listPendingIntake()).toHaveLength(1);
+  });
+
+  it("takes in at start the events a hub saved but did not finish before it stopped", async () => {
+    // Saved twice, as Slack sends a mention: taken in once.
+    const saved = new AgentStore(path.join(dir, "agents.sqlite"));
+    const message = inbound({ text: "cody fix the deploy" });
+    saved.savePendingIntake("message", message);
+    saved.savePendingIntake("message", message);
+    saved.close();
+    judge.next = { for: ["cody"] };
+    await startHub(TEAM);
+    await flush();
+    expect(delivered("cody").map((input) => input.text).join("\n")).toContain("fix the deploy");
+    expect(delivered("cody")).toHaveLength(1);
+    expect((hub as unknown as { store: AgentStore }).store.listPendingIntake()).toHaveLength(0);
   });
 
   it("keeps the owner's name on a DM session the person renamed, offers starters from the live roster, and lets an agent mark a session waiting or done", async () => {

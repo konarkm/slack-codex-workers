@@ -63,6 +63,8 @@ export interface WebhookSubscription {
   enabled: boolean;
 }
 
+export type PendingIntakeKind = "message" | "reaction";
+
 export interface NewInboxItem {
   agent: string;
   sourceKey: string;
@@ -174,6 +176,12 @@ export class AgentStore {
         thread_ts TEXT NOT NULL,
         agent TEXT NOT NULL,
         PRIMARY KEY(channel_id, thread_ts)
+      );
+      CREATE TABLE IF NOT EXISTS pending_intake (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind TEXT NOT NULL,
+        event_json TEXT NOT NULL,
+        received_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS conversation_seen (
         agent TEXT NOT NULL,
@@ -457,6 +465,22 @@ export class AgentStore {
     this.db
       .prepare("INSERT OR IGNORE INTO message_index (channel_id, channel_type, thread_key, ts, author) VALUES (?, ?, ?, ?, ?)")
       .run(entry.channelId, entry.channelType, entry.threadKey, entry.ts, entry.author);
+  }
+
+  // Slack events as they arrive, before the hub has handled them. Slack is told it has them at once and will not send them
+  // again, so what is still here after a stop is taken in at the next start.
+  savePendingIntake(kind: PendingIntakeKind, event: unknown): number {
+    const result = this.db.prepare("INSERT INTO pending_intake (kind, event_json, received_at) VALUES (?, ?, ?)").run(kind, JSON.stringify(event), new Date().toISOString());
+    return Number(result.lastInsertRowid);
+  }
+
+  listPendingIntake(): Array<{ id: number; kind: PendingIntakeKind; event: unknown }> {
+    const rows = this.db.prepare("SELECT id, kind, event_json FROM pending_intake ORDER BY id").all() as Array<{ id: number; kind: PendingIntakeKind; event_json: string }>;
+    return rows.map((row) => ({ id: row.id, kind: row.kind, event: JSON.parse(row.event_json) as unknown }));
+  }
+
+  clearPendingIntake(id: number): void {
+    this.db.prepare("DELETE FROM pending_intake WHERE id = ?").run(id);
   }
 
   pruneMessageIndex(olderThanTs: string): void {

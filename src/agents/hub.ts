@@ -9,7 +9,7 @@ import { AgentSlackClient, type SlackHistoryMessage, type SlackInbound, type Sla
 import { prepareSlackAttachments, type AttachmentConfig } from "../slack/attachments.js";
 import { WebhookIngressServer, type WebhookServerConfig } from "../webhooks/server.js";
 import { ToolServer, type ToolServerConfig } from "./toolServer.js";
-import { AgentStore, type NewInboxItem } from "./agentStore.js";
+import { AgentStore, type NewInboxItem, type PendingIntakeKind } from "./agentStore.js";
 import { buildThreadContext, formatTime, mentionsUser, renderEnvelope, renderReactionEnvelope, renderSlackText, sourceKey, type EnvelopeAuthor, type ThreadContext, type WakeDecision } from "./envelope.js";
 import { buildInstructions } from "./instructions.js";
 import { RuleJudge, type JudgeInput, type JudgeMessage, type Verdict, type WakeJudge } from "./judge.js";
@@ -188,13 +188,9 @@ export class AgentHub {
     slack.onMessage(async (message) => {
       // Operator commands skip the line: a stop must not wait behind a large download.
       if (await this.handleOperatorCommand(message)) return;
-      this.intake = this.intake.then(() => this.handleInbound(message));
-      return this.intake;
+      return this.enterIntake("message", message);
     });
-    slack.onReaction(async (reaction) => {
-      this.intake = this.intake.then(() => this.handleReaction(reaction));
-      return this.intake;
-    });
+    slack.onReaction(async (reaction) => this.enterIntake("reaction", reaction));
     // The person's own title stays; the owning agent's name stays in front of it, since that is how sessions are told apart.
     slack.onSessionTitleChanged(async (change) => {
       const owner = this.store.dmOwner(change.channelId, change.threadTs);
@@ -221,6 +217,7 @@ export class AgentHub {
       }
     });
     await slack.identify();
+    const unfinished = this.store.listPendingIntake();
     this.store.pruneMessageIndex(((Date.now() - MESSAGE_INDEX_DAYS * 86_400_000) / 1000).toFixed(6));
 
     // Every harness fetches its tools from here at session start, so it is up before any mind is.
@@ -237,6 +234,8 @@ export class AgentHub {
     if (this.seats.size === 0) throw new Error("No agent could be started");
     // Every mind exists before the socket opens, so no event can arrive with nowhere to go.
     await slack.connect();
+    // What the last run took from Slack but did not finish; one it did finish is recognized and skipped.
+    for (const { id, kind, event } of unfinished) void this.enterIntake(kind, event as SlackInbound | SlackReaction, id);
     for (const { agent, error } of failed) await this.tellOperators(agent, `${agent} did not start: ${error}`);
     await Promise.allSettled([...this.seats.values()].map((seat) => seat.mind.start()));
 
@@ -614,19 +613,31 @@ export class AgentHub {
       editedAt: null,
       agentAuthor: author.spec.name,
     };
-    this.intake = this.intake.then(() => this.handleInbound(message));
+    void this.enterIntake("message", message);
+  }
+
+  // Slack is told it has an event the moment it arrives and will not send it again, so the event is saved before it joins
+  // the line, and dropped from the store once it has been handled. A stop in between leaves it for the next start.
+  private enterIntake(kind: PendingIntakeKind, event: SlackInbound | SlackReaction, savedId?: number): Promise<void> {
+    const id = savedId ?? this.store.savePendingIntake(kind, event);
+    this.intake = this.intake
+      .then(() => (kind === "message" ? this.handleInbound(event as SlackInbound) : this.handleReaction(event as SlackReaction)))
+      .then((done) => {
+        if (done) this.store.clearPendingIntake(id);
+      });
+    return this.intake;
   }
 
   // Slack events and agents' own posts arrive here, one at a time. Only the agents a message is said to receive it.
   // Each is handed what it missed in that conversation, and can read further back itself, the way a person catches up
   // when a notification pulls them in.
-  async handleInbound(message: SlackInbound): Promise<void> {
+  async handleInbound(message: SlackInbound): Promise<boolean> {
     const slack = this.requireSlack();
     try {
       if (message.actionToken) this.actionToken = message.actionToken;
       const key = sourceKey(message);
       // Slack sends a mention twice, and sends events again after a dropped connection.
-      if (this.store.hasSource(INTAKE, key)) return;
+      if (this.store.hasSource(INTAKE, key)) return true;
       const identity = slack.identity();
       const threadRoot = message.threadTs ?? message.ts;
       // In the app's direct message every thread is a session of its own, so a top-level message there opens one.
@@ -645,7 +656,7 @@ export class AgentHub {
       if (absentOwner?.retired) {
         await slack.postMessage({ channelId: message.channelId, threadTs: threadRoot, text: `_bridge_\n${absentOwner.name} is retired. Revive ${absentOwner.name} to pick this up, or start a new thread to talk to someone else.` });
         this.store.recordHandled(INTAKE, key, "");
-        return;
+        return true;
       }
       if (absentOwner) {
         // Not running right now (it failed to start, or is between seats): the message waits in its inbox until it is back.
@@ -654,11 +665,11 @@ export class AgentHub {
         const text = renderEnvelope({ message, channelName: null, author, decision, appUserId: identity.botUserId, names: new Map(), fileNotes, imageCount: 0, timezone: this.config.timezone, threadContext: null });
         this.store.enqueue({ agent: absentOwner.name, sourceKey: key, wake: true, priority: "next", text, imagePaths: [] });
         this.store.recordHandled(INTAKE, key, "");
-        return;
+        return true;
       }
       if (listeners.length === 0) {
         this.store.recordHandled(INTAKE, key, "");
-        return;
+        return true;
       }
       const names = new Map<string, string>();
       for (const match of message.text.matchAll(/<@([A-Z0-9]+)/g)) {
@@ -798,22 +809,24 @@ export class AgentHub {
         this.store.markSeen(spec.name, message.channelId, threadKey, message.ts);
       }
       if (stored) this.store.recordHandled(INTAKE, key, "");
+      return stored;
     } catch (error) {
       logError("inbound handling failed", { channelId: message.channelId, ts: message.ts, error: errorMessage(error) });
+      return false;
     }
   }
 
   // A reaction on an agent's own message always reaches that agent. Whether a thumbs-up needs anything is for the agent,
   // which knows what it said and why, to decide.
-  async handleReaction(reaction: SlackReaction): Promise<void> {
+  async handleReaction(reaction: SlackReaction): Promise<boolean> {
     const slack = this.requireSlack();
     try {
       const target = await slack.lookupMessage(reaction.channelId, reaction.itemTs);
-      if (!target || target.botId !== slack.identity().botId || !target.username) return;
+      if (!target || target.botId !== slack.identity().botId || !target.username) return true;
       const seat = this.seats.get(target.username);
-      if (!seat) return;
+      if (!seat) return true;
       const key = `slack:${reaction.channelId}:${reaction.itemTs}:reaction:${reaction.emoji}:${reaction.userId}:${reaction.eventTs}`;
-      if (this.store.hasSource(seat.spec.name, key)) return;
+      if (this.store.hasSource(seat.spec.name, key)) return true;
 
       const person = await slack.getPerson(reaction.userId);
       const author: EnvelopeAuthor = { id: person.id, name: person.name, kind: person.isBot ? "app" : "human" };
@@ -836,8 +849,10 @@ export class AgentHub {
       seat.statusThreads.set(`${reaction.channelId}:${threadRoot}`, { channelId: reaction.channelId, threadTs: threadRoot });
       void slack.setThreadStatus(reaction.channelId, threadRoot, "processing", personaOf(seat.spec));
       await this.handOver(seat, { sourceKey: key, wake: true, priority: "next", text, imagePaths: [] }, { channelId: reaction.channelId, threadTs: threadRoot });
+      return true;
     } catch (error) {
       logError("reaction handling failed", { channelId: reaction.channelId, ts: reaction.itemTs, error: errorMessage(error) });
+      return false;
     }
   }
 
