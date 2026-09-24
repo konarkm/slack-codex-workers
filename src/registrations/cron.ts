@@ -109,9 +109,10 @@ function parseField(value: string, spec: CronFieldSpec): ParsedCronField {
   if (set.size === 0) {
     throw new Error(`Invalid cron field: ${value}`);
   }
+  // As in Vixie cron, a field that starts with "*" (such as "*/2") counts as a wildcard for day-of-month/day-of-week matching.
   return {
     values: set,
-    isWildcard: false,
+    isWildcard: trimmed.startsWith("*"),
   };
 }
 

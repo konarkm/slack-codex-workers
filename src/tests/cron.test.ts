@@ -42,6 +42,15 @@ describe("cron schedule matching", () => {
     expect(match?.toISOString()).toBe("2026-01-05T09:00:00.000Z");
   });
 
+  it("treats a stepped wildcard day field like a wildcard, as cron does", () => {
+    // Monday 2026-09-21 noon to Tuesday noon: a Monday-only schedule has no match in it.
+    const since = new Date("2026-09-21T12:00:00.000Z");
+    const now = new Date("2026-09-22T12:00:00.000Z");
+    expect(findLatestMatchingCronMinute("0 9 * * 1", "UTC", since, now)).toBeNull();
+    expect(findLatestMatchingCronMinute("0 9 */1 * 1", "UTC", since, now)).toBeNull();
+    expect(findLatestMatchingCronMinute("0 9 * * */1", "UTC", since, now)?.toISOString()).toBe("2026-09-22T09:00:00.000Z");
+  });
+
   it("matches using the provided timezone", () => {
     const match = findLatestMatchingCronMinute(
       "0 9 * * *",
