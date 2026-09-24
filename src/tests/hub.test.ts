@@ -12,12 +12,15 @@ class FakeRuntime implements AgentRuntime {
   delivered: RuntimeInput[] = [];
   unconfirmed: string[] = [];
   interrupted = 0;
+  // Holds stop() open until released, to widen the window while a seat is being replaced.
+  stopGate: Promise<void> | null = null;
   private current: RuntimeState = "down";
   constructor(readonly options: RuntimeOptions) {}
   async start(): Promise<void> {
     if (this.current === "down") await this.set("idle");
   }
   async stop(): Promise<void> {
+    await this.stopGate;
     await this.set("down");
   }
   async deliver(input: RuntimeInput): Promise<void> {
@@ -135,9 +138,12 @@ class FakeSlack {
 class ScriptedJudge implements WakeJudge {
   inputs: JudgeInput[] = [];
   next: { for?: string[]; stop?: string[]; urgency?: Verdict["urgency"] } = {};
+  // Holds the judgment open until released, to widen the window between routing and delivery.
+  gate: Promise<void> | null = null;
   async judge(input: JudgeInput): Promise<Verdict> {
     this.inputs.push(input);
     const script = this.next;
+    await this.gate;
     return {
       needs: new Map(input.agents.map((agent) => [agent.name, script.for?.includes(agent.name) ? 0.95 : 0.03])),
       stop: new Map(input.agents.filter((agent) => agent.working).map((agent) => [agent.name, script.stop?.includes(agent.name) ? 0.95 : 0.01])),
@@ -724,6 +730,35 @@ describe("AgentHub", () => {
     await slack.handler!(inbound({ channelId: "D1", channelType: "im", text: ".delete scout" }));
     expect(slack.posted.at(-1)!.text).toContain("deleted scout");
     expect(fs.existsSync(path.join(dir, "homes", "scout", "rex"))).toBe(true);
+  });
+
+  it("hands a message routed while its agent's seat is replaced to the seat that is live, at once", async () => {
+    await startHub(TEAM);
+    const ada = runtimes.get("ada")!;
+    // Replaced while the judgment is out.
+    let judged!: () => void;
+    judge.gate = new Promise((resolve) => (judged = resolve));
+    judge.next = { for: ["cody"] };
+    const routed = slack.handler!(inbound({ text: "cody, please look at the build" }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await ada.tool("update_agent").handler({ name: "cody", title: "release manager" } as never);
+    const replaced = runtimes.get("cody")!;
+    judge.gate = null;
+    judged();
+    await routed;
+    expect(replaced.delivered).toHaveLength(1);
+    // Arriving while the old seat is still stopping.
+    let stopped!: () => void;
+    replaced.stopGate = new Promise((resolve) => (stopped = resolve));
+    const updating = ada.tool("update_agent").handler({ name: "cody", title: "release captain" } as never);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await slack.handler!(inbound({ ts: "1726700001.000100", text: "cody, and the tests?" }));
+    stopped();
+    await updating;
+    await flush();
+    const latest = runtimes.get("cody")!;
+    expect(latest).not.toBe(replaced);
+    expect(latest.delivered.map((input) => input.text).join("\n")).toContain("and the tests?");
   });
 });
 

@@ -9,7 +9,7 @@ import { AgentSlackClient, type SlackHistoryMessage, type SlackInbound, type Sla
 import { prepareSlackAttachments, type AttachmentConfig } from "../slack/attachments.js";
 import { WebhookIngressServer, type WebhookServerConfig } from "../webhooks/server.js";
 import { ToolServer, type ToolServerConfig } from "./toolServer.js";
-import { AgentStore } from "./agentStore.js";
+import { AgentStore, type NewInboxItem } from "./agentStore.js";
 import { buildThreadContext, formatTime, mentionsUser, renderEnvelope, renderReactionEnvelope, renderSlackText, sourceKey, type EnvelopeAuthor, type ThreadContext, type WakeDecision } from "./envelope.js";
 import { buildInstructions } from "./instructions.js";
 import { RuleJudge, type JudgeInput, type JudgeMessage, type Verdict, type WakeJudge } from "./judge.js";
@@ -510,9 +510,10 @@ export class AgentHub {
     });
   }
 
-  // Stops this seat only: if the agent was revived or restarted meanwhile, its newer seat is left alone.
-  private async stopSeatInstance(seat: Seat): Promise<void> {
-    if (this.seats.get(seat.spec.name) === seat) this.seats.delete(seat.spec.name);
+  // Stops this seat only: if the agent was revived or restarted meanwhile, its newer seat is left alone. A seat being
+  // replaced stays routable while it stops, so what reaches it meanwhile waits in the inbox its successor reads.
+  private async stopSeatInstance(seat: Seat, replacing = false): Promise<void> {
+    if (!replacing && this.seats.get(seat.spec.name) === seat) this.seats.delete(seat.spec.name);
     await seat.mind.stop();
     this.toolServer.revoke(seat.toolToken);
   }
@@ -528,8 +529,15 @@ export class AgentHub {
         this.pendingRestart.add(spec.name);
         return;
       }
-      if (existing) await this.stopSeatInstance(existing);
-      const seat = this.startSeat(spec);
+      if (existing) await this.stopSeatInstance(existing, true);
+      let seat: Seat;
+      try {
+        seat = this.startSeat(spec);
+      } catch (error) {
+        // With no successor, the stopped seat must not go on taking input.
+        if (existing && this.seats.get(spec.name) === existing) this.seats.delete(spec.name);
+        throw error;
+      }
       await seat.mind.start();
     });
   }
@@ -738,9 +746,7 @@ export class AgentHub {
           alsoWoken: woken.filter((other) => other.seat !== seat).map((other) => other.seat.spec.name),
           viewing: await this.describeViewing(message),
         });
-        await seat.mind
-          .receive({ sourceKey: key, wake: true, priority: verdict.urgency, text, imagePaths })
-          .catch((error) => logWarn("input queued; the agent could not take it yet", { agent: spec.name, error: errorMessage(error) }));
+        await this.handOver(seat, { sourceKey: key, wake: true, priority: verdict.urgency, text, imagePaths }, { channelId: message.channelId, threadTs: threadRoot });
         this.store.markSeen(spec.name, message.channelId, threadKey, message.ts);
       }
       this.store.recordHandled(INTAKE, key, "");
@@ -781,12 +787,24 @@ export class AgentHub {
       });
       seat.statusThreads.set(`${reaction.channelId}:${threadRoot}`, { channelId: reaction.channelId, threadTs: threadRoot });
       void slack.setThreadStatus(reaction.channelId, threadRoot, "processing", personaOf(seat.spec));
-      await seat.mind
-        .receive({ sourceKey: key, wake: true, priority: "next", text, imagePaths: [] })
-        .catch((error) => logWarn("input queued; the agent could not take it yet", { agent: seat.spec.name, error: errorMessage(error) }));
+      await this.handOver(seat, { sourceKey: key, wake: true, priority: "next", text, imagePaths: [] }, { channelId: reaction.channelId, threadTs: threadRoot });
     } catch (error) {
       logError("reaction handling failed", { channelId: reaction.channelId, ts: reaction.itemTs, error: errorMessage(error) });
     }
+  }
+
+  // Routing takes a while, and the agent's seat may be replaced meanwhile, so the input goes to the seat it has now. An
+  // agent between seats finds it in its inbox when the next one starts; a retired one does not hear it.
+  private async handOver(routed: Seat, input: Omit<NewInboxItem, "agent">, thread: { channelId: string; threadTs: string }): Promise<void> {
+    const agent = routed.spec.name;
+    const seat = this.seats.get(agent);
+    if (!seat) {
+      if (this.registry?.spec(agent)?.retired === false) this.store.enqueue({ ...input, agent });
+      return;
+    }
+    // The working indicator shown at routing is cleared when this seat's turn ends.
+    if (seat !== routed) seat.statusThreads.set(`${thread.channelId}:${thread.threadTs}`, thread);
+    await seat.mind.receive(input).catch((error) => logWarn("input queued; the agent could not take it yet", { agent, error: errorMessage(error) }));
   }
 
   // What the judgment model sees as "what was just said": the conversation itself, and for a channel's main line also
