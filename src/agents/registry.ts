@@ -122,16 +122,21 @@ export class AgentRegistry {
 
   // Changes what an agent is: its role, instructions, model, icon. Instructions given as text replace the agent's own file.
   update(name: string, patch: { title?: string; model?: string | null; effort?: string | null; icon?: string; retired?: boolean; retiredReason?: string }, instructionsText?: string): AgentSpec {
-    const entry = this.file.agents.find((candidate) => candidate.name === name);
-    if (!entry) throw new Error(`No agent named ${name}.`);
-    if (patch.title !== undefined) entry.title = patch.title;
-    if (patch.icon !== undefined) entry.icon = patch.icon;
-    if (patch.model !== undefined) entry.model = patch.model ?? undefined;
-    if (patch.effort !== undefined) entry.effort = patch.effort ?? undefined;
+    const index = this.file.agents.findIndex((candidate) => candidate.name === name);
+    if (index < 0) throw new Error(`No agent named ${name}.`);
+    const changed = { ...this.file.agents[index]! };
+    if (patch.title !== undefined) changed.title = patch.title;
+    // An empty icon clears it.
+    if (patch.icon !== undefined) changed.icon = patch.icon || undefined;
+    if (patch.model !== undefined) changed.model = patch.model ?? undefined;
+    if (patch.effort !== undefined) changed.effort = patch.effort ?? undefined;
     if (patch.retired !== undefined) {
-      entry.retired = patch.retired;
-      entry.retiredReason = patch.retired ? patch.retiredReason : undefined;
+      changed.retired = patch.retired;
+      changed.retiredReason = patch.retired ? patch.retiredReason : undefined;
     }
+    // Checked as `add` checks a new entry: a bad value fails now, not when the file is next loaded at start.
+    const entry = agentSchema.parse(changed);
+    this.file.agents[index] = entry;
     if (instructionsText?.trim()) {
       const instructionsPath = entry.instructions ? path.resolve(expandHome(entry.instructions)) : path.join(this.agentsRoot, entry.name, "AGENT.md");
       fs.mkdirSync(path.dirname(instructionsPath), { recursive: true });

@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AgentHub, decideWakes, type HubConfig } from "../agents/hub.js";
+import { AgentRegistry } from "../agents/registry.js";
 import { RuleJudge, type JudgeInput, type Verdict, type WakeJudge } from "../agents/judge.js";
 import { DEFAULT_DENY_TOOLS, type AgentRuntime, type AgentSpec, type RuntimeInput, type RuntimeOptions, type RuntimeState } from "../agents/types.js";
 import type { AgentSlackClient, SlackInbound, SlackPersona, SlackReaction } from "../slack/agentSlack.js";
@@ -11,12 +12,16 @@ class FakeRuntime implements AgentRuntime {
   delivered: RuntimeInput[] = [];
   unconfirmed: string[] = [];
   interrupted = 0;
+  interruptError: Error | null = null;
+  // Holds stop() open until released, to widen the window while a seat is being replaced.
+  stopGate: Promise<void> | null = null;
   private current: RuntimeState = "down";
   constructor(readonly options: RuntimeOptions) {}
   async start(): Promise<void> {
     if (this.current === "down") await this.set("idle");
   }
   async stop(): Promise<void> {
+    await this.stopGate;
     await this.set("down");
   }
   async deliver(input: RuntimeInput): Promise<void> {
@@ -27,6 +32,7 @@ class FakeRuntime implements AgentRuntime {
   }
   async interrupt(): Promise<void> {
     this.interrupted += 1;
+    if (this.interruptError) throw this.interruptError;
   }
   async compact(): Promise<void> {}
   state(): RuntimeState {
@@ -134,9 +140,12 @@ class FakeSlack {
 class ScriptedJudge implements WakeJudge {
   inputs: JudgeInput[] = [];
   next: { for?: string[]; stop?: string[]; urgency?: Verdict["urgency"] } = {};
+  // Holds the judgment open until released, to widen the window between routing and delivery.
+  gate: Promise<void> | null = null;
   async judge(input: JudgeInput): Promise<Verdict> {
     this.inputs.push(input);
     const script = this.next;
+    await this.gate;
     return {
       needs: new Map(input.agents.map((agent) => [agent.name, script.for?.includes(agent.name) ? 0.95 : 0.03])),
       stop: new Map(input.agents.filter((agent) => agent.working).map((agent) => [agent.name, script.stop?.includes(agent.name) ? 0.95 : 0.01])),
@@ -693,6 +702,135 @@ describe("AgentHub", () => {
       }
     }
     expect(slack.posted.some((post) => post.channelId === "D-UHUMAN" && post.text.includes("_bridge (ada)_") && post.text.includes("stopped trying"))).toBe(true);
+  });
+
+  it("clears an agent's icon when it is updated to an empty one, and the roster still loads after", async () => {
+    await startHub(TEAM);
+    expect(await runtimes.get("cody")!.tool("update_agent").handler({ name: "ada", icon: "" } as never)).toContain("updated ada");
+    expect(new AgentRegistry(path.join(dir, "agents.json"), path.join(dir, "homes")).spec("ada")!.icon).toBeNull();
+  });
+
+  it("starts the other agents, and tells the operators, when one agent's seat cannot be built", async () => {
+    // An ssh agent with no tool-server address cannot be given its tools.
+    await startHub([...TEAM, { name: "remote", runtime: "codex", title: "builder", host: "ssh:grok-bot", cwd: "/home/x/agent" }]);
+    expect(runtimes.has("ada")).toBe(true);
+    expect(runtimes.has("cody")).toBe(true);
+    expect(slack.posted.some((post) => post.channelId === "D-UHUMAN" && post.text.includes("remote did not start"))).toBe(true);
+  });
+
+  it("deletes only the home the bridge made for an agent, never a directory another agent works in", async () => {
+    const adaHome = path.join(dir, "homes", "ada");
+    await startHub([
+      { name: "ada", runtime: "claude", cwd: adaHome },
+      { name: "cody", runtime: "codex", cwd: adaHome },
+      { name: "scout", runtime: "claude" },
+      { name: "rex", runtime: "claude", cwd: path.join(dir, "homes", "scout", "rex") },
+    ]);
+    fs.writeFileSync(path.join(adaHome, "notes.md"), "ada's notes");
+    expect(await runtimes.get("ada")!.tool("delete_agent").handler({ name: "cody", reason: "x", confirm: true } as never)).toBe("deleted cody.");
+    expect(fs.existsSync(path.join(adaHome, "notes.md"))).toBe(true);
+    await slack.handler!(inbound({ channelId: "D1", channelType: "im", text: ".delete scout" }));
+    expect(slack.posted.at(-1)!.text).toContain("deleted scout");
+    expect(fs.existsSync(path.join(dir, "homes", "scout", "rex"))).toBe(true);
+  });
+
+  it("hands a message routed while its agent's seat is replaced to the seat that is live, at once", async () => {
+    await startHub(TEAM);
+    const ada = runtimes.get("ada")!;
+    // Replaced while the judgment is out.
+    let judged!: () => void;
+    judge.gate = new Promise((resolve) => (judged = resolve));
+    judge.next = { for: ["cody"] };
+    const routed = slack.handler!(inbound({ text: "cody, please look at the build" }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await ada.tool("update_agent").handler({ name: "cody", title: "release manager" } as never);
+    const replaced = runtimes.get("cody")!;
+    judge.gate = null;
+    judged();
+    await routed;
+    expect(replaced.delivered).toHaveLength(1);
+    // Arriving while the old seat is still stopping.
+    let stopped!: () => void;
+    replaced.stopGate = new Promise((resolve) => (stopped = resolve));
+    const updating = ada.tool("update_agent").handler({ name: "cody", title: "release captain" } as never);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await slack.handler!(inbound({ ts: "1726700001.000100", text: "cody, and the tests?" }));
+    stopped();
+    await updating;
+    await flush();
+    const latest = runtimes.get("cody")!;
+    expect(latest).not.toBe(replaced);
+    expect(latest.delivered.map((input) => input.text).join("\n")).toContain("and the tests?");
+  });
+
+  it("does not queue scheduled wakes for a retired agent", async () => {
+    await startHub(TEAM);
+    await runtimes.get("cody")!.tool("schedule_wake").handler({ every_minutes: 5, note: "check the build" } as never);
+    await runtimes.get("ada")!.tool("retire_agent").handler({ name: "cody", reason: "done" } as never);
+    const internals = hub as unknown as { scheduler: { tick(now: Date): Promise<number> }; store: { listQueued(agent: string): unknown[] } };
+    await internals.scheduler.tick(new Date(Date.now() + 10 * 60_000));
+    expect(internals.store.listQueued("cody")).toHaveLength(0);
+  });
+
+  it("acts on the only running agent only when an operator command names nobody", async () => {
+    await startHub([TEAM[0], { ...TEAM[1], retired: true }]);
+    const command = (ts: string, text: string) => slack.handler!(inbound({ channelId: "D1", channelType: "im", ts, text }));
+    await command("1726700010.000100", ".retire cody");
+    expect(slack.posted.at(-1)!.text).toContain("cody is not running");
+    await command("1726700011.000100", ".reset typo");
+    expect(slack.posted.at(-1)!.text).toContain("no agent named typo");
+    expect(JSON.parse(fs.readFileSync(path.join(dir, "agents.json"), "utf8")).agents.find((entry: { name: string }) => entry.name === "ada")).not.toHaveProperty("retired");
+    await command("1726700012.000100", ".stop");
+    expect(runtimes.get("ada")!.interrupted).toBe(1);
+  });
+
+  it("will not let an operator retire or delete the last agent listening", async () => {
+    await startHub(TEAM);
+    const command = (ts: string, text: string) => slack.handler!(inbound({ channelId: "D1", channelType: "im", ts, text }));
+    await command("1726700010.000100", ".retire all");
+    expect(slack.posted.at(-1)!.text).toContain("nobody would hear anyone");
+    await command("1726700011.000100", ".retire ada");
+    expect(slack.posted.at(-1)!.text).toContain("retired ada");
+    await command("1726700012.000100", ".retire cody");
+    expect(slack.posted.at(-1)!.text).toContain("nobody would hear anyone");
+    await command("1726700013.000100", ".delete cody");
+    expect(slack.posted.at(-1)!.text).toContain("only agent listening");
+    expect((hub as unknown as { seats: Map<string, unknown> }).seats.has("cody")).toBe(true);
+  });
+
+  it("still delivers a message when stopping the agent it names fails", async () => {
+    await startHub(TEAM);
+    judge.next = { for: ["cody"] };
+    await slack.handler!(inbound({ text: "cody rebuild everything" }));
+    runtimes.get("cody")!.interruptError = new Error("turn/interrupt timed out");
+    judge.next = { for: ["cody", "ada"], stop: ["cody"] };
+    await slack.handler!(inbound({ ts: "1726700002.000100", text: "cody stop, ada take over" }));
+    expect(delivered("ada")).toHaveLength(1);
+    expect(delivered("cody")).toHaveLength(2);
+  });
+
+  it("leaves a session title the bridge set alone", async () => {
+    await startHub(TEAM);
+    judge.next = { for: ["cody"] };
+    await slack.handler!(inbound({ channelId: "D1", channelType: "im", text: "cody look at the build" }));
+    await slack.titleHandler!({ channelId: "D1", threadTs: "1726700000.000100", title: "cody", userId: null });
+    await slack.titleHandler!({ channelId: "D1", threadTs: "1726700000.000100", title: "Build", userId: "UAPP" });
+    expect(slack.titles).toEqual([{ channelId: "D1", threadTs: "1726700000.000100", title: "cody" }]);
+  });
+
+  it("keeps an agent that retired itself retired when it also updates itself in the same turn", async () => {
+    await startHub(TEAM);
+    judge.next = { for: ["cody"] };
+    await slack.handler!(inbound({ text: "cody wrap up" }));
+    const cody = runtimes.get("cody")!;
+    await cody.tool("retire_agent").handler({ name: "cody", reason: "job done" } as never);
+    await cody.tool("update_agent").handler({ name: "cody", title: "former builder" } as never);
+    await cody.finishTurn();
+    await flush();
+    expect((hub as unknown as { seats: Map<string, unknown> }).seats.has("cody")).toBe(false);
+    judge.next = { for: ["cody"] };
+    await slack.handler!(inbound({ ts: "1726700001.000100", text: "cody one more thing" }));
+    expect(runtimes.get("cody")!.delivered.some((input) => input.text.includes("one more thing"))).toBe(false);
   });
 });
 

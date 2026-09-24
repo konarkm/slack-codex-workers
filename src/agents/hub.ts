@@ -9,7 +9,7 @@ import { AgentSlackClient, type SlackHistoryMessage, type SlackInbound, type Sla
 import { prepareSlackAttachments, type AttachmentConfig } from "../slack/attachments.js";
 import { WebhookIngressServer, type WebhookServerConfig } from "../webhooks/server.js";
 import { ToolServer, type ToolServerConfig } from "./toolServer.js";
-import { AgentStore } from "./agentStore.js";
+import { AgentStore, type NewInboxItem } from "./agentStore.js";
 import { buildThreadContext, formatTime, mentionsUser, renderEnvelope, renderReactionEnvelope, renderSlackText, sourceKey, type EnvelopeAuthor, type ThreadContext, type WakeDecision } from "./envelope.js";
 import { buildInstructions } from "./instructions.js";
 import { RuleJudge, type JudgeInput, type JudgeMessage, type Verdict, type WakeJudge } from "./judge.js";
@@ -153,7 +153,10 @@ export class AgentHub {
   ) {
     this.store = new AgentStore(config.databasePath);
     const deliverWake = async (agent: string, item: { sourceKey: string; text: string }): Promise<void> => {
-      if (!this.registry?.has(agent)) throw new Error(`agent ${agent} is not in the registry`);
+      const known = this.registry?.spec(agent);
+      if (!known) throw new Error(`agent ${agent} is not in the registry`);
+      // A retired agent hears nothing, so its wakes do not pile up to arrive all at once when it is revived.
+      if (known.retired) return;
       const input = { ...item, wake: true, priority: "later" as const, imagePaths: [] };
       const seat = this.seats.get(agent);
       // The inbox is the durable step. An agent that is down finds the wake waiting when it starts.
@@ -197,6 +200,8 @@ export class AgentHub {
     slack.onSessionTitleChanged(async (change) => {
       const owner = this.store.dmOwner(change.channelId, change.threadTs);
       if (!owner || change.title.toLowerCase().startsWith(`${owner} ·`)) return;
+      // The bridge's own rename, a new session titled with the bare owner name, may come back as an event.
+      if (change.title.toLowerCase() === owner || change.userId === slack.identity().botUserId) return;
       await slack.renameSession(change.channelId, change.threadTs, `${owner} · ${change.title}`.slice(0, 200)).catch(() => {});
     });
     // Starters at the top of the DM, built from whoever is on the roster right now.
@@ -222,7 +227,8 @@ export class AgentHub {
     // Every harness fetches its tools from here at session start, so it is up before any mind is.
     await this.toolServer.start();
     const active = specs.filter((spec) => !spec.retired);
-    const results = await Promise.allSettled(active.map((spec) => this.startSeat(spec)));
+    // Building a seat can throw at once (an ssh agent with no route to the tool server); that is this agent's failure alone.
+    const results = await Promise.allSettled(active.map(async (spec) => this.startSeat(spec)));
     const failed: Array<{ agent: string; error: string }> = [];
     results.forEach((result, index) => {
       if (result.status !== "rejected") return;
@@ -350,7 +356,7 @@ export class AgentHub {
           instructions: z.string().min(1).optional().describe("New standing instructions, replacing the old ones in full."),
           model: z.string().min(1).optional().describe('New model for its runtime, or "default" for the runtime\'s default.'),
           effort: effortShape,
-          icon: z.string().optional(),
+          icon: z.string().optional().describe('Emoji name such as :satellite:, or an image URL. "" clears it.'),
         },
         handler: async (args) => {
           const registry = this.requireRegistry();
@@ -365,8 +371,8 @@ export class AgentHub {
             args.instructions,
           );
           if (args.name === seat.spec.name) {
-            // Its own restart waits for this turn to end, or the tool result could never come back.
-            seat.retiring = false;
+            // Its own restart waits for this turn to end, or the tool result could never come back. An agent that retired
+            // itself earlier in the turn stays retired.
             this.pendingRestart.add(args.name);
             return `updated ${spec.name}. The change takes effect when this turn ends.`;
           }
@@ -422,10 +428,9 @@ export class AgentHub {
           if (!registry.has(args.name)) return `no agent named ${args.name}`;
           if (this.liveAgents().filter((name) => name !== args.name).length < 1) return `${args.name} is the only agent listening; create another first.`;
           await this.stopSeat(args.name);
-          const spec = registry.remove(args.name);
+          registry.remove(args.name);
           this.store.forgetAgent(args.name);
-          // Only a home the bridge made is the bridge's to remove.
-          if (spec.host.kind === "local" && spec.cwd.startsWith(`${this.config.agentsRoot}${path.sep}`)) fs.rmSync(spec.cwd, { recursive: true, force: true });
+          this.removeHome(args.name);
           logInfo("agent deleted", { agent: args.name, by: seat.spec.name, reason: args.reason });
           return `deleted ${args.name}.`;
         },
@@ -481,6 +486,15 @@ export class AgentHub {
     return this.registry;
   }
 
+  // Only the home the bridge made for a deleted agent is the bridge's to remove, and not while another agent works in it.
+  private removeHome(name: string): void {
+    const home = path.resolve(this.config.agentsRoot, name);
+    const inUse = this.requireRegistry()
+      .specs()
+      .some((other) => other.cwd === home || other.cwd.startsWith(`${home}${path.sep}`));
+    if (!inUse) fs.rmSync(home, { recursive: true, force: true });
+  }
+
   private liveAgents(): string[] {
     return [...this.seats.keys()].filter((name) => !this.seats.get(name)!.retiring);
   }
@@ -501,9 +515,10 @@ export class AgentHub {
     });
   }
 
-  // Stops this seat only: if the agent was revived or restarted meanwhile, its newer seat is left alone.
-  private async stopSeatInstance(seat: Seat): Promise<void> {
-    if (this.seats.get(seat.spec.name) === seat) this.seats.delete(seat.spec.name);
+  // Stops this seat only: if the agent was revived or restarted meanwhile, its newer seat is left alone. A seat being
+  // replaced stays routable while it stops, so what reaches it meanwhile waits in the inbox its successor reads.
+  private async stopSeatInstance(seat: Seat, replacing = false): Promise<void> {
+    if (!replacing && this.seats.get(seat.spec.name) === seat) this.seats.delete(seat.spec.name);
     await seat.mind.stop();
     this.toolServer.revoke(seat.toolToken);
   }
@@ -519,8 +534,15 @@ export class AgentHub {
         this.pendingRestart.add(spec.name);
         return;
       }
-      if (existing) await this.stopSeatInstance(existing);
-      const seat = this.startSeat(spec);
+      if (existing) await this.stopSeatInstance(existing, true);
+      let seat: Seat;
+      try {
+        seat = this.startSeat(spec);
+      } catch (error) {
+        // With no successor, the stopped seat must not go on taking input.
+        if (existing && this.seats.get(spec.name) === existing) this.seats.delete(spec.name);
+        throw error;
+      }
       await seat.mind.start();
     });
   }
@@ -545,6 +567,7 @@ export class AgentHub {
     // An agent that changed or retired itself during the turn is dealt with now that the turn is over.
     if (seat.retiring) {
       logInfo("agent retired itself", { agent: seat.spec.name });
+      this.pendingRestart.delete(seat.spec.name);
       void this.serial(seat.spec.name, () => this.stopSeatInstance(seat));
     } else if (this.pendingRestart.delete(seat.spec.name)) {
       const spec = this.requireRegistry().spec(seat.spec.name);
@@ -673,7 +696,8 @@ export class AgentHub {
         // A person telling a working agent to stop, in plain words, stops it. The message still reaches it, so it knows why.
         if (author.kind === "human" && (verdict.stop.get(spec.name) ?? 0) >= STOP_THRESHOLD) {
           logInfo("stop requested in conversation", { agent: spec.name });
-          await seat.mind.interrupt();
+          // A stop that fails must not keep the message from anyone it is for.
+          await seat.mind.interrupt().catch((error) => logWarn("stop in conversation failed", { agent: spec.name, error: errorMessage(error) }));
           decision = { ...decision, wake: true, reason: decision.wake ? decision.reason : "addressed" };
         }
         if (!decision.wake) continue;
@@ -729,9 +753,7 @@ export class AgentHub {
           alsoWoken: woken.filter((other) => other.seat !== seat).map((other) => other.seat.spec.name),
           viewing: await this.describeViewing(message),
         });
-        await seat.mind
-          .receive({ sourceKey: key, wake: true, priority: verdict.urgency, text, imagePaths })
-          .catch((error) => logWarn("input queued; the agent could not take it yet", { agent: spec.name, error: errorMessage(error) }));
+        await this.handOver(seat, { sourceKey: key, wake: true, priority: verdict.urgency, text, imagePaths }, { channelId: message.channelId, threadTs: threadRoot });
         this.store.markSeen(spec.name, message.channelId, threadKey, message.ts);
       }
       this.store.recordHandled(INTAKE, key, "");
@@ -772,12 +794,24 @@ export class AgentHub {
       });
       seat.statusThreads.set(`${reaction.channelId}:${threadRoot}`, { channelId: reaction.channelId, threadTs: threadRoot });
       void slack.setThreadStatus(reaction.channelId, threadRoot, "processing", personaOf(seat.spec));
-      await seat.mind
-        .receive({ sourceKey: key, wake: true, priority: "next", text, imagePaths: [] })
-        .catch((error) => logWarn("input queued; the agent could not take it yet", { agent: seat.spec.name, error: errorMessage(error) }));
+      await this.handOver(seat, { sourceKey: key, wake: true, priority: "next", text, imagePaths: [] }, { channelId: reaction.channelId, threadTs: threadRoot });
     } catch (error) {
       logError("reaction handling failed", { channelId: reaction.channelId, ts: reaction.itemTs, error: errorMessage(error) });
     }
+  }
+
+  // Routing takes a while, and the agent's seat may be replaced meanwhile, so the input goes to the seat it has now. An
+  // agent between seats finds it in its inbox when the next one starts; a retired one does not hear it.
+  private async handOver(routed: Seat, input: Omit<NewInboxItem, "agent">, thread: { channelId: string; threadTs: string }): Promise<void> {
+    const agent = routed.spec.name;
+    const seat = this.seats.get(agent);
+    if (!seat) {
+      if (this.registry?.spec(agent)?.retired === false) this.store.enqueue({ ...input, agent });
+      return;
+    }
+    // The working indicator shown at routing is cleared when this seat's turn ends.
+    if (seat !== routed) seat.statusThreads.set(`${thread.channelId}:${thread.threadTs}`, thread);
+    await seat.mind.receive(input).catch((error) => logWarn("input queued; the agent could not take it yet", { agent, error: errorMessage(error) }));
   }
 
   // What the judgment model sees as "what was just said": the conversation itself, and for a channel's main line also
@@ -900,11 +934,18 @@ export class AgentHub {
     // A redelivered command must not run twice.
     if (!this.store.recordHandled("_bridge", sourceKey(message), message.text)) return true;
 
-    const named = target ? this.seats.get(target.toLowerCase()) : undefined;
-    const targets = named ? [named] : target === "all" || command === ".status" || this.seats.size === 1 ? [...this.seats.values()] : [];
+    const name = target?.toLowerCase();
+    const named = name ? this.seats.get(name) : undefined;
+    // With one agent running, a command that names nobody is for it; a name that matches no running agent is for nobody.
+    const targets = named ? [named] : name === "all" || (!name && (command === ".status" || this.seats.size === 1)) ? [...this.seats.values()] : [];
+    // As with the tools, at least one agent must be left listening.
+    const remaining = this.liveAgents().filter((agent) => !targets.some((seat) => seat.spec.name === agent));
     let reply: string;
     if (targets.length === 0 && command !== ".revive" && command !== ".delete") {
-      reply = `Which agent? Try \`${command} <name>\` or \`${command} all\`. Agents: ${[...this.seats.keys()].join(", ")}`;
+      if (!name || name === "all") reply = `Which agent? Try \`${command} <name>\` or \`${command} all\`. Agents: ${[...this.seats.keys()].join(", ")}`;
+      else reply = this.registry?.has(name) ? `${name} is not running` : `no agent named ${name}`;
+    } else if (command === ".retire" && remaining.length === 0) {
+      reply = `${targets.map((seat) => seat.spec.name).join(", ")} would leave no agent listening, and nobody would hear anyone. Create or revive another first.`;
     } else if (command === ".status") {
       reply = targets
         .map((seat) => {
@@ -917,9 +958,9 @@ export class AgentHub {
         .join("\n");
     } else if (command === ".revive" || command === ".delete") {
       const registry = this.requireRegistry();
-      const name = target?.toLowerCase() ?? "";
-      const known = registry.spec(name);
-      if (!known) reply = `no agent named ${name}`;
+      const known = name ? registry.spec(name) : null;
+      if (!name || !known) reply = `no agent named ${name ?? ""}`;
+      else if (command === ".delete" && remaining.length === 0) reply = `${name} is the only agent listening; create or revive another first.`;
       else if (command === ".revive") {
         if (!known.retired) reply = `${name} is not retired`;
         else {
@@ -929,9 +970,9 @@ export class AgentHub {
         }
       } else {
         await this.stopSeat(name);
-        const spec = registry.remove(name);
+        registry.remove(name);
         this.store.forgetAgent(name);
-        if (spec.host.kind === "local" && spec.cwd.startsWith(`${this.config.agentsRoot}${path.sep}`)) fs.rmSync(spec.cwd, { recursive: true, force: true });
+        this.removeHome(name);
         reply = `deleted ${name}`;
       }
     } else {
