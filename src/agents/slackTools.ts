@@ -252,12 +252,12 @@ export function buildSlackTools(ctx: SlackToolContext): AgentTool[] {
     defineTool({
       name: "read_history",
       description:
-        "Read messages from a conversation you are in, oldest first. Pass thread_ts to read one thread. You only receive messages that arrive while you are a member, so use this to catch up on a thread or channel before acting on it.",
+        "Read the latest messages from a conversation you are in, listed oldest first. Pass thread_ts to read one thread. You only receive messages that arrive while you are a member, so use this to catch up on a thread or channel before acting on it.",
       shape: {
         channel,
         thread_ts: z.string().optional(),
         limit: z.number().int().min(1).max(200).optional().describe("Default 30."),
-        before: z.string().optional().describe("Only messages older than this ts."),
+        before: z.string().optional().describe("Only messages older than this ts. To page back, pass the oldest ts of the page you have."),
       },
       handler: async (args) => {
         if (!args.thread_ts && (await isDm(args.channel))) {

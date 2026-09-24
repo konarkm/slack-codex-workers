@@ -398,10 +398,20 @@ export class AgentSlackClient {
 
   async readHistory(args: { channelId: string; threadTs?: string | null; limit: number; before?: string | null }): Promise<SlackHistoryMessage[]> {
     const common = { token: this.botToken, channel: args.channelId, limit: args.limit, latest: args.before ?? undefined, inclusive: false };
-    const response = args.threadTs
-      ? await this.app.client.conversations.replies({ ...common, ts: args.threadTs })
-      : await this.app.client.conversations.history(common);
-    const messages = (response.messages ?? []) as Array<RawMessageEvent & { reply_count?: number }>;
+    type Raw = RawMessageEvent & { reply_count?: number };
+    let messages: Raw[];
+    if (args.threadTs) {
+      // Replies come oldest-first a page at a time, so the newest are on the last page. Page to it, keeping only the tail.
+      messages = [];
+      let cursor: string | undefined;
+      do {
+        const response = await this.app.client.conversations.replies({ ...common, ts: args.threadTs, limit: 200, cursor });
+        messages = [...messages, ...((response.messages ?? []) as Raw[])].slice(-args.limit);
+        cursor = response.response_metadata?.next_cursor || undefined;
+      } while (cursor);
+    } else {
+      messages = ((await this.app.client.conversations.history(common)).messages ?? []) as Raw[];
+    }
     const mapped = messages.map((message) => ({
       ts: message.ts ?? "",
       threadTs: message.thread_ts ?? null,
