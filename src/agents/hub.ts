@@ -350,7 +350,7 @@ export class AgentHub {
           instructions: z.string().min(1).optional().describe("New standing instructions, replacing the old ones in full."),
           model: z.string().min(1).optional().describe('New model for its runtime, or "default" for the runtime\'s default.'),
           effort: effortShape,
-          icon: z.string().optional(),
+          icon: z.string().optional().describe('Emoji name such as :satellite:, or an image URL. "" clears it.'),
         },
         handler: async (args) => {
           const registry = this.requireRegistry();

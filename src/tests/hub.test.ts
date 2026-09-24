@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AgentHub, decideWakes, type HubConfig } from "../agents/hub.js";
+import { AgentRegistry } from "../agents/registry.js";
 import { RuleJudge, type JudgeInput, type Verdict, type WakeJudge } from "../agents/judge.js";
 import { DEFAULT_DENY_TOOLS, type AgentRuntime, type AgentSpec, type RuntimeInput, type RuntimeOptions, type RuntimeState } from "../agents/types.js";
 import type { AgentSlackClient, SlackInbound, SlackPersona, SlackReaction } from "../slack/agentSlack.js";
@@ -693,6 +694,12 @@ describe("AgentHub", () => {
       }
     }
     expect(slack.posted.some((post) => post.channelId === "D-UHUMAN" && post.text.includes("_bridge (ada)_") && post.text.includes("stopped trying"))).toBe(true);
+  });
+
+  it("clears an agent's icon when it is updated to an empty one, and the roster still loads after", async () => {
+    await startHub(TEAM);
+    expect(await runtimes.get("cody")!.tool("update_agent").handler({ name: "ada", icon: "" } as never)).toContain("updated ada");
+    expect(new AgentRegistry(path.join(dir, "agents.json"), path.join(dir, "homes")).spec("ada")!.icon).toBeNull();
   });
 });
 
