@@ -61,12 +61,21 @@ async function renderHistory(slack: AgentSlackClient, ownName: string, messages:
 export function buildSlackTools(ctx: SlackToolContext): AgentTool[] {
   const { slack } = ctx;
   const me = ctx.persona.username;
-  const isDm = async (channelId: string): Promise<boolean> => (await slack.getConversation(channelId).catch(() => null))?.type === "im";
-  // Null when this agent may read or write in that DM thread; otherwise the reason it may not.
+  // Throws when Slack cannot say what the conversation is; guessing "not a DM" would open other agents' sessions.
+  const isDm = async (channelId: string): Promise<boolean> => (await slack.getConversation(channelId)).type === "im";
+  // Null when this agent may read or write in that DM thread; otherwise the reason it may not. Only DM sessions have
+  // owners, so a known owner settles it without asking Slack what the conversation is.
   const dmRefusal = async (channelId: string, threadRoot: string): Promise<string | null> => {
-    if (!(await isDm(channelId))) return null;
     const owner = ctx.dm.ownerOf(channelId, threadRoot);
     return owner && owner !== me ? `that direct-message thread is ${owner}'s session with the person, not yours. If you need something from it, ask ${owner} in a channel.` : null;
+  };
+  // The message itself, when this agent may change it; otherwise the reason it may not.
+  const ownMessage = async (channelId: string, ts: string): Promise<SlackHistoryMessage | string> => {
+    const message = await slack.lookupMessage(channelId, ts);
+    if (!message) return "no such message";
+    const refusal = await dmRefusal(channelId, message.threadTs ?? message.ts);
+    if (refusal) return refusal;
+    return message.botId === slack.identity().botId && message.username === me ? message : "that message is not yours; you can change only messages you sent.";
   };
   return [
     defineTool({
@@ -82,8 +91,9 @@ export function buildSlackTools(ctx: SlackToolContext): AgentTool[] {
       handler: async (args) => {
         const refusal = args.thread_ts ? await dmRefusal(args.channel, args.thread_ts) : null;
         if (refusal) return refusal;
+        const dm = await isDm(args.channel);
         const result = await slack.postMessage({ channelId: args.channel, text: args.text, threadTs: args.thread_ts ?? null, broadcast: args.broadcast, persona: ctx.persona });
-        if (await isDm(args.channel)) ctx.dm.claim(args.channel, args.thread_ts ?? result.ts);
+        if (dm) ctx.dm.claim(args.channel, args.thread_ts ?? result.ts);
         ctx.noteVisibleAction();
         ctx.recordThreadParticipation(args.channel, args.thread_ts ?? result.ts);
         ctx.afterSend({ channelId: args.channel, threadTs: args.thread_ts ?? null, ts: result.ts, text: args.text });
@@ -95,6 +105,10 @@ export function buildSlackTools(ctx: SlackToolContext): AgentTool[] {
       description: "Add an emoji reaction to a message as yourself. A reaction is a complete, visible acknowledgement when no words are needed.",
       shape: { channel, ts: messageTs, emoji: z.string().min(1).describe("Emoji name without colons, e.g. eyes, white_check_mark, +1.") },
       handler: async (args) => {
+        const message = await slack.lookupMessage(args.channel, args.ts);
+        if (!message) return "no such message";
+        const refusal = await dmRefusal(args.channel, message.threadTs ?? message.ts);
+        if (refusal) return refusal;
         await slack.addReaction(args.channel, args.ts, args.emoji);
         ctx.noteVisibleAction();
         return "reacted";
@@ -217,6 +231,8 @@ export function buildSlackTools(ctx: SlackToolContext): AgentTool[] {
       description: "Edit a message you sent earlier.",
       shape: { channel, ts: messageTs, text: z.string().min(1) },
       handler: async (args) => {
+        const own = await ownMessage(args.channel, args.ts);
+        if (typeof own === "string") return own;
         await slack.updateMessage(args.channel, args.ts, args.text);
         ctx.noteVisibleAction();
         return "edited";
@@ -227,6 +243,8 @@ export function buildSlackTools(ctx: SlackToolContext): AgentTool[] {
       description: "Delete a message you sent earlier.",
       shape: { channel, ts: messageTs },
       handler: async (args) => {
+        const own = await ownMessage(args.channel, args.ts);
+        if (typeof own === "string") return own;
         await slack.deleteMessage(args.channel, args.ts);
         return "deleted";
       },
@@ -242,14 +260,12 @@ export function buildSlackTools(ctx: SlackToolContext): AgentTool[] {
         before: z.string().optional().describe("Only messages older than this ts."),
       },
       handler: async (args) => {
-        if (await isDm(args.channel)) {
-          if (!args.thread_ts) {
-            const own = ctx.dm.sessions(args.channel);
-            return own.length > 0 ? `In the direct message you can read your own sessions. Pass one as thread_ts: ${own.join(", ")}` : "You have no sessions in this direct message yet.";
-          }
-          const refusal = await dmRefusal(args.channel, args.thread_ts);
-          if (refusal) return refusal;
+        if (!args.thread_ts && (await isDm(args.channel))) {
+          const own = ctx.dm.sessions(args.channel);
+          return own.length > 0 ? `In the direct message you can read your own sessions. Pass one as thread_ts: ${own.join(", ")}` : "You have no sessions in this direct message yet.";
         }
+        const refusal = args.thread_ts ? await dmRefusal(args.channel, args.thread_ts) : null;
+        if (refusal) return refusal;
         const messages = await slack.readHistory({ channelId: args.channel, threadTs: args.thread_ts ?? null, limit: args.limit ?? 30, before: args.before ?? null });
         const newest = messages.at(-1);
         // Reading the latest page is catching up.
@@ -304,6 +320,8 @@ export function buildSlackTools(ctx: SlackToolContext): AgentTool[] {
       },
       handler: async (args) => {
         if (!ctx.canUploadLocalFiles) throw new Error("File upload is not available: your files are on a different machine than the Slack bridge.");
+        const refusal = args.thread_ts ? await dmRefusal(args.channel, args.thread_ts) : null;
+        if (refusal) return refusal;
         const files = await validateSlackUploadFiles(args.paths.map((path) => ({ path })), ctx.uploadConfig);
         await slack.uploadFiles(args.channel, args.thread_ts ?? null, files, args.comment);
         ctx.noteVisibleAction();
