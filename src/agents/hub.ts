@@ -232,12 +232,15 @@ export class AgentHub {
       logError("agent failed to start", failed.at(-1)!);
     });
     if (this.seats.size === 0) throw new Error("No agent could be started");
-    // Every mind exists before the socket opens, so no event can arrive with nowhere to go.
-    await slack.connect();
-    // What the last run took from Slack but did not finish; one it did finish is recognized and skipped.
+    // Each mind takes back what its last run left unconfirmed as it starts, before any input can reach it. Its first
+    // hand-over to its runtime (a Codex app-server starting can take minutes) is waited for only after the socket is open.
+    const minds = Promise.allSettled([...this.seats.values()].map((seat) => seat.mind.start()));
+    // What the last run took from Slack but did not finish goes first, in the order it arrived; one it did finish is
+    // recognized and skipped. Then the socket opens, and live events queue behind it.
     for (const { id, kind, event } of unfinished) void this.enterIntake(kind, event as SlackInbound | SlackReaction, id);
+    await slack.connect();
     for (const { agent, error } of failed) await this.tellOperators(agent, `${agent} did not start: ${error}`);
-    await Promise.allSettled([...this.seats.values()].map((seat) => seat.mind.start()));
+    await minds;
 
     this.scheduler.start();
     if (this.config.webhooks && this.webhookWakes) {

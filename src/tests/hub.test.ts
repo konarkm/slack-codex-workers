@@ -109,7 +109,11 @@ class FakeSlack {
   async identify() {
     return this.identity();
   }
-  async connect() {}
+  // Runs while the socket is opening, for events that arrive then.
+  onConnect: (() => Promise<void>) | null = null;
+  async connect() {
+    await this.onConnect?.();
+  }
   async stop() {}
   async openDm(userId: string) {
     return `D-${userId}`;
@@ -125,7 +129,10 @@ class FakeSlack {
   async readHistory() {
     return this.history;
   }
+  // Holds posts open until released.
+  postGate: Promise<void> | null = null;
   async postMessage(args: { channelId: string; text: string; threadTs?: string | null; persona?: SlackPersona | null }) {
+    await this.postGate;
     this.posted.push(args);
     return { ts: `17267000${String(90 + this.posted.length).padStart(2, "0")}.000900`, permalink: null };
   }
@@ -743,6 +750,39 @@ describe("AgentHub", () => {
     expect(delivered("cody").map((input) => input.text).join("\n")).toContain("fix the deploy");
     expect(delivered("cody")).toHaveLength(1);
     expect((hub as unknown as { store: AgentStore }).store.listPendingIntake()).toHaveLength(0);
+  });
+
+  it("starts every mind before the saved backlog is taken in, so no saved input is handed over twice", async () => {
+    const saved = new AgentStore(path.join(dir, "agents.sqlite"));
+    saved.savePendingIntake("message", inbound({ text: "cody fix the deploy" }));
+    saved.close();
+    judge.next = { for: ["cody"] };
+    // A seat that cannot be built makes start tell the operators; that post is held open while the backlog runs.
+    let posted!: () => void;
+    slack.postGate = new Promise((resolve) => (posted = resolve));
+    const starting = startHub([...TEAM, { name: "remote", runtime: "codex", host: "ssh:grok-bot", cwd: "/home/x/agent" }]);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    slack.postGate = null;
+    posted();
+    await starting;
+    await flush();
+    expect(delivered("cody")).toHaveLength(1);
+  });
+
+  it("puts the saved backlog ahead of events that arrive as the socket opens", async () => {
+    const saved = new AgentStore(path.join(dir, "agents.sqlite"));
+    saved.savePendingIntake("message", inbound({ text: "cody OLD task: rebuild everything" }));
+    saved.close();
+    judge.next = { for: ["cody"] };
+    slack.onConnect = async () => {
+      void slack.handler!(inbound({ ts: "1726700005.000100", text: "cody NEW correction: only the api" }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    };
+    await startHub(TEAM);
+    await flush();
+    const texts = delivered("cody").map((input) => input.text);
+    expect(texts[0]).toContain("OLD task");
+    expect(texts.join("\n")).toContain("NEW correction");
   });
 
   it("keeps the owner's name on a DM session the person renamed, offers starters from the live roster, and lets an agent mark a session waiting or done", async () => {
