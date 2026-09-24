@@ -140,6 +140,8 @@ export class AgentHub {
   private readonly toolServer: ToolServer;
   private registry: AgentRegistry | null = null;
   private slack: AgentSlackClient | null = null;
+  // Operator commands being carried out now, so a second copy arriving meanwhile is not run too.
+  private readonly commandsRunning = new Set<string>();
   // Slack delivers events concurrently, and a mention twice. One line keeps order and makes the dedupe check reliable.
   private intake: Promise<void> = Promise.resolve();
   private stopped = false;
@@ -1001,9 +1003,24 @@ export class AgentHub {
     if (message.channelType !== "im" || !message.userId || !OPERATOR_COMMANDS.has(command)) return false;
     if (!this.config.adminUserIds.includes(message.userId)) return false;
     const slack = this.requireSlack();
-    // A redelivered command must not run twice.
-    if (!this.store.recordHandled("_bridge", sourceKey(message), message.text)) return true;
+    // A command runs once, however often Slack delivers it; one whose action failed runs again when Slack sends it again.
+    const key = sourceKey(message);
+    if (this.store.hasSource("_bridge", key) || this.commandsRunning.has(key)) return true;
+    this.commandsRunning.add(key);
+    try {
+      const reply = await this.runOperatorCommand(command, target);
+      this.store.recordHandled("_bridge", key, message.text);
+      await slack.postMessage({ channelId: message.channelId, threadTs: message.threadTs, text: `_bridge_\n${reply}` });
+    } catch (error) {
+      logError("operator command failed; a redelivery runs it again", { command, error: errorMessage(error) });
+    } finally {
+      this.commandsRunning.delete(key);
+    }
+    return true;
+  }
 
+  // Carries out one operator command and says what happened.
+  private async runOperatorCommand(command: string, target: string | undefined): Promise<string> {
     const name = target?.toLowerCase();
     const named = name ? this.seats.get(name) : undefined;
     // With one agent running, a command that names nobody is for it; a name that matches no running agent is for nobody.
@@ -1061,8 +1078,7 @@ export class AgentHub {
       const done = command === ".stop" ? "interrupt sent to" : command === ".compact" ? "compaction requested for" : command === ".retire" ? "retired" : "session forgotten for";
       reply = `${done} ${targets.map((seat) => seat.spec.name).join(", ")}`;
     }
-    await slack.postMessage({ channelId: message.channelId, threadTs: message.threadTs, text: `_bridge_\n${reply}` });
-    return true;
+    return reply;
   }
 }
 

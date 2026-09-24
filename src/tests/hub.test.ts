@@ -35,7 +35,10 @@ class FakeRuntime implements AgentRuntime {
     this.interrupted += 1;
     if (this.interruptError) throw this.interruptError;
   }
-  async compact(): Promise<void> {}
+  compactError: Error | null = null;
+  async compact(): Promise<void> {
+    if (this.compactError) throw this.compactError;
+  }
   state(): RuntimeState {
     return this.current;
   }
@@ -456,6 +459,20 @@ describe("AgentHub", () => {
     judge.next = { for: ["ada"] };
     await slack.handler!(inbound({ channelId: "D2", channelType: "im", ts: "1726700004.000100", userId: "USOMEONE", text: ".status" }));
     expect(delivered("ada")).toHaveLength(1);
+  });
+
+  it("runs an operator command again when Slack redelivers one whose action failed", async () => {
+    await startHub(TEAM);
+    const command = inbound({ channelId: "D1", channelType: "im", text: ".compact ada" });
+    runtimes.get("ada")!.compactError = new Error("app-server gone");
+    await slack.handler!(command).catch(() => {});
+    expect(slack.posted).toHaveLength(0);
+    runtimes.get("ada")!.compactError = null;
+    await slack.handler!(command);
+    expect(slack.posted.at(-1)!.text).toContain("compaction requested for ada");
+    // Once it has run, a further copy is ignored.
+    await slack.handler!(command);
+    expect(slack.posted).toHaveLength(1);
   });
 
   it("always brings a reaction on an agent's own message to that agent, once", async () => {
