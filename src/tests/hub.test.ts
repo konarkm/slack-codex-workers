@@ -817,6 +817,21 @@ describe("AgentHub", () => {
     await slack.titleHandler!({ channelId: "D1", threadTs: "1726700000.000100", title: "Build", userId: "UAPP" });
     expect(slack.titles).toEqual([{ channelId: "D1", threadTs: "1726700000.000100", title: "cody" }]);
   });
+
+  it("keeps an agent that retired itself retired when it also updates itself in the same turn", async () => {
+    await startHub(TEAM);
+    judge.next = { for: ["cody"] };
+    await slack.handler!(inbound({ text: "cody wrap up" }));
+    const cody = runtimes.get("cody")!;
+    await cody.tool("retire_agent").handler({ name: "cody", reason: "job done" } as never);
+    await cody.tool("update_agent").handler({ name: "cody", title: "former builder" } as never);
+    await cody.finishTurn();
+    await flush();
+    expect((hub as unknown as { seats: Map<string, unknown> }).seats.has("cody")).toBe(false);
+    judge.next = { for: ["cody"] };
+    await slack.handler!(inbound({ ts: "1726700001.000100", text: "cody one more thing" }));
+    expect(runtimes.get("cody")!.delivered.some((input) => input.text.includes("one more thing"))).toBe(false);
+  });
 });
 
 describe("decideWakes", () => {

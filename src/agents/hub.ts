@@ -371,8 +371,8 @@ export class AgentHub {
             args.instructions,
           );
           if (args.name === seat.spec.name) {
-            // Its own restart waits for this turn to end, or the tool result could never come back.
-            seat.retiring = false;
+            // Its own restart waits for this turn to end, or the tool result could never come back. An agent that retired
+            // itself earlier in the turn stays retired.
             this.pendingRestart.add(args.name);
             return `updated ${spec.name}. The change takes effect when this turn ends.`;
           }
@@ -567,6 +567,7 @@ export class AgentHub {
     // An agent that changed or retired itself during the turn is dealt with now that the turn is over.
     if (seat.retiring) {
       logInfo("agent retired itself", { agent: seat.spec.name });
+      this.pendingRestart.delete(seat.spec.name);
       void this.serial(seat.spec.name, () => this.stopSeatInstance(seat));
     } else if (this.pendingRestart.delete(seat.spec.name)) {
       const spec = this.requireRegistry().spec(seat.spec.name);
