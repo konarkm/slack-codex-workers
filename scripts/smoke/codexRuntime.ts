@@ -1,7 +1,8 @@
 // Live smoke test for CodexRuntime: wake, tool call, restart and resume (tools must survive the resume).
-// Usage: tsx scripts/smoke/claudeRuntime.ts <cwd> [model] [ssh-target]
+// Usage: tsx scripts/smoke/codexRuntime.ts <cwd> [model] [ssh-target]
 import { z } from "zod";
 import { CodexRuntime } from "../../src/runtimes/codexRuntime.js";
+import { ToolServer } from "../../src/agents/toolServer.js";
 import { DEFAULT_WAKE_POLICY, type AgentSpec, type AgentTool, type RuntimeEvents } from "../../src/agents/types.js";
 
 const [cwd, model = "gpt-5.6-luna", sshTarget] = process.argv.slice(2);
@@ -21,6 +22,7 @@ const spec: AgentSpec = {
   inheritUserConfig: false,
   // A smoke test gets no operator setup at all: its stub tools must be the only way out.
   denyTools: [],
+  retired: false,
 };
 
 const sent: string[] = [];
@@ -36,6 +38,16 @@ const tools: AgentTool[] = [
     },
   },
 ];
+
+// The runtimes reach their tools over MCP, as they do in the hub. With an ssh target, set TOOL_SERVER_PUBLIC_URL,
+// TOOL_SERVER_BIND_HOST, and TOOL_SERVER_PORT as for the hub so the other machine can reach this one.
+const toolServer = new ToolServer({
+  bindHost: process.env.TOOL_SERVER_BIND_HOST?.trim() || "127.0.0.1",
+  port: Number(process.env.TOOL_SERVER_PORT ?? 0),
+  publicUrl: process.env.TOOL_SERVER_PUBLIC_URL?.trim() || null,
+});
+await toolServer.start();
+const toolAccess = toolServer.grant(spec.name, spec.host, tools);
 
 function makeRuntime(sessionId: string | null): { runtime: CodexRuntime; turnDone: () => Promise<void>; session: () => string | null } {
   let resolveTurn: (() => void) | null = null;
@@ -53,6 +65,7 @@ function makeRuntime(sessionId: string | null): { runtime: CodexRuntime; turnDon
     sessionId,
     instructions: "This is a test harness with no real chat system behind it. You are a teammate reached through chat. Nothing you write is seen unless you call send_message. Keep messages to one sentence.",
     tools,
+    toolAccess,
     events,
   });
   return { runtime, turnDone: () => new Promise<void>((resolve) => { resolveTurn = resolve; }), session: () => session };
@@ -69,6 +82,7 @@ done = second.turnDone();
 await second.runtime.deliver({ text: "[DM] Konark: which channel did I ask you about the codeword in? Reply in DM.", id: "in-2", imagePaths: [], priority: "now" });
 await done;
 await second.runtime.stop();
+await toolServer.stop();
 
 console.log("SENT", JSON.stringify(sent, null, 2));
 const ok = sent.some((line) => /marmalade/i.test(line)) && sent.some((line) => /general/i.test(line) && /^DM|dm/i.test(line.split(":")[0] ?? ""));
