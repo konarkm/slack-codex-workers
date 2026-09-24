@@ -184,17 +184,29 @@ export class ClaudeRuntime implements AgentRuntime {
   private async buildUserMessage(input: RuntimeInput): Promise<SDKUserMessage> {
     const images = [];
     const skipped: string[] = [];
+    const unreadable: string[] = [];
     for (const imagePath of input.imagePaths) {
       const mediaType = IMAGE_MEDIA_TYPES[path.extname(imagePath).toLowerCase()];
-      // An image the API rejects fails the turn, and can keep failing the session once it is in the transcript.
-      if (!mediaType || (await fs.stat(imagePath)).size > MAX_INLINE_IMAGE_BYTES) {
-        skipped.push(imagePath);
+      let data: string;
+      try {
+        // An image the API rejects fails the turn, and can keep failing the session once it is in the transcript.
+        if (!mediaType || (await fs.stat(imagePath)).size > MAX_INLINE_IMAGE_BYTES) {
+          skipped.push(imagePath);
+          continue;
+        }
+        data = (await fs.readFile(imagePath)).toString("base64");
+      } catch {
+        // Gone or unreadable. Failing the hand-off would fail every retry of this input and of everything queued with it.
+        unreadable.push(imagePath);
         continue;
       }
-      const data = (await fs.readFile(imagePath)).toString("base64");
       images.push({ type: "image" as const, source: { type: "base64" as const, media_type: mediaType, data } });
     }
-    const withSkipped = skipped.length > 0 ? `${input.text}\n\n[bridge notice] Not attached inline (too large or an unsupported type); open from disk if you need them: ${skipped.join(", ")}` : input.text;
+    const withSkipped = [
+      input.text,
+      ...(skipped.length > 0 ? [`[bridge notice] Not attached inline (too large or an unsupported type); open from disk if you need them: ${skipped.join(", ")}`] : []),
+      ...(unreadable.length > 0 ? [`[bridge notice] Not attached; the file could not be read (it may have been removed): ${unreadable.join(", ")}`] : []),
+    ].join("\n\n");
     return {
       type: "user",
       message: { role: "user", content: images.length > 0 ? [{ type: "text", text: withSkipped }, ...images] : withSkipped },
