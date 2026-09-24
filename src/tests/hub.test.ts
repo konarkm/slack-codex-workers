@@ -12,6 +12,7 @@ class FakeRuntime implements AgentRuntime {
   delivered: RuntimeInput[] = [];
   unconfirmed: string[] = [];
   interrupted = 0;
+  interruptError: Error | null = null;
   // Holds stop() open until released, to widen the window while a seat is being replaced.
   stopGate: Promise<void> | null = null;
   private current: RuntimeState = "down";
@@ -31,6 +32,7 @@ class FakeRuntime implements AgentRuntime {
   }
   async interrupt(): Promise<void> {
     this.interrupted += 1;
+    if (this.interruptError) throw this.interruptError;
   }
   async compact(): Promise<void> {}
   state(): RuntimeState {
@@ -794,6 +796,17 @@ describe("AgentHub", () => {
     await command("1726700013.000100", ".delete cody");
     expect(slack.posted.at(-1)!.text).toContain("only agent listening");
     expect((hub as unknown as { seats: Map<string, unknown> }).seats.has("cody")).toBe(true);
+  });
+
+  it("still delivers a message when stopping the agent it names fails", async () => {
+    await startHub(TEAM);
+    judge.next = { for: ["cody"] };
+    await slack.handler!(inbound({ text: "cody rebuild everything" }));
+    runtimes.get("cody")!.interruptError = new Error("turn/interrupt timed out");
+    judge.next = { for: ["cody", "ada"], stop: ["cody"] };
+    await slack.handler!(inbound({ ts: "1726700002.000100", text: "cody stop, ada take over" }));
+    expect(delivered("ada")).toHaveLength(1);
+    expect(delivered("cody")).toHaveLength(2);
   });
 });
 

@@ -693,7 +693,8 @@ export class AgentHub {
         // A person telling a working agent to stop, in plain words, stops it. The message still reaches it, so it knows why.
         if (author.kind === "human" && (verdict.stop.get(spec.name) ?? 0) >= STOP_THRESHOLD) {
           logInfo("stop requested in conversation", { agent: spec.name });
-          await seat.mind.interrupt();
+          // A stop that fails must not keep the message from anyone it is for.
+          await seat.mind.interrupt().catch((error) => logWarn("stop in conversation failed", { agent: spec.name, error: errorMessage(error) }));
           decision = { ...decision, wake: true, reason: decision.wake ? decision.reason : "addressed" };
         }
         if (!decision.wake) continue;
