@@ -76,6 +76,15 @@ describe("webhook wakes", () => {
     expect(delivered).toHaveLength(2);
   });
 
+  it("lets a source name be created again after its owner was deleted", async () => {
+    await wakes.createSource("github", "ada");
+    writeHandler("github");
+    store.forgetAgent("ada");
+    const source = await wakes.createSource("github", "cody");
+    expect(source.ownerAgent).toBe("cody");
+    expect(fs.readFileSync(source.handlerPath, "utf8")).not.toContain("bad signature");
+  });
+
   it("passes a handler's rejection through and wakes nobody", async () => {
     await wakes.createSource("github", "ada");
     writeHandler("github");

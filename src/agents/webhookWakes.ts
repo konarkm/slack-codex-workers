@@ -66,7 +66,8 @@ export class WebhookWakes {
     if (this.store.getWebhookSource(source)) throw new Error(`Webhook source ${source} already exists.`);
     const handlerPath = path.join(this.config.storageDir, "sources", source, "handler.mjs");
     await fs.mkdir(path.dirname(handlerPath), { recursive: true });
-    await fs.writeFile(handlerPath, buildWebhookHandlerScaffold(source), { flag: "wx" });
+    // No catalog row means no source owns this name. A handler left behind by a deleted agent is replaced, not kept.
+    await fs.writeFile(handlerPath, buildWebhookHandlerScaffold(source));
     return this.store.createWebhookSource({ source, routeToken: randomBytes(18).toString("hex"), handlerPath, ownerAgent });
   }
 
