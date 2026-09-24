@@ -191,7 +191,9 @@ export function buildThreadContext(
   let included = earlier.slice(-limit);
   // A thread read for the first time keeps its opening message, which says what the thread is about.
   const root = kind === "thread" ? earlier.find((item) => item.ts === item.threadTs) : undefined;
-  if (root && !included.includes(root)) included = [root, ...earlier.slice(-(limit - 1))];
+  // slice(-0) would be the whole thread, so a budget of one keeps just the root.
+  const rest = Math.floor(limit) - 1;
+  if (root && !included.includes(root)) included = rest > 0 ? [root, ...earlier.slice(-rest)] : [root];
   return {
     kind,
     total: earlier.length,

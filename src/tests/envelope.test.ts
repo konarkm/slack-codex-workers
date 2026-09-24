@@ -95,6 +95,13 @@ describe("renderEnvelope", () => {
     expect(text.indexOf("<thread-context")).toBeLessThan(text.indexOf("<slack-message"));
   });
 
+  it("keeps a one-message budget to the thread's opening message", () => {
+    const history = [1, 2, 3, 4].map((n) => ({ ts: `1726600000.00000${n}`, threadTs: "1726600000.000001", userId: "U2", botId: null, username: null, text: `m${n}`, replyCount: 0, fileNames: [] }));
+    const threadContext = buildThreadContext("thread", history, null, "1726600000.000004", 1, () => "Priya (U2)", (value) => value);
+    expect(threadContext.messages.map((item) => item.text)).toEqual(["m1"]);
+    expect(threadContext.total).toBe(3);
+  });
+
   it("brings only what came after the agent's last-read marker, and names channel catch-up as such", () => {
     const history = [1, 2, 3, 4].map((n) => ({ ts: `1726600000.00000${n}`, threadTs: null, userId: "U2", botId: null, username: null, text: `m${n}`, replyCount: 0, fileNames: [] }));
     const missed = buildThreadContext("channel", history, "1726600000.000002", "1726600000.000004", 12, () => "Priya (U2)", (value) => value);
