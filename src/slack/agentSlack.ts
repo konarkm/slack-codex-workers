@@ -463,14 +463,19 @@ export class AgentSlackClient {
     return response.channel.id;
   }
 
-  async uploadFiles(channelId: string, threadTs: string | null, files: ValidatedSlackUploadFile[], comment?: string): Promise<void> {
-    await (this.app.client.files.uploadV2 as unknown as (args: Record<string, unknown>) => Promise<unknown>)({
+  // The ts is the message the upload became, when Slack has shared it by the time the upload completes; often it has not.
+  async uploadFiles(channelId: string, threadTs: string | null, files: ValidatedSlackUploadFile[], comment?: string): Promise<{ ts: string | null }> {
+    type Share = { ts?: string };
+    type Completed = { files?: Array<{ files?: Array<{ shares?: { public?: Record<string, Share[]>; private?: Record<string, Share[]> } }> }> };
+    const response = await (this.app.client.files.uploadV2 as unknown as (args: Record<string, unknown>) => Promise<Completed>)({
       token: this.botToken,
       channel_id: channelId,
       thread_ts: threadTs ?? undefined,
       initial_comment: comment?.trim() || undefined,
       file_uploads: files.map((file) => ({ file: file.path, filename: file.filename, title: file.title })),
     });
+    const shares = (response.files ?? []).flatMap((completed) => completed.files ?? []).flatMap((file) => [...(file.shares?.public?.[channelId] ?? []), ...(file.shares?.private?.[channelId] ?? [])]);
+    return { ts: shares.find((share) => share.ts)?.ts ?? null };
   }
 
   // Up to four starters shown at the top of the app's Messages tab. Best effort.

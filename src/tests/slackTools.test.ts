@@ -113,3 +113,26 @@ describe("edit_message and delete_message", () => {
     expect(slack.calls).toEqual(["edit 7.2", "delete 7.2"]);
   });
 });
+
+describe("upload_files", () => {
+  it("lets the other agents hear the upload's comment, as send_message does", async () => {
+    const file = path.join(os.tmpdir(), `slack-tools-${process.pid}.txt`);
+    fs.writeFileSync(file, "log");
+    try {
+      const slack = new ToolSlack();
+      const { run, sent } = toolsFor(slack);
+      expect(await run("upload_files", { channel: "C1", thread_ts: "3.1", paths: [file], comment: "ada, log attached" })).toBe("uploaded 1 file");
+      expect(sent).toHaveLength(1);
+      expect(sent[0]).toMatchObject({ channelId: "C1", threadTs: "3.1", text: "ada, log attached" });
+      // At the top level the relay needs the real message ts, since that is where a reply would thread.
+      slack.uploadTs = "4.4";
+      await run("upload_files", { channel: "C1", paths: [file], comment: "ada, another" });
+      expect(sent[1]).toEqual({ channelId: "C1", threadTs: null, ts: "4.4", text: "ada, another" });
+      // No comment, nothing to hear.
+      await run("upload_files", { channel: "C1", thread_ts: "3.1", paths: [file] });
+      expect(sent).toHaveLength(2);
+    } finally {
+      fs.rmSync(file, { force: true });
+    }
+  });
+});
