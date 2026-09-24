@@ -640,6 +640,22 @@ export class AgentHub {
       // A DM session belongs to one agent. Only it hears what is said there, whoever is named.
       const sessionOwner = isDm ? this.store.dmOwner(message.channelId, threadRoot) : null;
       if (sessionOwner && this.seats.has(sessionOwner)) listeners = listeners.filter((seat) => seat.spec.name === sessionOwner);
+      // An owner that is not listening keeps its thread: nobody else hears it. (A deleted owner's sessions are gone.)
+      const absentOwner = sessionOwner && !this.seats.has(sessionOwner) ? this.registry?.spec(sessionOwner) : null;
+      if (absentOwner?.retired) {
+        await slack.postMessage({ channelId: message.channelId, threadTs: threadRoot, text: `_bridge_\n${absentOwner.name} is retired. Revive ${absentOwner.name} to pick this up, or start a new thread to talk to someone else.` });
+        this.store.recordHandled(INTAKE, key, "");
+        return;
+      }
+      if (absentOwner) {
+        // Not running right now (it failed to start, or is between seats): the message waits in its inbox until it is back.
+        const fileNotes = [...message.files.map((file) => `${file.name} (not downloaded; ask for it if you need it)`), ...message.unavailableFiles.map((name) => `${name} (Slack gave no download link)`)];
+        const decision: WakeDecision = { wake: true, reason: "addressed", probability: null, source: "rules" };
+        const text = renderEnvelope({ message, channelName: null, author, decision, appUserId: identity.botUserId, names: new Map(), fileNotes, imageCount: 0, timezone: this.config.timezone, threadContext: null });
+        this.store.enqueue({ agent: absentOwner.name, sourceKey: key, wake: true, priority: "next", text, imagePaths: [] });
+        this.store.recordHandled(INTAKE, key, "");
+        return;
+      }
       if (listeners.length === 0) {
         this.store.recordHandled(INTAKE, key, "");
         return;

@@ -660,6 +660,36 @@ describe("AgentHub", () => {
     expect(after.delivered).toHaveLength(1);
   });
 
+  it("tells the person when a DM thread's owner is retired, and hands the thread to nobody else", async () => {
+    await startHub(TEAM);
+    judge.next = { for: ["cody"] };
+    await slack.handler!(inbound({ channelId: "D1", channelType: "im", text: "cody can you look at the build" }));
+    await runtimes.get("ada")!.tool("retire_agent").handler({ name: "cody", reason: "done" } as never);
+    const reply = inbound({ channelId: "D1", channelType: "im", ts: "1726700001.000100", threadTs: "1726700000.000100", text: "any update on the build?" });
+    await slack.handler!(reply);
+    await slack.handler!(reply);
+    await slack.handler!(inbound({ channelId: "D1", channelType: "im", ts: "1726700002.000100", threadTs: "1726700000.000100", text: "hello?" }));
+    expect(delivered("ada")).toHaveLength(0);
+    const notes = slack.posted.filter((post) => post.channelId === "D1" && post.threadTs === "1726700000.000100");
+    expect(notes).toHaveLength(2);
+    expect(notes[0]!.text).toBe("_bridge_\ncody is retired. Revive cody to pick this up, or start a new thread to talk to someone else.");
+    expect(notes[0]!.persona ?? null).toBeNull();
+  });
+
+  it("holds a DM for its owner while the owner has no seat, and wakes nobody else", async () => {
+    await startHub(TEAM);
+    judge.next = { for: ["cody"] };
+    await slack.handler!(inbound({ channelId: "D1", channelType: "im", text: "cody can you look at the build" }));
+    const internals = hub as unknown as { stopSeat(name: string): Promise<void>; launchSeat(spec: AgentSpec): Promise<void>; registry: AgentRegistry };
+    await internals.stopSeat("cody");
+    await slack.handler!(inbound({ channelId: "D1", channelType: "im", ts: "1726700001.000100", threadTs: "1726700000.000100", text: "any update on the build?" }));
+    expect(delivered("ada")).toHaveLength(0);
+    expect(slack.posted).toHaveLength(0);
+    await internals.launchSeat(internals.registry.spec("cody")!);
+    await flush();
+    expect(delivered("cody").map((input) => input.text).join("\n")).toContain("any update on the build?");
+  });
+
   it("keeps the owner's name on a DM session the person renamed, offers starters from the live roster, and lets an agent mark a session waiting or done", async () => {
     await startHub(TEAM);
     judge.next = { for: ["cody"] };
