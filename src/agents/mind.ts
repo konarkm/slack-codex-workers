@@ -61,6 +61,11 @@ export class AgentMind {
   private consecutiveFailures = 0;
   // Inbox rows behind each input handed to the runtime.
   private readonly inputRows = new Map<string, number[]>();
+  // Rows of a batch whose turn failed through some input's fault. Each goes alone until it is settled, so the fault is
+  // charged to the row that causes it, not to everything that happened to be queued with it.
+  private readonly isolating = new Set<number>();
+  // The input carrying changed instructions. They count as known only once the turn that took it has finished.
+  private instructionsInput: { id: string; hash: string } | null = null;
   // Something wrong with the runtime that it reported. It stays the last error, past good turns, until the runtime goes.
   private problem: string | null = null;
 
@@ -149,6 +154,7 @@ export class AgentMind {
   // The runtime holding the in-flight input is gone; that input goes back in the queue.
   private forgetInFlight(): void {
     this.inputRows.clear();
+    this.instructionsInput = null;
     this.problem = null;
   }
 
@@ -209,9 +215,15 @@ export class AgentMind {
       this.inputRows.delete(id);
       return ids;
     });
+    const instructions = this.instructionsInput;
+    if (instructions && event.consumedInputIds.includes(instructions.id)) {
+      this.instructionsInput = null;
+      if (event.status !== "failed") this.store.setInstructionsHash(this.spec.name, instructions.hash);
+    }
     if (event.status !== "failed") {
       // An operator's stop ends the work it interrupted; that input is not delivered again.
       this.store.markDelivered(rows);
+      for (const id of rows) this.isolating.delete(id);
       this.store.setAgentError(this.spec.name, this.problem);
       this.retryDelayMs = FIRST_RETRY_MS;
       this.consecutiveFailures = 0;
@@ -219,7 +231,11 @@ export class AgentMind {
     }
     const reason = event.error ?? "the turn failed";
     this.store.setAgentError(this.spec.name, reason);
-    const abandoned = this.store.requeue(rows, event.inputFault, MAX_INPUT_FAULTS);
+    // Which row of a batch caused an input fault is unknown, so none is charged; each is sent alone to find out.
+    const batchFault = event.inputFault && rows.length > 1;
+    if (batchFault) for (const id of rows) this.isolating.add(id);
+    const abandoned = this.store.requeue(rows, event.inputFault && !batchFault, MAX_INPUT_FAULTS);
+    for (const item of abandoned) this.isolating.delete(item.id);
     if (abandoned.length > 0) {
       const message = `Gave up on ${abandoned.length} input(s) that made ${MAX_INPUT_FAULTS} turns fail (${reason}): ${abandoned.map((item) => item.sourceKey).join(", ")}`;
       logError(message, { agent: this.spec.name });
@@ -281,25 +297,36 @@ export class AgentMind {
     this.retryDelayMs = Math.min(this.retryDelayMs * 2, MAX_RETRY_MS);
   }
 
-  private instructionsUpdate(): string[] {
+  // The changed-instructions note for the input `inputId`, if the session has yet to be handed the current ones.
+  private instructionsUpdate(inputId: string): string[] {
     const hash = createHash("sha256").update(this.instructions).digest("hex").slice(0, 16);
-    const known = this.store.instructionsHash(this.spec.name);
-    if (known === hash) return [];
-    this.store.setInstructionsHash(this.spec.name, hash);
+    if (this.store.instructionsHash(this.spec.name) === hash || this.instructionsInput?.hash === hash) return [];
     // A session that has not started yet reads them as it starts.
-    const running = Boolean(this.store.getAgentState(this.spec.name)?.sessionId);
-    return running ? [`${INSTRUCTIONS_CHANGED_NOTE}\n\n${this.instructions}`] : [];
+    if (!this.store.getAgentState(this.spec.name)?.sessionId) {
+      this.store.setInstructionsHash(this.spec.name, hash);
+      return [];
+    }
+    this.instructionsInput = { id: inputId, hash };
+    return [`${INSTRUCTIONS_CHANGED_NOTE}\n\n${this.instructions}`];
   }
 
-  // Context-only items wait in the inbox and ride along with the next item that wakes the agent.
+  // Context-only items wait in the inbox and ride along with the next item that wakes the agent. While a faulty row is
+  // being looked for, the rows of the failed batch go one at a time, each after the one before it has finished.
+  private nextBatch(queued: InboxItem[]): InboxItem[] | null {
+    const inFlight = new Set([...this.inputRows.values()].flat());
+    for (const id of this.isolating) if (!inFlight.has(id) && !queued.some((item) => item.id === id)) this.isolating.delete(id);
+    if (this.isolating.size > 0) return inFlight.size > 0 ? null : queued.filter((item) => this.isolating.has(item.id)).slice(0, 1);
+    return queued.some((item) => item.wake) ? queued : null;
+  }
+
   private async deliverQueued(): Promise<void> {
     if (this.stopped || Date.now() < this.holdUntil) return;
-    const batch = this.store.listQueued(this.spec.name);
-    if (!batch.some((item) => item.wake)) return;
+    const batch = this.nextBatch(this.store.listQueued(this.spec.name));
+    if (!batch) return;
     const runtime = this.ensureRuntime();
     const inputId = randomUUID();
     const notes = [
-      ...this.instructionsUpdate(),
+      ...this.instructionsUpdate(inputId),
       ...(batch.some((item) => item.attempts > 0) ? [REDELIVERY_NOTE] : []),
       renderBatch(batch),
       ...(runtime.state() === "running" ? [MID_TURN_NOTE] : []),
@@ -317,6 +344,7 @@ export class AgentMind {
       });
     } catch (error) {
       this.inputRows.delete(inputId);
+      if (this.instructionsInput?.id === inputId) this.instructionsInput = null;
       this.store.returnUndelivered(rowIds);
       // A runtime replaced meanwhile (a reset) failing says nothing about its successor, which takes the input next.
       if (runtime !== this.runtime) {

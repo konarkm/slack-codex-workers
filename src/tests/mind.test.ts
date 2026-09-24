@@ -378,6 +378,73 @@ describe("AgentMind", () => {
     await mind.stop();
   });
 
+  it("hands over changed instructions again when the input carrying them did not get through", async () => {
+    vi.useFakeTimers();
+    try {
+      const store = new AgentStore(":memory:");
+      store.setAgentSession("ada", "session-1");
+      store.setInstructionsHash("ada", "stale");
+      const runtimes: FakeRuntime[] = [];
+      const mind = new AgentMind(spec, store, (options) => {
+        const runtime = new FakeRuntime(options);
+        runtimes.push(runtime);
+        return runtime;
+      }, "new rules", [], ACCESS);
+      await mind.start();
+      runtimes[0]!.failNextDeliver = true;
+      await receive(mind, { sourceKey: "a", wake: true, priority: "next", text: "one", imagePaths: [] });
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(runtimes[0]!.delivered[0]!.text).toContain("new rules");
+      // The turn that carried them failed, so the retry carries them again.
+      await runtimes[0]!.failTurn();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(runtimes[0]!.delivered[1]!.text).toContain("new rules");
+      mind.noteVisibleAction();
+      await runtimes[0]!.finishTurn();
+      await receive(mind, { sourceKey: "b", wake: true, priority: "next", text: "two", imagePaths: [] });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(runtimes[0]!.delivered.at(-1)!.text).toBe("two");
+      await mind.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("charges an input fault in a batch only to the row that causes it, by sending the batch's rows one at a time", async () => {
+    vi.useFakeTimers();
+    try {
+      const abandoned: string[] = [];
+      const { mind, runtimes, store } = setup({ onAbandoned: (_agent, items) => void abandoned.push(...items.map((item) => item.sourceKey)) });
+      store.enqueue({ agent: "ada", sourceKey: "fine", wake: true, priority: "next", text: "a plain question", imagePaths: [] });
+      store.enqueue({ agent: "ada", sourceKey: "bad", wake: true, priority: "next", text: "a rejected image", imagePaths: ["/tmp/bad.png"] });
+      await mind.start();
+      const runtime = runtimes[0]!;
+      expect(runtime.delivered[0]!.text).toContain("a plain question");
+      expect(runtime.delivered[0]!.text).toContain("a rejected image");
+      await runtime.failTurn(true);
+      expect(store.getInboxItem(1)!.faults).toBe(0);
+      expect(store.getInboxItem(2)!.faults).toBe(0);
+      await vi.advanceTimersByTimeAsync(300_000);
+      expect(runtime.delivered[1]!.text).toContain("a plain question");
+      expect(runtime.delivered[1]!.text).not.toContain("a rejected image");
+      mind.noteVisibleAction();
+      await runtime.finishTurn();
+      await vi.advanceTimersByTimeAsync(0);
+      for (let round = 0; round < 3; round += 1) {
+        expect(runtime.delivered.at(-1)!.text).toContain("a rejected image");
+        expect(runtime.delivered.at(-1)!.text).not.toContain("a plain question");
+        await runtime.failTurn(true);
+        await vi.advanceTimersByTimeAsync(300_000);
+      }
+      expect(store.getInboxItem(1)!.status).toBe("delivered");
+      expect(store.getInboxItem(2)!.status).toBe("failed");
+      expect(abandoned).toEqual(["bad"]);
+      await mind.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("delivers what a reset put back in the queue to the new session right away", async () => {
     const { mind, runtimes } = setup();
     await receive(mind, { sourceKey: "a", wake: true, priority: "next", text: "stuck input", imagePaths: [] });
