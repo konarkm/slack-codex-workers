@@ -18,6 +18,15 @@ export interface WakePolicy {
 
 export const DEFAULT_WAKE_POLICY: WakePolicy = { natural: true, threshold: 0.5 };
 
+// The model an agent runs when its entry names none. The roster file's `defaults` overrides these per runtime.
+export const DEFAULT_MODELS: Record<RuntimeKind, string> = { claude: "claude-opus-5-5", codex: "gpt-6-sol" };
+
+// How hard an agent thinks, as each harness names it. A model may support fewer levels than its harness does.
+export const EFFORT_LEVELS: Record<RuntimeKind, readonly string[]> = {
+  claude: ["low", "medium", "high", "xhigh", "max"],
+  codex: ["low", "medium", "high", "xhigh", "max", "ultra"],
+};
+
 export interface AgentSpec {
   name: string;
   title: string | null;

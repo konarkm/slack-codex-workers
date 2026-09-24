@@ -16,7 +16,7 @@ import { RuleJudge, type JudgeInput, type JudgeMessage, type Verdict, type WakeJ
 import { AgentMind, type RuntimeFactory } from "./mind.js";
 import { AgentRegistry, agentNamePattern } from "./registry.js";
 import { buildSlackTools } from "./slackTools.js";
-import type { AgentSpec, AgentTool, RuntimeState } from "./types.js";
+import { EFFORT_LEVELS, type AgentSpec, type AgentTool, type RuntimeKind, type RuntimeState } from "./types.js";
 import { WakeScheduler, buildWakeTools } from "./wakes.js";
 import { WebhookWakes, buildWebhookTools } from "./webhookWakes.js";
 
@@ -71,6 +71,24 @@ const CHANNEL_CATCH_UP_SECONDS = 24 * 60 * 60;
 // The index of who spoke where keeps this much.
 const MESSAGE_INDEX_DAYS = 30;
 const WHATS_NEW_CONVERSATIONS = 15;
+
+const effortShape = z
+  .string()
+  .min(1)
+  .optional()
+  .describe(
+    `How hard it thinks. Claude: ${EFFORT_LEVELS.claude.join(", ")}. Codex: ${EFFORT_LEVELS.codex.join(", ")}. "default" leaves it to the model.`,
+  );
+
+// "default" in a model or effort argument clears the agent's own setting.
+function resetToDefault(value: string | undefined): string | null | undefined {
+  return value === "default" ? null : value;
+}
+
+function checkEffort(runtime: RuntimeKind, effort: string | undefined): string | null {
+  if (effort === undefined || effort === "default" || EFFORT_LEVELS[runtime].includes(effort)) return null;
+  return `${runtime} agents take effort ${EFFORT_LEVELS[runtime].join(", ")}, or "default"; not "${effort}".`;
+}
 
 export function personaOf(spec: AgentSpec): SlackPersona {
   return { username: spec.name, icon: spec.icon };
@@ -318,26 +336,34 @@ export class AgentHub {
               const live = this.seats.get(other.name);
               // An agent at rest has no process running; it still wakes the moment it is addressed, so it is never shown as "down".
               const state = other.retired ? "retired" : live?.mind.state() === "running" ? "working right now" : "available, wakes when addressed";
-              return `${other.name}${other.name === seat.spec.name ? " (you)" : ""} · ${other.title ?? "teammate"} · ${other.model ?? other.runtime} · ${state}`;
+              return `${other.name}${other.name === seat.spec.name ? " (you)" : ""} · ${other.title ?? "teammate"} · ${other.model ?? other.runtime}${other.effort ? ` (${other.effort} effort)` : ""} · ${state}`;
             })
             .join("\n"),
       }),
       define({
         name: "update_agent",
         description:
-          "Repurpose an agent, yourself included: change its role line, its standing instructions, its model, or its icon. The agent keeps its name, memory, and session and is told its instructions changed. Say in Slack what you changed and why.",
+          "Repurpose an agent, yourself included: change its role line, its standing instructions, its model, its effort, or its icon. The agent keeps its name, memory, and session and is told its instructions changed. Say in Slack what you changed and why.",
         shape: {
           name: z.string().regex(agentNamePattern),
           title: z.string().min(1).optional().describe("New role line."),
           instructions: z.string().min(1).optional().describe("New standing instructions, replacing the old ones in full."),
-          model: z.string().optional().describe("New model for its runtime."),
+          model: z.string().min(1).optional().describe('New model for its runtime, or "default" for the runtime\'s default.'),
+          effort: effortShape,
           icon: z.string().optional(),
         },
         handler: async (args) => {
           const registry = this.requireRegistry();
-          if (!registry.has(args.name)) return `no agent named ${args.name}`;
-          if (args.title === undefined && args.instructions === undefined && args.model === undefined && args.icon === undefined) return "nothing to change";
-          const spec = registry.update(args.name, { title: args.title, model: args.model, icon: args.icon }, args.instructions);
+          const known = registry.spec(args.name);
+          if (!known) return `no agent named ${args.name}`;
+          if (args.title === undefined && args.instructions === undefined && args.model === undefined && args.effort === undefined && args.icon === undefined) return "nothing to change";
+          const effortProblem = checkEffort(known.runtime, args.effort);
+          if (effortProblem) return effortProblem;
+          const spec = registry.update(
+            args.name,
+            { title: args.title, model: resetToDefault(args.model), effort: resetToDefault(args.effort), icon: args.icon },
+            args.instructions,
+          );
           if (args.name === seat.spec.name) {
             // Its own restart waits for this turn to end, or the tool result could never come back.
             seat.retiring = false;
@@ -432,12 +458,16 @@ export class AgentHub {
           title: z.string().min(1).describe("Short role line, e.g. release manager."),
           runtime: z.enum(["claude", "codex"]),
           model: z.string().optional().describe("Omit for the runtime's default."),
+          effort: effortShape,
           icon: z.string().optional().describe("Emoji name such as :satellite:, or an image URL."),
           instructions: z.string().min(1).describe("The new agent's standing instructions: what it owns, how it works, who it answers to."),
         },
         handler: async (args) => {
           if (!this.registry) throw new Error("the hub is not started");
-          const spec = this.registry.add({ name: args.name, title: args.title, runtime: args.runtime, model: args.model, icon: args.icon, createdBy: seat.spec.name }, args.instructions);
+          const effortProblem = checkEffort(args.runtime, args.effort);
+          if (effortProblem) return effortProblem;
+          const effort = resetToDefault(args.effort) ?? undefined;
+          const spec = this.registry.add({ name: args.name, title: args.title, runtime: args.runtime, model: resetToDefault(args.model) ?? undefined, effort, icon: args.icon, createdBy: seat.spec.name }, args.instructions);
           await this.launchSeat(spec);
           logInfo("agent created by an agent", { agent: spec.name, createdBy: seat.spec.name });
           return `created ${spec.name}. It is listening now; say its name in a message to reach it.`;

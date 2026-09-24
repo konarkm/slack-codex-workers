@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
-import { DEFAULT_DENY_TOOLS, DEFAULT_WAKE_POLICY, type AgentHost, type AgentSpec } from "./types.js";
+import { DEFAULT_DENY_TOOLS, DEFAULT_MODELS, DEFAULT_WAKE_POLICY, type AgentHost, type AgentSpec, type RuntimeKind } from "./types.js";
 
 export const agentNamePattern = /^[a-z][a-z0-9-]{0,31}$/;
 
@@ -12,6 +12,7 @@ const agentSchema = z.object({
   // Emoji name such as ":brain:", or an image URL.
   icon: z.string().min(1).optional(),
   runtime: z.enum(["claude", "codex"]),
+  // Omitted: the runtime's default from the file's `defaults`, else DEFAULT_MODELS.
   model: z.string().min(1).optional(),
   effort: z.string().min(1).optional(),
   // "local", or "ssh:<target>" where target is anything `ssh` accepts (a tailnet host, user@host, a config alias).
@@ -33,11 +34,19 @@ const registrySchema = z.object({
     .default({ botTokenEnv: "SLACK_BOT_TOKEN", appTokenEnv: "SLACK_APP_TOKEN" }),
   // Who answers a direct message that is not clearly for anyone. Defaults to the first agent.
   defaultAgent: z.string().min(1).optional(),
+  // The model and effort an agent gets when its own entry names none, per runtime.
+  defaults: z
+    .object({
+      claude: z.object({ model: z.string().min(1).optional(), effort: z.string().min(1).optional() }).optional(),
+      codex: z.object({ model: z.string().min(1).optional(), effort: z.string().min(1).optional() }).optional(),
+    })
+    .optional(),
   agents: z.array(agentSchema),
 });
 
 export type AgentConfigEntry = z.input<typeof agentSchema>;
 type RegistryFile = z.infer<typeof registrySchema>;
+type RuntimeDefaults = NonNullable<RegistryFile["defaults"]>;
 
 function parseHost(value: string): AgentHost {
   return value === "local" ? { kind: "local" } : { kind: "ssh", target: value.slice("ssh:".length) };
@@ -47,7 +56,8 @@ function expandHome(value: string): string {
   return value === "~" || value.startsWith("~/") ? path.join(os.homedir(), value.slice(1)) : value;
 }
 
-function toSpec(entry: RegistryFile["agents"][number], agentsRoot: string): AgentSpec {
+function toSpec(entry: RegistryFile["agents"][number], agentsRoot: string, defaults: RuntimeDefaults = {}): AgentSpec {
+  const runtimeDefaults = defaults[entry.runtime as RuntimeKind];
   const host = parseHost(entry.host);
   if (host.kind === "ssh" && !entry.cwd) throw new Error(`Agent ${entry.name} runs over ssh and needs an explicit cwd on that host`);
   // A remote cwd is a path on the remote machine; leave it for that machine's shell to interpret.
@@ -57,8 +67,8 @@ function toSpec(entry: RegistryFile["agents"][number], agentsRoot: string): Agen
     title: entry.title ?? null,
     icon: entry.icon ?? null,
     runtime: entry.runtime,
-    model: entry.model ?? null,
-    effort: entry.effort ?? null,
+    model: entry.model ?? runtimeDefaults?.model ?? DEFAULT_MODELS[entry.runtime],
+    effort: entry.effort ?? runtimeDefaults?.effort ?? null,
     host,
     cwd,
     wake: { ...DEFAULT_WAKE_POLICY, ...entry.wake },
@@ -92,7 +102,7 @@ export class AgentRegistry {
   }
 
   specs(): AgentSpec[] {
-    return this.file.agents.map((entry) => toSpec(entry, this.agentsRoot));
+    return this.file.agents.map((entry) => toSpec(entry, this.agentsRoot, this.file.defaults));
   }
 
   defaultAgent(): string | null {
@@ -107,7 +117,7 @@ export class AgentRegistry {
 
   spec(name: string): AgentSpec | null {
     const entry = this.file.agents.find((candidate) => candidate.name === name);
-    return entry ? toSpec(entry, this.agentsRoot) : null;
+    return entry ? toSpec(entry, this.agentsRoot, this.file.defaults) : null;
   }
 
   // Changes what an agent is: its role, instructions, model, icon. Instructions given as text replace the agent's own file.
@@ -129,7 +139,7 @@ export class AgentRegistry {
       entry.instructions = instructionsPath;
     }
     this.write();
-    return toSpec(entry, this.agentsRoot);
+    return toSpec(entry, this.agentsRoot, this.file.defaults);
   }
 
   // Removes an agent from the roster. Its home directory is the caller's to deal with.
@@ -139,7 +149,7 @@ export class AgentRegistry {
     const [entry] = this.file.agents.splice(index, 1);
     if (this.file.defaultAgent === name) this.file.defaultAgent = undefined;
     this.write();
-    return toSpec(entry!, this.agentsRoot);
+    return toSpec(entry!, this.agentsRoot, this.file.defaults);
   }
 
   private write(): void {
@@ -158,7 +168,7 @@ export class AgentRegistry {
       fs.writeFileSync(instructionsPath, `${instructionsText.trim()}\n`);
       parsed.instructions = instructionsPath;
     }
-    const spec = toSpec(parsed, this.agentsRoot);
+    const spec = toSpec(parsed, this.agentsRoot, this.file.defaults);
     this.file.agents.push(parsed);
     this.write();
     return spec;

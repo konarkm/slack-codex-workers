@@ -540,6 +540,26 @@ describe("AgentHub", () => {
     expect(text).not.toContain("last week's argument");
   });
 
+  it("gives agents the runtime's default model, and lets an agent set another's model and effort", async () => {
+    await startHub(TEAM);
+    judge.next = { for: ["ada"] };
+    await slack.handler!(inbound({ text: "ada hi" }));
+    const ada = runtimes.get("ada")!;
+    expect(ada.options.spec.model).toBe("claude-opus-5-5");
+    expect(runtimes.get("cody")!.options.spec.model).toBe("gpt-6-sol");
+    // Effort is checked against what the agent's harness accepts.
+    expect(await ada.tool("update_agent").handler({ name: "ada", effort: "ultra" } as never)).toContain('claude agents take effort low, medium, high, xhigh, max, or "default"');
+    expect(await ada.tool("update_agent").handler({ name: "cody", model: "gpt-6-astra", effort: "ultra" } as never)).toContain("running with the change");
+    expect(runtimes.get("cody")!.options.spec).toMatchObject({ model: "gpt-6-astra", effort: "ultra" });
+    expect(await ada.tool("list_agents").handler({} as never)).toContain("cody · builder · gpt-6-astra (ultra effort)");
+    // "default" hands both back to the runtime's default.
+    await ada.tool("update_agent").handler({ name: "cody", model: "default", effort: "default" } as never);
+    expect(runtimes.get("cody")!.options.spec).toMatchObject({ model: "gpt-6-sol", effort: null });
+    expect(JSON.parse(fs.readFileSync(path.join(dir, "agents.json"), "utf8")).agents.find((entry: { name: string }) => entry.name === "cody")).not.toHaveProperty("model");
+    expect(await ada.tool("create_agent").handler({ name: "scout", title: "researcher", runtime: "claude", effort: "high", instructions: "You research." } as never)).toContain("created scout");
+    expect(runtimes.get("scout")!.options.spec).toMatchObject({ model: "claude-opus-5-5", effort: "high" });
+  });
+
   it("lets an agent repurpose, retire, revive, and delete agents, and keeps a retired one from hearing anything", async () => {
     await startHub(TEAM);
     judge.next = { for: ["ada"] };
@@ -556,7 +576,7 @@ describe("AgentHub", () => {
     judge.next = { for: ["cody"] };
     await slack.handler!(inbound({ ts: "1726700001.000100", text: "cody are you there" }));
     expect(codyRuntime.delivered).toHaveLength(0);
-    expect(await ada.tool("list_agents").handler({} as never)).toContain("cody · release manager · codex · retired");
+    expect(await ada.tool("list_agents").handler({} as never)).toContain("cody · release manager · gpt-6-sol · retired");
     expect(JSON.parse(fs.readFileSync(path.join(dir, "agents.json"), "utf8")).agents.find((entry: { name: string }) => entry.name === "cody")).toMatchObject({ retired: true, retiredReason: "release done" });
     // The last agent listening cannot retire.
     expect(await ada.tool("retire_agent").handler({ name: "ada", reason: "bored" } as never)).toContain("only agent listening");
