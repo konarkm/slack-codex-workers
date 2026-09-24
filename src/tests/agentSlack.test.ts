@@ -35,3 +35,20 @@ describe("AgentSlackClient.readHistory in a thread", () => {
     expect(earlier.map((message) => message.text)).toEqual(Array.from({ length: 30 }, (_, index) => `m${200 + index}`));
   });
 });
+
+describe("AgentSlackClient.getPerson", () => {
+  it("does not remember a failed lookup, so a bot is not taken for a human for the life of the process", async () => {
+    let fail = true;
+    const client = clientWith({
+      users: {
+        info: async () => {
+          if (fail) throw new Error("ratelimited");
+          return { user: { name: "deploybot", is_bot: true, profile: { display_name: "Deploy Bot" } } };
+        },
+      },
+    });
+    expect(await client.getPerson("UBOT")).toMatchObject({ name: "UBOT", isBot: false });
+    fail = false;
+    expect(await client.getPerson("UBOT")).toMatchObject({ name: "Deploy Bot", isBot: true });
+  });
+});

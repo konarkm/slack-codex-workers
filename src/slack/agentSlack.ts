@@ -333,21 +333,22 @@ export class AgentSlackClient {
   async getPerson(userId: string): Promise<SlackPerson> {
     const cached = this.people.get(userId);
     if (cached) return cached;
-    let person: SlackPerson = { id: userId, name: userId, isBot: false, title: null };
     try {
       const response = await this.app.client.users.info({ token: this.botToken, user: userId });
       const user = response.user;
-      person = {
+      const person = {
         id: userId,
         name: user?.profile?.display_name?.trim() || user?.profile?.real_name?.trim() || user?.name?.trim() || userId,
         isBot: Boolean(user?.is_bot),
         title: user?.profile?.title?.trim() || null,
       };
+      this.people.set(userId, person);
+      return person;
     } catch (error) {
       logError("slack users.info failed", { agent: this.agentName, userId, error: error instanceof Error ? error.message : String(error) });
+      // Not remembered: the next lookup asks again, so a bot is not taken for a human for good.
+      return { id: userId, name: userId, isBot: false, title: null };
     }
-    this.people.set(userId, person);
-    return person;
   }
 
   async getConversation(channelId: string): Promise<SlackConversationInfo> {
