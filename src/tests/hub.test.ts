@@ -760,6 +760,15 @@ describe("AgentHub", () => {
     expect(latest).not.toBe(replaced);
     expect(latest.delivered.map((input) => input.text).join("\n")).toContain("and the tests?");
   });
+
+  it("does not queue scheduled wakes for a retired agent", async () => {
+    await startHub(TEAM);
+    await runtimes.get("cody")!.tool("schedule_wake").handler({ every_minutes: 5, note: "check the build" } as never);
+    await runtimes.get("ada")!.tool("retire_agent").handler({ name: "cody", reason: "done" } as never);
+    const internals = hub as unknown as { scheduler: { tick(now: Date): Promise<number> }; store: { listQueued(agent: string): unknown[] } };
+    await internals.scheduler.tick(new Date(Date.now() + 10 * 60_000));
+    expect(internals.store.listQueued("cody")).toHaveLength(0);
+  });
 });
 
 describe("decideWakes", () => {

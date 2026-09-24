@@ -153,7 +153,10 @@ export class AgentHub {
   ) {
     this.store = new AgentStore(config.databasePath);
     const deliverWake = async (agent: string, item: { sourceKey: string; text: string }): Promise<void> => {
-      if (!this.registry?.has(agent)) throw new Error(`agent ${agent} is not in the registry`);
+      const known = this.registry?.spec(agent);
+      if (!known) throw new Error(`agent ${agent} is not in the registry`);
+      // A retired agent hears nothing, so its wakes do not pile up to arrive all at once when it is revived.
+      if (known.retired) return;
       const input = { ...item, wake: true, priority: "later" as const, imagePaths: [] };
       const seat = this.seats.get(agent);
       // The inbox is the durable step. An agent that is down finds the wake waiting when it starts.
