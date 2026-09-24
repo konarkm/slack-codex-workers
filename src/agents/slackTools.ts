@@ -119,6 +119,10 @@ export function buildSlackTools(ctx: SlackToolContext): AgentTool[] {
       description: "Remove one of your own emoji reactions from a message.",
       shape: { channel, ts: messageTs, emoji: z.string().min(1) },
       handler: async (args) => {
+        const message = await slack.lookupMessage(args.channel, args.ts);
+        if (!message) return "no such message";
+        const refusal = await dmRefusal(args.channel, message.threadTs ?? message.ts);
+        if (refusal) return refusal;
         await slack.removeReaction(args.channel, args.ts, args.emoji);
         return "removed";
       },

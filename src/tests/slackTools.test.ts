@@ -37,6 +37,9 @@ class ToolSlack {
   async addReaction(_channelId: string, ts: string) {
     this.calls.push(`react ${ts}`);
   }
+  async removeReaction(_channelId: string, ts: string) {
+    this.calls.push(`unreact ${ts}`);
+  }
   async updateMessage(_channelId: string, ts: string) {
     this.calls.push(`edit ${ts}`);
   }
@@ -88,11 +91,12 @@ describe("Slack tools in another agent's DM session", () => {
     expect(slack.calls).not.toContain("readHistory");
   });
 
-  it("keep react, upload, edit, and delete out of it", async () => {
+  it("keep react, remove_reaction, upload, edit, and delete out of it", async () => {
     const slack = new ToolSlack();
     slack.messages.set("5.2", botMessage("5.2", "ada", "5.1"));
     const { run } = toolsFor(slack);
     expect(await run("react", { channel: "D1", ts: "5.2", emoji: "eyes" })).toContain("ada's session");
+    expect(await run("remove_reaction", { channel: "D1", ts: "5.2", emoji: "eyes" })).toContain("ada's session");
     expect(await run("upload_files", { channel: "D1", thread_ts: "5.1", paths: ["nothing.txt"], comment: "here" })).toContain("ada's session");
     expect(await run("edit_message", { channel: "D1", ts: "5.2", text: "mine now" })).not.toBe("edited");
     expect(await run("delete_message", { channel: "D1", ts: "5.2" })).not.toBe("deleted");
