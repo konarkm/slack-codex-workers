@@ -930,11 +930,18 @@ export class AgentHub {
     // A redelivered command must not run twice.
     if (!this.store.recordHandled("_bridge", sourceKey(message), message.text)) return true;
 
-    const named = target ? this.seats.get(target.toLowerCase()) : undefined;
-    const targets = named ? [named] : target === "all" || command === ".status" || this.seats.size === 1 ? [...this.seats.values()] : [];
+    const name = target?.toLowerCase();
+    const named = name ? this.seats.get(name) : undefined;
+    // With one agent running, a command that names nobody is for it; a name that matches no running agent is for nobody.
+    const targets = named ? [named] : name === "all" || (!name && (command === ".status" || this.seats.size === 1)) ? [...this.seats.values()] : [];
+    // As with the tools, at least one agent must be left listening.
+    const remaining = this.liveAgents().filter((agent) => !targets.some((seat) => seat.spec.name === agent));
     let reply: string;
     if (targets.length === 0 && command !== ".revive" && command !== ".delete") {
-      reply = `Which agent? Try \`${command} <name>\` or \`${command} all\`. Agents: ${[...this.seats.keys()].join(", ")}`;
+      if (!name || name === "all") reply = `Which agent? Try \`${command} <name>\` or \`${command} all\`. Agents: ${[...this.seats.keys()].join(", ")}`;
+      else reply = this.registry?.has(name) ? `${name} is not running` : `no agent named ${name}`;
+    } else if (command === ".retire" && remaining.length === 0) {
+      reply = `${targets.map((seat) => seat.spec.name).join(", ")} would leave no agent listening, and nobody would hear anyone. Create or revive another first.`;
     } else if (command === ".status") {
       reply = targets
         .map((seat) => {
@@ -947,9 +954,9 @@ export class AgentHub {
         .join("\n");
     } else if (command === ".revive" || command === ".delete") {
       const registry = this.requireRegistry();
-      const name = target?.toLowerCase() ?? "";
-      const known = registry.spec(name);
-      if (!known) reply = `no agent named ${name}`;
+      const known = name ? registry.spec(name) : null;
+      if (!name || !known) reply = `no agent named ${name ?? ""}`;
+      else if (command === ".delete" && remaining.length === 0) reply = `${name} is the only agent listening; create or revive another first.`;
       else if (command === ".revive") {
         if (!known.retired) reply = `${name} is not retired`;
         else {

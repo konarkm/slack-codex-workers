@@ -769,6 +769,32 @@ describe("AgentHub", () => {
     await internals.scheduler.tick(new Date(Date.now() + 10 * 60_000));
     expect(internals.store.listQueued("cody")).toHaveLength(0);
   });
+
+  it("acts on the only running agent only when an operator command names nobody", async () => {
+    await startHub([TEAM[0], { ...TEAM[1], retired: true }]);
+    const command = (ts: string, text: string) => slack.handler!(inbound({ channelId: "D1", channelType: "im", ts, text }));
+    await command("1726700010.000100", ".retire cody");
+    expect(slack.posted.at(-1)!.text).toContain("cody is not running");
+    await command("1726700011.000100", ".reset typo");
+    expect(slack.posted.at(-1)!.text).toContain("no agent named typo");
+    expect(JSON.parse(fs.readFileSync(path.join(dir, "agents.json"), "utf8")).agents.find((entry: { name: string }) => entry.name === "ada")).not.toHaveProperty("retired");
+    await command("1726700012.000100", ".stop");
+    expect(runtimes.get("ada")!.interrupted).toBe(1);
+  });
+
+  it("will not let an operator retire or delete the last agent listening", async () => {
+    await startHub(TEAM);
+    const command = (ts: string, text: string) => slack.handler!(inbound({ channelId: "D1", channelType: "im", ts, text }));
+    await command("1726700010.000100", ".retire all");
+    expect(slack.posted.at(-1)!.text).toContain("nobody would hear anyone");
+    await command("1726700011.000100", ".retire ada");
+    expect(slack.posted.at(-1)!.text).toContain("retired ada");
+    await command("1726700012.000100", ".retire cody");
+    expect(slack.posted.at(-1)!.text).toContain("nobody would hear anyone");
+    await command("1726700013.000100", ".delete cody");
+    expect(slack.posted.at(-1)!.text).toContain("only agent listening");
+    expect((hub as unknown as { seats: Map<string, unknown> }).seats.has("cody")).toBe(true);
+  });
 });
 
 describe("decideWakes", () => {
