@@ -93,8 +93,10 @@ export class AgentMind {
     this.stopped = true;
     if (this.retryTimer) clearTimeout(this.retryTimer);
     this.retryTimer = null;
-    await this.pumping?.catch(() => {});
+    // The runtime goes first: a hand-off waiting on it (a Codex app-server still starting) then fails at once instead
+    // of holding the stop until it times out.
     await this.detachRuntime()?.stop();
+    await this.pumping?.catch(() => {});
   }
 
   state(): RuntimeState {

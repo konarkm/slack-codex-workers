@@ -33,12 +33,15 @@ class FakeRuntime implements AgentRuntime {
   async start(): Promise<void> {
     if (this.current === "down") await this.set("idle");
   }
+  private abort: ((error: Error) => void) | null = null;
   async stop(): Promise<void> {
+    // Like the Codex runtime, a stop settles a hand-off still waiting on the runtime to start.
+    this.abort?.(new Error("runtime stopped"));
     await this.set("down");
   }
   async deliver(input: RuntimeInput): Promise<void> {
     await this.start();
-    await this.gate;
+    if (this.gate) await Promise.race([this.gate, new Promise<void>((_resolve, reject) => (this.abort = reject))]);
     if (this.failNextDeliver || this.failDeliveries > 0) {
       this.failNextDeliver = false;
       this.failDeliveries = Math.max(this.failDeliveries - 1, 0);
@@ -467,5 +470,14 @@ describe("AgentMind", () => {
     expect(runtimes).toHaveLength(2);
     expect(runtimes[1]!.delivered[0]!.text).toContain("stuck input");
     await mind.stop();
+  });
+  it("stops without waiting for a hand-off that is stuck on the runtime starting", async () => {
+    const { mind, runtimes } = setup();
+    await mind.start();
+    runtimes[0]!.gate = new Promise<void>(() => {});
+    await mind.receive({ sourceKey: "a", wake: true, priority: "next", text: "first", imagePaths: [] });
+    await flush();
+    await mind.stop();
+    expect(runtimes[0]!.state()).toBe("down");
   });
 });
