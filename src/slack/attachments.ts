@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import fsPromises from "node:fs/promises";
 import path from "node:path";
@@ -83,7 +84,8 @@ async function downloadSlackAttachment(
   config: AttachmentConfig,
   remainingBudget: number,
 ): Promise<DownloadedAttachment> {
-  const safeName = `${Date.now()}-${sanitizeFileName(file.name)}`;
+  // Two downloads of the same name can start in the same millisecond, so the time alone does not make the path unique.
+  const safeName = `${Date.now()}-${randomUUID().slice(0, 8)}-${sanitizeFileName(file.name)}`;
   const filePath = path.join(config.attachmentStorageDir, safeName);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), config.attachmentDownloadTimeoutMs);
