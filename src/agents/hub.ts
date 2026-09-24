@@ -487,12 +487,25 @@ export class AgentHub {
   }
 
   // Only the home the bridge made for a deleted agent is the bridge's to remove, and not while another agent works in it.
+  // Paths are compared as the filesystem resolves them, since a symlink or another spelling can name the same folder. When
+  // that cannot be settled, the folder stays.
   private removeHome(name: string): void {
     const home = path.resolve(this.config.agentsRoot, name);
-    const inUse = this.requireRegistry()
-      .specs()
-      .some((other) => other.cwd === home || other.cwd.startsWith(`${home}${path.sep}`));
-    if (!inUse) fs.rmSync(home, { recursive: true, force: true });
+    if (!fs.existsSync(home)) return;
+    try {
+      const real = realPath(home);
+      const inUse = this.requireRegistry()
+        .specs()
+        .some((other) => {
+          const cwd = realPath(other.cwd);
+          return cwd === real || cwd.startsWith(`${real}${path.sep}`);
+        });
+      if (inUse) return;
+    } catch (error) {
+      logWarn("kept a deleted agent's home; could not tell whether another agent uses it", { agent: name, error: errorMessage(error) });
+      return;
+    }
+    fs.rmSync(home, { recursive: true, force: true });
   }
 
   private liveAgents(): string[] {
@@ -993,6 +1006,22 @@ export class AgentHub {
     }
     await slack.postMessage({ channelId: message.channelId, threadTs: message.threadTs, text: `_bridge_\n${reply}` });
     return true;
+  }
+}
+
+// The real path of the nearest part that exists, with the rest as written: a cwd need not exist yet to lie inside a folder.
+function realPath(target: string): string {
+  const rest: string[] = [];
+  let existing = path.resolve(target);
+  for (;;) {
+    try {
+      return path.join(fs.realpathSync(existing), ...rest);
+    } catch (error) {
+      const parent = path.dirname(existing);
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT" || parent === existing) throw error;
+      rest.unshift(path.basename(existing));
+      existing = parent;
+    }
   }
 }
 

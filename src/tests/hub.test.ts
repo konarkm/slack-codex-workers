@@ -718,6 +718,27 @@ describe("AgentHub", () => {
     expect(slack.posted.some((post) => post.channelId === "D-UHUMAN" && post.text.includes("remote did not start"))).toBe(true);
   });
 
+  it("keeps a home another agent reaches by another path: a symlink, or another spelling of it", async () => {
+    const adaHome = path.join(dir, "homes", "ada");
+    fs.mkdirSync(adaHome, { recursive: true });
+    fs.symlinkSync(adaHome, path.join(dir, "ada-alias"), "dir");
+    // On macOS the temp directory itself sits behind a symlink (/var is /private/var).
+    const scoutWork = path.join(fs.realpathSync(dir), "homes", "scout", "work");
+    await startHub([
+      { name: "ada", runtime: "claude" },
+      { name: "cody", runtime: "codex", cwd: path.join(dir, "ada-alias") },
+      { name: "scout", runtime: "claude" },
+      { name: "rex", runtime: "claude", cwd: scoutWork },
+    ]);
+    fs.writeFileSync(path.join(adaHome, "cody-notes.md"), "cody's notes");
+    await slack.handler!(inbound({ channelId: "D1", channelType: "im", text: ".delete ada" }));
+    expect(slack.posted.at(-1)!.text).toContain("deleted ada");
+    expect(fs.existsSync(path.join(adaHome, "cody-notes.md"))).toBe(true);
+    await slack.handler!(inbound({ channelId: "D1", channelType: "im", ts: "1726700001.000100", text: ".delete scout" }));
+    expect(slack.posted.at(-1)!.text).toContain("deleted scout");
+    expect(fs.existsSync(scoutWork)).toBe(true);
+  });
+
   it("deletes only the home the bridge made for an agent, never a directory another agent works in", async () => {
     const adaHome = path.join(dir, "homes", "ada");
     await startHub([
