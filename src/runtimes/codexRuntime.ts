@@ -40,6 +40,8 @@ export class CodexRuntime implements AgentRuntime {
   private resumeFailures = 0;
   // Inputs taken by the current turn (the one that started it and any steered in).
   private turnInputIds: string[] = [];
+  // Bumped by stop(), so a start still under way gives up what it built instead of bringing a stopped runtime back.
+  private generation = 0;
   private chain: Promise<void> = Promise.resolve();
 
   constructor(
@@ -67,6 +69,7 @@ export class CodexRuntime implements AgentRuntime {
   }
 
   async stop(): Promise<void> {
+    this.generation += 1;
     const rpc = this.rpc;
     this.rpc = null;
     this.activeTurnId = null;
@@ -76,6 +79,7 @@ export class CodexRuntime implements AgentRuntime {
 
   async deliver(input: RuntimeInput): Promise<void> {
     await this.start();
+    if (!this.rpc) throw new Error("codex app-server is not running");
     const items = [
       { type: "text", text: input.text, text_elements: [] },
       // Local paths only resolve on the agent's own host.
@@ -130,6 +134,7 @@ export class CodexRuntime implements AgentRuntime {
 
   private async startInner(): Promise<void> {
     const { spec } = this.options;
+    const generation = this.generation;
     const rpc = this.createRpc?.() ?? new CodexRpcClient(this.codexBin, spec.cwd, CLIENT_INFO, () =>
       spawnOnHost({ host: spec.host, command: this.codexBin, args: ["app-server", ...this.toolServerArgs(), ...this.denyArgs()], cwd: spec.cwd, env: this.spawnEnv() }),
     );
@@ -154,13 +159,19 @@ export class CodexRuntime implements AgentRuntime {
         await this.setState("down");
       })();
     });
-    await rpc.start();
-    this.rpc = rpc;
+    const stopped = () => {
+      if (this.generation !== generation) throw new Error("codex runtime was stopped while starting");
+    };
     try {
+      await rpc.start();
+      stopped();
+      this.rpc = rpc;
       await this.openThread(rpc);
+      stopped();
     } catch (error) {
-      // Leave nothing half-started behind; the next attempt spawns a fresh app-server.
-      this.rpc = null;
+      // Leave nothing half-started behind (an app-server that never answered initialize included); the next attempt
+      // spawns a fresh one.
+      if (this.rpc === rpc) this.rpc = null;
       await rpc.stop().catch(() => {});
       throw error;
     }
@@ -177,9 +188,12 @@ export class CodexRuntime implements AgentRuntime {
         logInfo("codex thread resumed", { agent: spec.name, threadId: this.threadId });
         return;
       } catch (error) {
+        const kind = classifyCodexError(error);
+        // A slow app-server or an expired login says nothing about the thread, so those never count toward giving it up.
+        if (kind === "transient" || kind === "auth") throw error;
         this.resumeFailures += 1;
-        // Codex words this failure differently across versions, so repeated failures of any kind also give up on the thread.
-        if (classifyCodexError(error) !== "session_missing" && this.resumeFailures < 3) throw error;
+        // Codex words this failure differently across versions, so repeated failures of other kinds also give up on the thread.
+        if (kind !== "session_missing" && this.resumeFailures < 3) throw error;
         logError("codex thread cannot be resumed; starting a new one", { agent: spec.name, threadId: this.threadId, error: errorMessage(error) });
         await events.onProblem(`Codex thread ${this.threadId} could not be resumed (${errorMessage(error)}). A new thread was started.`);
         this.resumeFailures = 0;

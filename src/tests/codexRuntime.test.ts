@@ -24,8 +24,16 @@ class FakeRpc extends EventEmitter {
   requests: Array<{ method: string; params: any }> = [];
   responses: Array<{ id: string | number; result: any }> = [];
   failNext: Record<string, string> = {};
-  async start(): Promise<void> {}
-  async stop(): Promise<void> {}
+  starting: Promise<void> = Promise.resolve();
+  failStart: string | null = null;
+  stops = 0;
+  async start(): Promise<void> {
+    await this.starting;
+    if (this.failStart) throw new Error(this.failStart);
+  }
+  async stop(): Promise<void> {
+    this.stops += 1;
+  }
   async request<T>(method: string, params: unknown): Promise<T> {
     this.requests.push({ method, params });
     const failure = this.failNext[method];
@@ -47,7 +55,7 @@ function setup(sessionId: string | null) {
   const rpc = new FakeRpc();
   const states: RuntimeState[] = [];
   const sessions: Array<string | null> = [];
-  const turns: Array<{ status: string; finalText: string; consumedInputIds: string[] }> = [];
+  const turns: Array<{ status: string; finalText: string; consumedInputIds: string[]; inputFault: boolean }> = [];
   const problems: string[] = [];
   const events: RuntimeEvents = {
     onSessionChanged: (id) => void sessions.push(id),
@@ -69,7 +77,7 @@ function setup(sessionId: string | null) {
     "codex",
     () => rpc as unknown as CodexRpc,
   );
-  return { rpc, runtime, states, sessions, turns, problems };
+  return { rpc, runtime, states, sessions, turns, problems, events };
 }
 
 const ACCESS = { url: "http://127.0.0.1:3015/mcp", token: "secret" };
@@ -219,6 +227,38 @@ describe("CodexRuntime", () => {
     const { rpc, runtime } = setup("thread-old");
     await runtime.start();
     expect(rpc.requests[0]).toMatchObject({ method: "thread/resume", params: { threadId: "thread-old", developerInstructions: "be a teammate", approvalPolicy: "never", sandbox: "danger-full-access" } });
+  });
+
+  it("stops an app-server that fails to initialize", async () => {
+    const { rpc, runtime } = setup(null);
+    rpc.failStart = "RPC request timed out: initialize";
+    await expect(runtime.start()).rejects.toThrow(/initialize/);
+    expect(rpc.stops).toBe(1);
+  });
+
+  it("stops, and does not use, an app-server that was still starting when the runtime was stopped", async () => {
+    const { rpc, runtime } = setup("thread-old");
+    let release!: () => void;
+    rpc.starting = new Promise<void>((resolve) => (release = resolve));
+    const delivery = runtime.deliver({ id: "in-one", text: "one", imagePaths: [], priority: "next" });
+    await flush();
+    await runtime.stop();
+    release();
+    await expect(delivery).rejects.toThrow();
+    expect(rpc.requests.map((r) => r.method)).toEqual([]);
+    expect(rpc.stops).toBe(1);
+    expect(runtime.state()).toBe("down");
+  });
+
+  it("keeps the thread through timeouts and login failures on resume", async () => {
+    const { rpc, runtime, sessions } = setup("thread-old");
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      rpc.failNext["thread/resume"] = attempt % 2 === 0 ? "RPC request timed out: thread/resume" : "401 Unauthorized";
+      await expect(runtime.start()).rejects.toThrow();
+    }
+    await runtime.start();
+    expect(sessions).toEqual([]);
+    expect(runtime.sessionId()).toBe("thread-old");
   });
 
   it("classifies Codex error text", () => {
