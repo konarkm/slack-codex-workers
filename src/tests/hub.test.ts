@@ -808,6 +808,15 @@ describe("AgentHub", () => {
     expect(delivered("ada")).toHaveLength(1);
     expect(delivered("cody")).toHaveLength(2);
   });
+
+  it("leaves a session title the bridge set alone", async () => {
+    await startHub(TEAM);
+    judge.next = { for: ["cody"] };
+    await slack.handler!(inbound({ channelId: "D1", channelType: "im", text: "cody look at the build" }));
+    await slack.titleHandler!({ channelId: "D1", threadTs: "1726700000.000100", title: "cody", userId: null });
+    await slack.titleHandler!({ channelId: "D1", threadTs: "1726700000.000100", title: "Build", userId: "UAPP" });
+    expect(slack.titles).toEqual([{ channelId: "D1", threadTs: "1726700000.000100", title: "cody" }]);
+  });
 });
 
 describe("decideWakes", () => {

@@ -200,6 +200,8 @@ export class AgentHub {
     slack.onSessionTitleChanged(async (change) => {
       const owner = this.store.dmOwner(change.channelId, change.threadTs);
       if (!owner || change.title.toLowerCase().startsWith(`${owner} ·`)) return;
+      // The bridge's own rename, a new session titled with the bare owner name, may come back as an event.
+      if (change.title.toLowerCase() === owner || change.userId === slack.identity().botUserId) return;
       await slack.renameSession(change.channelId, change.threadTs, `${owner} · ${change.title}`.slice(0, 200)).catch(() => {});
     });
     // Starters at the top of the DM, built from whoever is on the roster right now.
